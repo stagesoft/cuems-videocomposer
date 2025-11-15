@@ -10,7 +10,7 @@ namespace videocomposer {
 namespace test {
 
 /**
- * Simple test framework for xjadeo C++ components
+ * Simple test framework for videocomposer C++ components
  */
 class TestFramework {
 public:

@@ -389,9 +389,9 @@ struct osc_command {
 };
 
 static struct osc_command OSCC[] = {
-  {"/jadeo/quit", "", &oscb_quit, "Terminate xjadeo."},
+  {"/jadeo/quit", "", &oscb_quit, "Terminate videocomposer."},
   {"/jadeo/load", "s", &oscb_load, "Load a video file, replacing any previous one (load <filename>)"},
-  {"/jadeo/seek", "i", &oscb_seek, "Seek to given frame-number (seek <frame>) - Xjadeo needs to be disconnected from a sync-source"},
+  {"/jadeo/seek", "i", &oscb_seek, "Seek to given frame-number (seek <frame>) - videocomposer needs to be disconnected from a sync-source"},
   {"/jadeo/cmd", "s", &oscb_remotecmd, "Call a remote control command"},
 
   {"/jadeo/fps", "f", &oscb_fps, "Set the screen update frequency (-f, set fps)"},
@@ -493,7 +493,7 @@ void xjosc_shutdown (void) {
 }
 
 void xjosc_documentation (void) {
-  printf("# Xjadeo OSC methods. Format:\n");
+  printf("# videocomposer OSC methods. Format:\n");
   printf("# Path <space> Typespec <space> Documentation <newline>\n");
   printf("#######################################################\n");
   int i;
@@ -507,7 +507,7 @@ int  xjosc_initialize(int osc_port) {return(1);}
 void xjosc_shutdown(void) {;}
 int  xjosc_process(void) {return(0);}
 void xjosc_documentation (void) {
-  printf("# This version of xjadeo is compiled without OSC support.\n");
+  printf("# This version of videocomposer is compiled without OSC support.\n");
 }
 #endif
 

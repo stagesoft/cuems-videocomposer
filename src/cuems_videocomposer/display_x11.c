@@ -91,8 +91,8 @@ static void vc_set_hints (void) {
 	XTextProperty	x_wname, x_iname;
 	XSizeHints	hints;
 	XWMHints	wmhints;
-	char *w_name ="xjadeo";
-	char *i_name ="xjadeo";
+	char *w_name ="videocomposer";
+	char *i_name ="videocomposer";
 
 	/* default settings which allow arbitraray resizing of the window */
 	hints.flags = PSize | PMaxSize | PMinSize;

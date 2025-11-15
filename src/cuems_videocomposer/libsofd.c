@@ -400,7 +400,7 @@ static char     _rv_open[1024] = "";
 
 static char     _fib_cfg_custom_places[1024] = "";
 static char     _fib_cfg_custom_font[256] = "";
-static char     _fib_cfg_title[128] = "xjadeo - Open Video File";
+static char     _fib_cfg_title[128] = "videocomposer - Open Video File";
 
 typedef struct {
 	char name[256];

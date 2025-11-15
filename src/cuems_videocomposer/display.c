@@ -294,7 +294,7 @@ void dump_vopts (void) {
 
 	while (VO[++i].supported >= 0) {
 		fprintf (stdout, " --vo %i # %s %s\n", i, VO[i].name,
-				VO[i].supported ? "(supported by this xjadeo)" : "(NOT compiled in this xjadeo)");
+				VO[i].supported ? "(supported by this videocomposer)" : "(NOT compiled in this videocomposer)");
 	}
 }
 

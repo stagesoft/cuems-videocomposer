@@ -338,7 +338,7 @@ bool test_MTCDecoder() {
 }
 
 int main(int argc, char** argv) {
-    std::cout << "xjadeo MIDI Test Suite" << std::endl;
+    std::cout << "videocomposer MIDI Test Suite" << std::endl;
     std::cout << "======================" << std::endl;
     
     bool allPassed = true;

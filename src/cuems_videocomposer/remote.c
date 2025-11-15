@@ -361,7 +361,7 @@ void xapi_swinpos(void *d) {
 }
 
 void xapi_exit(void *d) {
-	remote_printf(489,"exit is not a xjadeo command - use 'quit' to terminate this session.");
+	remote_printf(489,"exit is not a videocomposer command - use 'quit' to terminate this session.");
 }
 
 void xapi_quit(void *d) {
@@ -938,10 +938,10 @@ static Dcommand cmd_get[] = {
 	{"osdcfg", ": display status on screen display", NULL, xapi_posd, 0 },
 	{"syncsource", ": display currently used sync source", NULL, xapi_psync, 0 },
 	{"letterbox" , ": query video scaling mode", NULL, xapi_pletterbox, 0 },
-	{"fullscreen" , ": is xjadeo displayed on full screen", NULL, xapi_pfullscreen, 0 },
+	{"fullscreen" , ": is videocomposer displayed on full screen", NULL, xapi_pfullscreen, 0 },
 	{"ontop" , ": query window on top mode", NULL, xapi_pontop, 0 },
 	{"override", ": query disabled window events", NULL, xapi_poverride , 0 },
-	{"version", ": query xjadeo version", NULL, xapi_printversion , 0 },
+	{"version", ": query videocomposer version", NULL, xapi_printversion , 0 },
 	{"appinfo", ": query version details", NULL, xapi_versiondetails , 0 },
 	{NULL, NULL, NULL , NULL, 0}
 };
@@ -952,7 +952,7 @@ static Dcommand cmd_notify[] = {
 	{"frame" , ": subscribe to async frame-update messages", NULL, xapi_bidir_frame, 0 },
 	{"keyboard" , ": subscribe to async key-press notifications", NULL, xapi_bidir_keyboard, 0 },
 	{"loop" , ": enable continuous frame position messages", NULL, xapi_bidir_loop, 0 },
-	{"settings" , ": receive a dump of current settings when xjadeo shuts down", NULL, xapi_bidir_settings, 0 },
+	{"settings" , ": receive a dump of current settings when videocomposer shuts down", NULL, xapi_bidir_settings, 0 },
 	{"noframe" , ": stop frame-update message subscription", NULL, xapi_bidir_noframe, 0 },
 	{"noloop" , ": disable continuous frame position messages", NULL, xapi_bidir_noloop, 0 },
 	{"nokeyboard" , ": disable async key-press notification messages", NULL, xapi_bidir_nokeyboard, 0 },
@@ -990,7 +990,7 @@ static Dcommand cmd_set[] = {
 };
 
 static Dcommand cmd_root[] = {
-	// note: keep 'seek' on top of the list - if an external app wants seek a lot, xjadeo will
+	// note: keep 'seek' on top of the list - if an external app wants seek a lot, videocomposer will
 	// not spend time comparing command strings - OTOH I/O takes much longer than this anyway :X
 	{"seek ", "<int>: seek to this frame - if jack and midi are offline", NULL, xapi_seek , 0 },
 	{"load ", "<filename>: replace current video file", NULL , xapi_open, 0 },
@@ -1002,15 +1002,15 @@ static Dcommand cmd_root[] = {
 	{"midi", " .. : midi sync commands", cmd_midi, NULL, 0 },
 	{"ltc", " ..  : LTC sync commands", cmd_ltc, NULL, 0 },
 	{"notify", " .. : async remote info messages", cmd_notify, NULL, 0 },
-	{"get", " .. : query xjadeo variables or state", cmd_get, NULL, 0 },
-	{"set", " .. : set xjadeo variables", cmd_set, NULL, 0 },
+	{"get", " .. : query videocomposer variables or state", cmd_get, NULL, 0 },
+	{"set", " .. : set videocomposer variables", cmd_set, NULL, 0 },
 	{"reverse", ": set timescale to reverse playback (*)", NULL , xapi_sreverse, 0 },
 
 	{"list videomodes" , ": displays a list of available video modes", NULL, xapi_lvideomodes, 0 },
 	{"ping", ": claim a pong", NULL , xapi_ping, 0 },
 	{"help", ": generate this remote-control API documentation", NULL , api_help, 0 },
-	{"exit", ": close remote-session (keep xjadeo running, with MQ and IPC)", NULL , xapi_exit, 0 },
-	{"quit", ": terminate xjadeo", NULL , xapi_quit, 0 },
+	{"exit", ": close remote-session (keep videocomposer running, with MQ and IPC)", NULL , xapi_exit, 0 },
+	{"quit", ": terminate videocomposer", NULL , xapi_quit, 0 },
 	{NULL, NULL, NULL , NULL, 0},
 };
 
@@ -1038,7 +1038,7 @@ static void api_help_recursive(Dcommand *r, const char *prefix) {
 
 static void api_help(void *d) {
 	remote_printf(100, "print help");
-	remote_printf(800, "+ xjadeo remote control commands:");
+	remote_printf(800, "+ videocomposer remote control commands:");
 	api_help_recursive(cmd_root,"");
 }
 
@@ -1156,7 +1156,7 @@ static void remote_printf_io(int rv, const char *format, ...) {
 void open_remote_ctrl (void) {
 	inbuf=malloc(sizeof(remotebuffer));
 	inbuf->offset=0;
-	remote_printf_io(800, "xjadeo - remote control (type 'help<enter>' for info)");
+	remote_printf_io(800, "videocomposer - remote control (type 'help<enter>' for info)");
 }
 
 void close_remote_ctrl (void) {
@@ -1209,7 +1209,7 @@ int remote_read_mq(void) {
 
 void open_mq_ctrl (void) {
 	if(mymq_init(NULL)) mq_en=0;
-	else remote_printf_mq(800, "xjadeo - remote control (type 'help<enter>' for info)");
+	else remote_printf_mq(800, "videocomposer - remote control (type 'help<enter>' for info)");
 }
 
 void close_mq_ctrl (void) {

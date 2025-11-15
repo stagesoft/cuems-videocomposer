@@ -54,7 +54,7 @@ int mymq_init(char *id) {
 	// TODO use session ID in path.
 	// implement session authenticaion? - allow user to specify umask.
 	char qname[64];
-	snprintf(qname,64,"/xjadeo-request%s%s", id?"-":"", id?(char*)id:"");
+	snprintf(qname,64,"/videocomposer-request%s%s", id?"-":"", id?(char*)id:"");
 
 	mqfd_r = mq_open(qname, O_RDONLY | O_CREAT | O_EXCL | O_NONBLOCK, S_IRWXU , NULL);
 	if (mqfd_r == -1) {
@@ -70,7 +70,7 @@ int mymq_init(char *id) {
 	mq_msgsize_r = mqat.mq_msgsize;
 	msg_buffer = malloc(mq_msgsize_r);
 
-	snprintf(qname,64,"/xjadeo-reply%s%s", id?"-":"", id?(char*)id:"");
+	snprintf(qname,64,"/videocomposer-reply%s%s", id?"-":"", id?(char*)id:"");
 
 	mqfd_s = mq_open(qname, O_WRONLY | O_CREAT | O_EXCL | O_NONBLOCK, S_IRWXU , NULL);
 	if (mqfd_s == -1) {
@@ -78,7 +78,7 @@ int mymq_init(char *id) {
 		if (errno == EEXIST)
 			fprintf(stderr,"note: use `xjremote -u` to unlink old queues\n");
 		mq_close(mqfd_r);
-		snprintf(qname,64,"/xjadeo-request%s%s", id?"-":"", id?(char*)id:"");
+		snprintf(qname,64,"/videocomposer-request%s%s", id?"-":"", id?(char*)id:"");
 		mq_unlink(qname);
 		return(1);
 	}
@@ -110,11 +110,11 @@ void mymq_close(void) {
 		perror("mq_close failure on mqfd_s");
 
 	//FIXME : use mqID
-	//	snprintf(qname,64,"/xjadeo-request%s%s", id?"-":"", id?(char*)id:"");
-	if (mq_unlink("/xjadeo-request") == -1)
+	//	snprintf(qname,64,"/videocomposer-request%s%s", id?"-":"", id?(char*)id:"");
+	if (mq_unlink("/videocomposer-request") == -1)
 		perror("mq_unlink failure");
 
-	if (mq_unlink("/xjadeo-reply") == -1)
+	if (mq_unlink("/videocomposer-reply") == -1)
 		perror("mq_unlink failure");
 
 	if (!want_quiet)

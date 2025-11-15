@@ -356,7 +356,7 @@ void videocomposerrc (void) {
 	const char * homedrive = getenv("HOMEDRIVE");
 	const char * homepath = getenv("HOMEPATH");
 	if (homedrive && homepath && (strlen(homedrive) + strlen(homepath) + strlen(XJADEORC) + 25) < PATH_MAX) {
-		sprintf(filename, "%s%s" PATHSEP "Local Settings" PATHSEP "xjadeo" PATHSEP "%s", homedrive, homepath, XJADEORC);
+		sprintf(filename, "%s%s" PATHSEP "Local Settings" PATHSEP "videocomposer" PATHSEP "%s", homedrive, homepath, XJADEORC);
 		if (testfile(filename)) readconfig(filename);
 	}
 	if (homedrive && homepath && (strlen(homedrive) + strlen(homepath) + strlen(XJADEORC) + 16) < PATH_MAX) {
@@ -371,7 +371,7 @@ void videocomposerrc (void) {
 	// unices - use XDG_CONFIG_HOME
 	const char *xdg = getenv("XDG_CONFIG_HOME");
 	if (xdg && (strlen(xdg) + strlen(XJADEORC) + 8) < PATH_MAX) {
-		sprintf(filename, "%s" PATHSEP "xjadeo" PATHSEP "%s", xdg, XJADEORC);
+		sprintf(filename, "%s" PATHSEP "videocomposer" PATHSEP "%s", xdg, XJADEORC);
 		if (testfile(filename)) readconfig(filename);
 	}
 	// fall back if XDG_CONFIG_HOME is unset
@@ -382,7 +382,7 @@ void videocomposerrc (void) {
 	}
 #else
 	if (!xdg && home && (strlen(home) + strlen(XJADEORC) + 16) < PATH_MAX) {
-		sprintf(filename, "%s" PATHSEP ".config" PATHSEP "xjadeo" PATHSEP "%s", xdg, XJADEORC);
+		sprintf(filename, "%s" PATHSEP ".config" PATHSEP "videocomposer" PATHSEP "%s", xdg, XJADEORC);
 		if (testfile(filename)) readconfig(filename);
 	}
 #endif
@@ -403,7 +403,7 @@ int saveconfig (const char *fn) {
 			fprintf(stderr,"writing configfile failed: %s (%s)\n",fn,strerror(errno));
 		return -1;
 	}
-	fprintf(fp, "# config file for xjadeo\n#\n# lines beginning with '#' or ';' are ignored.\n#\n");
+	fprintf(fp, "# config file for videocomposer\n#\n# lines beginning with '#' or ';' are ignored.\n#\n");
 
 	fprintf(fp, "\n## Settings ##\n");
 	fprintf(fp, "MOVIEFILE=%s\n", current_file);

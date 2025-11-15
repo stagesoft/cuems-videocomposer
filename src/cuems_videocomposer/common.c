@@ -192,7 +192,7 @@ void*            pFrameFMT = NULL;  // AVFrame* - using void* for compatibility
 const char* const cfg_features = "OpenGL,X11,ALSA-Sequencer,OSC";
 const char* const cfg_displays = "OpenGL,X11";
 const char* const cfg_midi = "ALSA-Sequencer,mtcreceiver";
-char             cfg_compat[64] = "xjadeo-compatible";
+char             cfg_compat[64] = "videocomposer-compatible";
 
 /* Function implementation for have_open_file (declared in xjadeo.h) */
 int have_open_file(void) {

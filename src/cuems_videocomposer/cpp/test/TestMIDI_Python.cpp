@@ -268,7 +268,7 @@ bool test_MTC_Reception_Python() {
 extern bool test_MTCDecoder();
 
 int main(int argc, char** argv) {
-    std::cout << "xjadeo MIDI Test Suite (Python interface)" << std::endl;
+    std::cout << "videocomposer MIDI Test Suite (Python interface)" << std::endl;
     std::cout << "==========================================" << std::endl;
     
     bool allPassed = true;

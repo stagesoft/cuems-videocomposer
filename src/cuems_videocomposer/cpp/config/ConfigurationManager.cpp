@@ -69,7 +69,7 @@ bool ConfigurationManager::saveToFile(const std::string& filename) const {
         return false;
     }
 
-    file << "# xjadeo configuration file\n";
+    file << "# videocomposer configuration file\n";
     file << "# Generated automatically\n\n";
 
     for (const auto& pair : config_) {

@@ -101,8 +101,8 @@ static void setup_window_hints_and_icon(Display* dpy, Window win, Window parent,
 	XTextProperty	x_wname, x_iname;
 	XSizeHints	hints;
 	XWMHints	wmhints;
-	char *w_name ="xjadeo";
-	char *i_name ="xjadeo";
+	char *w_name ="videocomposer";
+	char *i_name ="videocomposer";
 
 #ifdef HAVE_LIBXINERAMA
 
@@ -260,7 +260,7 @@ int gl_open_window () {
 		return 1;
 	}
 
-	XStoreName(_gl_display, _gl_win, "xjadeo");
+	XStoreName(_gl_display, _gl_win, "videocomposer");
 
 	Atom wmDelete = XInternAtom(_gl_display, "WM_DELETE_WINDOW", True);
 	XSetWMProtocols(_gl_display, _gl_win, &wmDelete, 1);
