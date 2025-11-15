@@ -1,2 +1,0 @@
-/usr/bin/ar qc libmtcreceiver.a CMakeFiles/mtcreceiver.dir/mtcreceiver.cpp.o
-/usr/bin/ranlib libmtcreceiver.a

@@ -60,3 +60,7 @@ Makefile.in
 # misc
 /doc/html/
 /doc/old/
+build/
+*.o
+*.a
+*.so
