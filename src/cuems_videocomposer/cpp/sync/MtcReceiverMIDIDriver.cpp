@@ -170,19 +170,6 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     // Return frame even if not "running" - we have valid MTC data
     // The rolling state will be determined separately
     
-    // Debug: log frame updates
-    static int64_t lastLoggedFrame = -1;
-    static int logCounter = 0;
-    if (frame >= 0) {
-        if (lastLoggedFrame < 0 || std::abs(frame - lastLoggedFrame) >= 30 || logCounter++ >= 30) {
-            printf("MTC: pollFrame() returning frame %lld (mtcHead=%ld ms, fps=%.2f, rolling)\n", 
-                   (long long)frame, mtcHeadMs, fps);
-            fflush(stdout);
-            lastLoggedFrame = frame;
-            logCounter = 0;
-        }
-    }
-    
     if (verbose_ && frame >= 0) {
         // Log frame updates periodically
         LOG_INFO << "MTC: frame " << frame << " (mtcHead=" << mtcHeadMs << "ms, fps=" << fps << ", rolling)";
