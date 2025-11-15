@@ -419,6 +419,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
     src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
     src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
+    src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
     src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
     src/cuems_videocomposer/cpp/sync/MTCDecoder.cpp
     src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp

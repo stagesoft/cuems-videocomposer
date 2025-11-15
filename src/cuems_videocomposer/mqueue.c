@@ -60,7 +60,7 @@ int mymq_init(char *id) {
 	if (mqfd_r == -1) {
 		perror("mq_open failure:");
 		if (errno == EEXIST)
-			fprintf(stderr,"note: use `xjremote -u` to unlink old queues\n");
+			fprintf(stderr,"note: use `videocomposer -u` to unlink old queues\n");
 		return(1);
 	}
 	if (mq_getattr(mqfd_r, &mqat) == -1) {
@@ -76,7 +76,7 @@ int mymq_init(char *id) {
 	if (mqfd_s == -1) {
 		perror("mq_open failure:");
 		if (errno == EEXIST)
-			fprintf(stderr,"note: use `xjremote -u` to unlink old queues\n");
+			fprintf(stderr,"note: use `videocomposer -u` to unlink old queues\n");
 		mq_close(mqfd_r);
 		snprintf(qname,64,"/videocomposer-request%s%s", id?"-":"", id?(char*)id:"");
 		mq_unlink(qname);

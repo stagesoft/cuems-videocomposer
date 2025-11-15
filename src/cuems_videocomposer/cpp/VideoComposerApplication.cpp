@@ -29,6 +29,7 @@
 #include "config/ConfigurationManager.h"
 #include "input/VideoFileInput.h"
 #include "sync/MIDISyncSource.h"
+#include "sync/FramerateConverterSyncSource.h"
 #include "layer/LayerManager.h"
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
@@ -266,8 +267,11 @@ bool VideoComposerApplication::createInitialLayer() {
         midiSync->setDelay(delay);
         
         // Connect to MIDI port (use "-1" for autodetect, which will use the driver selected in initializeMIDI)
-        syncSource = std::move(midiSync);
-        syncSource->connect(midiPort.c_str());
+        midiSync->connect(midiPort.c_str());
+        
+        // Wrap sync source with framerate converter (converts from sync source fps to input source fps)
+        // This is timecode-agnostic and works with any sync source and any input source
+        syncSource = std::make_unique<FramerateConverterSyncSource>(std::move(midiSync), inputSource.get());
     }
 
     // Create layer

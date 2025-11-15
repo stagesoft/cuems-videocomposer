@@ -51,6 +51,12 @@ public:
      * @return String identifier (e.g., "MIDI", "LTC")
      */
     virtual const char* getName() const = 0;
+
+    /**
+     * Get the framerate of this sync source's timecode
+     * @return Framerate in frames per second, or -1.0 if unknown/variable
+     */
+    virtual double getFramerate() const { return -1.0; }
 };
 
 } // namespace videocomposer

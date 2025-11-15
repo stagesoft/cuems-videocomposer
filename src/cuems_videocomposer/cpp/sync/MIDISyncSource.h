@@ -42,6 +42,12 @@ public:
     void setFramerate(double fps) { framerate_ = fps; }
 
     /**
+     * Get the framerate of this sync source's timecode
+     * @return Framerate in frames per second
+     */
+    double getFramerate() const override { return framerate_; }
+
+    /**
      * Set MIDI clock adjustment mode
      * @param enabled If true, enable clock adjustment
      */

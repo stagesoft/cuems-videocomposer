@@ -150,6 +150,8 @@ void VideoLayer::updateFromSyncSource() {
     // Process frame updates only if we have a valid frame
     if (syncFrame >= 0) {
         // Apply time-scaling: multiply by timescale, then add offset
+        // Note: Framerate conversion is handled by FramerateConverterSyncSource wrapper
+        // VideoLayer doesn't need to know about framerate conversion
         int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + timeOffset_;
         
         // Always apply wraparound if frame exceeds video duration
