@@ -1,0 +1,6 @@
+[submodule "src/mtcreceiver"]
+	path = src/mtcreceiver
+	url = https://github.com/stagesoft/mtcreceiver.git
+[submodule "src/cuemslogger"]
+	path = src/cuemslogger
+	url = https://github.com/stagesoft/cuemslogger.git

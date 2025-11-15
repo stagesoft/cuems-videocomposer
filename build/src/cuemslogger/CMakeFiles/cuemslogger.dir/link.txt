@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcuemslogger.a CMakeFiles/cuemslogger.dir/cuemslogger.cpp.o
+/usr/bin/ranlib libcuemslogger.a

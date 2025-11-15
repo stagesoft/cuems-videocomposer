@@ -1,0 +1,79 @@
+@media print {
+  .top, .frontpage
+              {display:none;}
+}
+
+@media screen {
+  body        {background-color:#333333;}
+  #content    {max-width: 50em; margin: 1em auto;}
+  .box        {padding: 1em; background: white; border:1.5px solid #071419; overflow:hidden;}
+}
+
+@media all {
+  body        {font-family:Lucida,Helvetica,sans-serif; font-size:14px; color: #000;}
+  h1          {text-align: center; font-variant:small-caps;}
+  h2          {border-bottom: 1px solid #071419; margin-top:2em;}
+  p           {text-align:justify;}
+  hr          {color:#CCDDCC; background-color:#202020; border:0px; height:1px;}
+  img         {border:0px;}
+  dt          {font-weight:bold;}
+  div.vsep    {margin:1em; height:.5em;}
+  div.maxed   {width:100%; height:100%;overflow:hidden;}
+  div.screenshots
+              {margin:0 auto; text-align:center; padding:0;}
+  a.thumbnail:hover img
+              {border-color:#071419;}
+  a.thumbnail img
+              {width:25%; margin:.5em 2%; border: 1px solid transparent; overflow:hidden; }
+  pre.screen  {margin:.5em; border:1.5px solid #071419; padding:.5em; background-color:#323; color:#4f4;}
+  div.downlo  {padding:1em; border:3px double #071419;}
+  a, a:visited, a:link
+              {color: #071419; border:0px;}
+  a:hover, a:active
+              {color: #771419; border:0px;}
+  table, table td, table tr
+              {border:0; border-collapse:collapse;}
+  .oscdoc td, .oscdoc th, .actiondoc td, .actiondoc th
+              {border:1px solid #071419; padding:0 .3em;}
+  .oscdoc td:nth-child(2)
+              {text-align:center;}
+  .actiondoc td:nth-child(1), .actiondoc td:nth-child(2)
+              {text-align:right; padding-right:.5em;}
+  .larger     {font-size:130%;}
+  .center     {text-align:center;}
+  .middle     {margin-left:auto; margin-right:auto;}
+  .main       {padding:1em 2em !important;}
+  .top        {height: 9em; font-variant:small-caps; font-weight:bolder;}
+  .linklist   {padding-left:1.2em; list-style-type:none; margin:0; line-height:150%;}
+  .linklist a, .larger a
+              {text-decoration: none;}
+  .linklist li
+              {height:1.8em;}
+  .linklist img
+              {padding-right:.2em; vertical-align:baseline;}
+  #topleft    {background:white url(xjadeo_banner.png) no-repeat scroll center center;}
+  #topright   {min-width:15em;}
+  #frontlink  {color: #071419;}
+  #frontimg   {font-size:300%; line-height:1.3em; padding:1.75em 1em; font-variant:small-caps; color:#fff; text-shadow: 0px 0px 4px #000000; background:url(firstchoice.jpg) no-repeat scroll center center; background-size: 100% auto}
+  div.clear   {clear:both; height:1em;}
+}
+
+@media screen and (min-width: 720px) {
+  #content    {width: 50em;}
+  #topleft    {float:left; width:30em;}
+  #topright   {float:right; width:15em;}
+}
+
+@media screen and (max-width: 720px) {
+  #topleft    {min-width:30em;}
+  #topright   {margin-top:1em;}
+  #topright li  {width:10em;margin:0 auto;}
+  #content    {min-width: 18em;}
+  #frontimg   {font-size:200%; font-weight:bold; padding:1.5em 1em;}
+}
+
+@media screen and (max-width: 483px) {
+  #topleft    {min-width:16em;}
+  #topleft    {background-size: 90% auto;}
+  #frontimg   {font-size:175%; font-weight:bolder; padding:.4em 1em;}
+}
