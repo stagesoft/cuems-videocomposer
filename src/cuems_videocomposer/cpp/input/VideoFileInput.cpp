@@ -615,8 +615,9 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     
     // Seek only if needed
     if (needSeek) {
-        if (!seek(frameNumber)) {
-            return false;
+    if (!seek(frameNumber)) {
+            LOG_WARNING << "Failed to seek to frame " << frameNumber;
+        return false;
         }
     }
 
@@ -627,9 +628,16 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     packet.size = 0;
 
     // Get target timestamp for the frame we want (like xjadeo)
+    // Use frame_pts (actual PTS from packet) instead of calculated timestamp
+    // This ensures we match against the actual PTS values in the stream
     int64_t targetTimestamp = -1;
     if (frameIndex_ && frameNumber >= 0 && frameNumber < frameCount_) {
-        targetTimestamp = frameIndex_[frameNumber].timestamp;
+        // Use frame_pts if available, fallback to timestamp
+        if (frameIndex_[frameNumber].frame_pts >= 0) {
+            targetTimestamp = frameIndex_[frameNumber].frame_pts;
+        } else {
+            targetTimestamp = frameIndex_[frameNumber].timestamp;
+        }
     } else if (!noIndex_ && frameInfo_.totalFrames > 0) {
         // Fallback: calculate timestamp from frame number
         AVRational timeBase = formatCtx_->streams[videoStream_]->time_base;
@@ -659,7 +667,8 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     int bailout = 2 * 8; // 16 (xjadeo default), but increase for problematic formats
     if (targetTimestamp >= 0 && frameIndex_) {
         // For indexed files, we can be more generous with bailout
-        bailout = 32;
+        // Keyframe-based codecs may need to decode many frames from a keyframe to reach target
+        bailout = 64; // Increased from 32 to handle keyframe-based codecs better
     }
     bool frameFinished = false;
 
@@ -681,12 +690,12 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
             continue;
         }
 
-        // Decode video frame
-        int gotFrame = 0;
+    // Decode video frame
+    int gotFrame = 0;
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(52, 21, 0)
-        err = avcodec_decode_video(codecCtx_, frame_, &gotFrame, packet.data, packet.size);
+    err = avcodec_decode_video(codecCtx_, frame_, &gotFrame, packet.data, packet.size);
 #else
-        err = avcodec_decode_video2(codecCtx_, frame_, &gotFrame, &packet);
+    err = avcodec_decode_video2(codecCtx_, frame_, &gotFrame, &packet);
 #endif
         av_free_packet(&packet);
 
@@ -707,13 +716,16 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
             continue;
         }
 
+        // Update last decoded PTS for error reporting
+        lastDecodedPTS_ = pts;
+
         // Match xjadeo's fuzzy PTS matching logic
         if (targetTimestamp >= 0) {
             if (pts + prefuzz >= targetTimestamp) {
                 // Fuzzy match: check if PTS is close enough to target (like xjadeo line 674)
                 if (pts - targetTimestamp < oneFrame) {
                     // Found target frame!
-                    frameFinished = true;
+            frameFinished = true;
                     break;
                 }
                 // PTS is beyond target but not close enough - continue decoding
@@ -727,7 +739,7 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
             break;
         }
 
-        --bailout;
+            --bailout;
     }
 
     if (!frameFinished) {

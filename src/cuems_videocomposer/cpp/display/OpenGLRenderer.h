@@ -53,7 +53,7 @@ public:
 
 private:
     // OpenGL state
-    unsigned int textureId_;
+    unsigned int textureId_;        // For GL_TEXTURE_RECTANGLE_ARB (regular textures)
     int textureWidth_;
     int textureHeight_;
     int viewportWidth_;

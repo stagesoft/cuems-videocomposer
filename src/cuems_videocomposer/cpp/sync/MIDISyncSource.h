@@ -71,7 +71,7 @@ public:
      * @return true if driver selected successfully
      */
     bool chooseDriver(const std::string& driverName);
-
+    
 private:
     std::unique_ptr<MIDIDriver> driver_;
     MTCDecoder mtcDecoder_;

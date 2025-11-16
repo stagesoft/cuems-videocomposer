@@ -1,7 +1,12 @@
 #include "OpenGLRenderer.h"
 #include "../layer/VideoLayer.h"
 #include "../osd/OSDRenderer.h"
+#include "../utils/Logger.h"
+#include "../input/HAPVideoInput.h"
+#include "../input/InputSource.h"
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 
 // HAP texture format constants
 #ifndef GL_COMPRESSED_RGB_S3TC_DXT1_EXT
@@ -179,17 +184,18 @@ void OpenGLRenderer::renderQuad(float x, float y, float width, float height) {
 
 void OpenGLRenderer::renderQuadWithCrop(float x, float y, float width, float height,
                                        float texX, float texY, float texWidth, float texHeight) {
-    // Use pixel coordinates for GL_TEXTURE_RECTANGLE_ARB
-    float texX_px = texX * textureWidth_;
-    float texY_px = texY * textureHeight_;
-    float texW_px = texWidth * textureWidth_;
-    float texH_px = texHeight * textureHeight_;
+    // This function is used for both GL_TEXTURE_RECTANGLE_ARB (pixel coords) and GL_TEXTURE_2D (normalized coords)
+    // For GL_TEXTURE_2D (HAP), texX/texY/texWidth/texHeight are already normalized (0.0-1.0)
+    // For GL_TEXTURE_RECTANGLE_ARB, we need to convert to pixel coordinates
+    // We'll detect which one based on whether the texture is bound as GL_TEXTURE_2D or GL_TEXTURE_RECTANGLE_ARB
+    // For now, assume normalized coordinates (GL_TEXTURE_2D) since this is called for HAP
     
+    // Use normalized texture coordinates (0.0-1.0) for GL_TEXTURE_2D
     glBegin(GL_QUADS);
-    glTexCoord2f(texX_px, texY_px + texH_px); glVertex2f(x, y);
-    glTexCoord2f(texX_px + texW_px, texY_px + texH_px); glVertex2f(x + width, y);
-    glTexCoord2f(texX_px + texW_px, texY_px); glVertex2f(x + width, y + height);
-    glTexCoord2f(texX_px, texY_px); glVertex2f(x, y + height);
+    glTexCoord2f(texX, texY + texHeight); glVertex2f(x, y);
+    glTexCoord2f(texX + texWidth, texY + texHeight); glVertex2f(x + width, y);
+    glTexCoord2f(texX + texWidth, texY); glVertex2f(x + width, y + height);
+    glTexCoord2f(texX, texY); glVertex2f(x, y + height);
     glEnd();
 }
 
@@ -304,20 +310,21 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         return false;
     }
 
-    // Check if frame is on GPU (HAP or hardware-decoded)
-    FrameBuffer cpuBuffer;
-    GPUTextureFrameBuffer gpuBuffer;
-    bool isOnGPU = layer->getPreparedFrame(cpuBuffer, gpuBuffer);
-    
-    if (isOnGPU && gpuBuffer.isValid()) {
-        // Frame is on GPU - use GPU rendering path (zero-copy for HAP)
-        const FrameInfo& frameInfo = layer->getFrameInfo();
-        return renderLayerFromGPU(gpuBuffer, props, frameInfo);
-    } else if (!isOnGPU && cpuBuffer.isValid()) {
-        // Frame is on CPU - use CPU rendering path (upload to texture)
-        if (!uploadFrameToTexture(cpuBuffer)) {
-            return false;
-        }
+            // Check if frame is on GPU (hardware-decoded)
+            FrameBuffer cpuBuffer;
+            GPUTextureFrameBuffer gpuBuffer;
+            bool isOnGPU = layer->getPreparedFrame(cpuBuffer, gpuBuffer);
+            
+            if (isOnGPU && gpuBuffer.isValid()) {
+                // Frame is on GPU - use GPU rendering path
+                const FrameInfo& frameInfo = layer->getFrameInfo();
+                return renderLayerFromGPU(gpuBuffer, props, frameInfo);
+            } else if (!isOnGPU && cpuBuffer.isValid()) {
+                // Frame is on CPU - use standard upload
+                // HAP frames are now uncompressed RGBA (matches mpv), not compressed DXT
+                if (!uploadFrameToTexture(cpuBuffer)) {
+                    return false;
+                }
         
         // Apply layer transform
         applyLayerTransform(layer);
@@ -358,19 +365,20 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         float w = 2.0f * quad_x;
         float h = 2.0f * quad_y;
 
-        // Calculate texture coordinates for cropping/panorama
-        float texX = 0.0f, texY = 0.0f, texWidth = 1.0f, texHeight = 1.0f;
-        calculateCropCoordinates(layer, texX, texY, texWidth, texHeight);
+                // Calculate texture coordinates for cropping/panorama
+                float texX = 0.0f, texY = 0.0f, texWidth = 1.0f, texHeight = 1.0f;
+                calculateCropCoordinates(layer, texX, texY, texWidth, texHeight);
 
-        // Render quad (matches original xjadeo - always use renderQuad, crop is handled in texture coords)
-        renderQuad(x, y, w, h);
+                // Regular texture uses GL_TEXTURE_RECTANGLE_ARB (already bound in uploadFrameToTexture)
+                // HAP is now treated as regular RGBA, not compressed
+                // Use pixel coordinates for GL_TEXTURE_RECTANGLE_ARB
+                renderQuad(x, y, w, h);
+                // Disable texture (matches original xjadeo)
+                glDisable(GL_TEXTURE_2D);
 
-        // Disable texture (matches original xjadeo)
-        glDisable(GL_TEXTURE_2D);
+                glPopMatrix();
 
-        glPopMatrix();
-
-        return true;
+                return true;
     } else {
         // No valid frame available
         return false;

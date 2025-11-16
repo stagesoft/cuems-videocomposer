@@ -165,6 +165,7 @@ void LayerPlayback::updateFromSyncSource() {
     
     // Process frame updates only if we have a valid frame
     if (syncFrame >= 0) {
+        LOG_VERBOSE << "Processing syncFrame=" << syncFrame << ", lastSyncFrame_=" << lastSyncFrame_;
         // Apply time-scaling: multiply by timescale, then add offset
         // Note: Framerate conversion is handled by FramerateConverterSyncSource wrapper
         // LayerPlayback doesn't need to know about framerate conversion
@@ -179,10 +180,12 @@ void LayerPlayback::updateFromSyncSource() {
             if (totalFrames > 0) {
                 // Wrap around if frame is beyond duration
                 if (adjustedFrame >= totalFrames) {
+                    LOG_VERBOSE << "Wrapping frame " << adjustedFrame << " (totalFrames=" << totalFrames << ")";
                     adjustedFrame = adjustedFrame % totalFrames;
                 }
                 // Wrap around if frame is negative
                 if (adjustedFrame < 0) {
+                    LOG_VERBOSE << "Wrapping negative frame " << adjustedFrame << " (totalFrames=" << totalFrames << ")";
                     adjustedFrame = (adjustedFrame % totalFrames + totalFrames) % totalFrames;
                 }
             }
@@ -196,18 +199,24 @@ void LayerPlayback::updateFromSyncSource() {
         // xjadeo doesn't check for full SYSEX frames - it just uses the frame number
         // and lets seek_frame() decide whether to seek based on frame relationships
         if (adjustedFrame != lastSyncFrame_) {
-            if (loadFrame(adjustedFrame)) {
+            LOG_VERBOSE << "Frame changed: " << lastSyncFrame_ << " -> " << adjustedFrame << " (syncFrame=" << syncFrame << ")";
+                    if (loadFrame(adjustedFrame)) {
                 // Normal update - loadFrame() handles seek optimization internally
                 // (no seek for consecutive frames, seeks for backwards/non-consecutive)
                 currentFrame_ = adjustedFrame;
                 lastSyncFrame_ = adjustedFrame;
             } else {
                 // If load fails, try seeking first (helps with keyframe-based codecs)
+                LOG_WARNING << "Failed to load frame " << adjustedFrame << ", trying seek first";
                 if (inputSource_ && inputSource_->seek(adjustedFrame)) {
                     if (loadFrame(adjustedFrame)) {
                         currentFrame_ = adjustedFrame;
                         lastSyncFrame_ = adjustedFrame;
+                    } else {
+                        LOG_WARNING << "Failed to load frame " << adjustedFrame << " even after seek";
                     }
+                } else {
+                    LOG_WARNING << "Failed to seek to frame " << adjustedFrame;
                 }
             }
         }
@@ -234,13 +243,16 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         return false;
     }
 
-    // Check if this is a HAP codec - use GPU texture buffer (zero-copy)
+    // Check if this is a HAP codec
+    // For HAP, we decode to CPU first (compressed DXT data), then upload to GPU during rendering
+    // This avoids needing OpenGL context during decoding (like mpv does)
     HAPVideoInput* hapInput = dynamic_cast<HAPVideoInput*>(inputSource_.get());
     if (hapInput) {
-        // HAP codec: decode directly to GPU texture
-        if (hapInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
-            frameOnGPU_ = true;
-            LOG_VERBOSE << "Loaded HAP frame " << frameNumber << " to GPU texture";
+        // HAP codec: decode to CPU buffer (compressed DXT data)
+        // We'll upload to GPU during rendering when OpenGL context is available
+        if (hapInput->readFrame(frameNumber, cpuFrameBuffer_)) {
+            frameOnGPU_ = false; // Store in CPU for now, upload during rendering
+            LOG_VERBOSE << "Loaded HAP frame " << frameNumber << " to CPU buffer (uncompressed RGBA)";
             return true;
         }
         return false;

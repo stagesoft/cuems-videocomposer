@@ -36,7 +36,7 @@ public:
     void setFramerate(double framerate);
     void setVerbose(bool verbose);
     void setClockAdjustment(bool enable);
-
+    
 private:
     std::unique_ptr<MtcReceiver> mtcReceiver_;
     double framerate_;

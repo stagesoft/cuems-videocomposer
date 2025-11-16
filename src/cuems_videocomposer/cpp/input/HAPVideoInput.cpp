@@ -1,6 +1,7 @@
 #include "HAPVideoInput.h"
 #include "../../ffcompat.h"
 #include "../utils/CLegacyBridge.h"
+#include "../utils/Logger.h"
 #include <cstring>
 #include <cassert>
 #include <algorithm>
@@ -25,6 +26,7 @@ extern "C" {
 #include <libavutil/mathematics.h>
 #include <libavutil/mem.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/error.h>
 }
 
 namespace videocomposer {
@@ -42,7 +44,6 @@ HAPVideoInput::HAPVideoInput()
     , currentFrame_(-1)
     , hapVariant_(HAPVariant::HAP)
     , ready_(false)
-    , textureFormat_(0)
 {
     frameRateQ_ = {1, 1};
     frameInfo_ = {};
@@ -162,6 +163,10 @@ bool HAPVideoInput::open(const std::string& source) {
     // Index frames (optional, for faster seeking)
     if (!indexFrames()) {
         // Indexing failed, but we can still proceed
+        // However, seeking will fall back to timestamp-based method
+        LOG_WARNING << "HAP: Frame indexing failed, will use timestamp-based seeking";
+    } else {
+        LOG_INFO << "HAP: Frame indexing completed, indexed " << frameCount_ << " frames";
     }
 
     ready_ = true;
@@ -345,11 +350,11 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
         return false;
     }
 
-    // If we have frame indexing, use it for faster seeking
+    // Simple approach: use indexed seek if available, otherwise timestamp-based
     if (scanComplete_ && frameIndex_ && frameNumber >= 0 && frameNumber < frameCount_) {
         const FrameIndex& idx = frameIndex_[frameNumber];
         
-        // Check if we need to seek
+        // Check if we need to seek (skip for sequential frames)
         bool needSeek = false;
         if (lastDecodedPTS_ < 0 || lastDecodedFrameNo_ < 0) {
             needSeek = true;
@@ -365,35 +370,29 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
             }
         }
 
-        lastDecodedPTS_ = -1;
-        lastDecodedFrameNo_ = -1;
-
         if (needSeek) {
-            int seekResult;
-            if (idx.seekpos > 0) {
-                // Try byte-based seeking first (more accurate)
-                seekResult = av_seek_frame(formatCtx_, videoStream_, idx.seekpos, 
-                                          AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_BYTE);
+            // Try timestamp-based seek (simplest and most reliable)
+            if (idx.seekpts >= 0) {
+                int ret = av_seek_frame(formatCtx_, videoStream_, idx.seekpts, AVSEEK_FLAG_BACKWARD);
+                if (ret < 0) {
+                    return false;
+                }
             } else {
-                // Fallback to timestamp-based seeking
-                seekResult = av_seek_frame(formatCtx_, videoStream_, idx.seekpts, 
-                                          AVSEEK_FLAG_BACKWARD);
+                return false;
             }
 
             if (codecCtx_->codec->flush) {
                 avcodec_flush_buffers(codecCtx_);
             }
-
-            if (seekResult < 0) {
-                return false;
-            }
         }
 
+        lastDecodedPTS_ = -1;
+        lastDecodedFrameNo_ = -1;
         currentFrame_ = frameNumber;
         return true;
     }
 
-    // Fallback to timestamp-based seeking (when indexing not available)
+    // Fallback: timestamp-based seeking
     AVStream* avStream = formatCtx_->streams[videoStream_];
     double framerate = frameInfo_.framerate;
     
@@ -401,16 +400,17 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
         return false;
     }
 
-    // Calculate timestamp
-    int64_t timestamp = static_cast<int64_t>((frameNumber / framerate) * AV_TIME_BASE);
+    // Calculate timestamp from frame number
+    AVRational timeBase = avStream->time_base;
+    int64_t timeBaseTimestamp = static_cast<int64_t>((frameNumber / framerate) * AV_TIME_BASE);
+    AVRational timeBaseQ = {1, AV_TIME_BASE};
+    int64_t timestamp = av_rescale_q(timeBaseTimestamp, timeBaseQ, timeBase);
     
-    // Seek to timestamp
     int ret = av_seek_frame(formatCtx_, videoStream_, timestamp, AVSEEK_FLAG_BACKWARD);
     if (ret < 0) {
         return false;
     }
 
-    // Flush codec buffers
     if (codecCtx_->codec->flush) {
         avcodec_flush_buffers(codecCtx_);
     }
@@ -422,23 +422,27 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
 }
 
 bool HAPVideoInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
-    // HAP frames should be read to GPU texture, not CPU FrameBuffer
-    // This method is kept for interface compatibility but should not be used for HAP
-    // Use readFrameToTexture() instead
-    return false;
-}
-
-bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffer& textureBuffer) {
+    // FFmpeg's HAP decoder outputs uncompressed RGBA data (pix_fmt=rgb0), NOT compressed DXT
+    // This matches mpv's approach - treat HAP as regular RGBA frames
+    // mpv references AVFrame buffers directly with planes[i] = src->data[i] and stride[i] = src->linesize[i]
+    //
+    // TODO: Review HAP implementation - Are we using CPU upload correctly?
+    //       Can we benefit from using compressed textures from HAP directly to GPU?
+    //       FFmpeg decodes HAP to uncompressed RGBA, but HAP files contain compressed DXT data.
+    //       Could we extract DXT data directly from packets and upload as compressed textures?
+    //       This would reduce CPU→GPU bandwidth and memory usage.
     if (!isReady()) {
         return false;
     }
 
-    // Seek to frame if needed
-    if (!seek(frameNumber)) {
-        return false;
+    // Seek to target frame
+    if (currentFrame_ < 0 || currentFrame_ != frameNumber) {
+        if (!seek(frameNumber)) {
+            return false;
+        }
     }
 
-    // Decode frame
+    // Decode frame using newer FFmpeg API (matches mpv's approach)
     AVPacket packet;
     av_init_packet(&packet);
     packet.data = nullptr;
@@ -451,9 +455,15 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
         int err = av_read_frame(formatCtx_, &packet);
         if (err < 0) {
             if (err == AVERROR_EOF) {
-                --bailout;
-                av_free_packet(&packet);
-                continue;
+                // Flush decoder
+                av_init_packet(&packet);
+                packet.data = nullptr;
+                packet.size = 0;
+                err = avcodec_send_packet(codecCtx_, &packet);
+                if (err < 0 && err != AVERROR_EOF) {
+                    --bailout;
+                    continue;
+                }
             } else {
                 av_free_packet(&packet);
                 return false;
@@ -465,24 +475,33 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
             continue;
         }
 
-        // Decode video frame
-        int gotFrame = 0;
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(52, 21, 0)
-        err = avcodec_decode_video(codecCtx_, frame_, &gotFrame, packet.data, packet.size);
-#else
-        err = avcodec_decode_video2(codecCtx_, frame_, &gotFrame, &packet);
-#endif
+        // Send packet to decoder (newer API - matches mpv)
+        err = avcodec_send_packet(codecCtx_, &packet);
         av_free_packet(&packet);
 
         if (err < 0) {
-            --bailout;
-            continue;
+            if (err != AVERROR(EAGAIN)) {
+                --bailout;
+                continue;
+            }
         }
 
-        if (gotFrame) {
+        // Receive frame from decoder (newer API - matches mpv)
+        err = avcodec_receive_frame(codecCtx_, frame_);
+        if (err == 0) {
             frameFinished = true;
-        } else {
+        } else if (err == AVERROR(EAGAIN)) {
+            // Need more input - continue reading packets
             --bailout;
+            continue;
+        } else if (err == AVERROR_EOF) {
+            // Decoder flushed
+            --bailout;
+            continue;
+        } else {
+            // Error
+            --bailout;
+            continue;
         }
     }
 
@@ -490,67 +509,36 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
         return false;
     }
 
-    // HAP frames decode to DXT1/DXT5 compressed texture data
-    // The compressed data is in frame_->data[0]
-    // Refine variant detection from the actual decoded frame (if not already determined)
-    if (hapVariant_ == HAPVariant::HAP) {
-        // If we defaulted to HAP, try to refine from the frame
-        refineHAPVariantFromFrame(frame_);
-    }
-    
-    // Determine texture format based on HAP variant
-    GLenum glFormat;
-    if (hapVariant_ == HAPVariant::HAP_ALPHA || hapVariant_ == HAPVariant::HAP_Q) {
-        glFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
-        textureFormat_ = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
-    } else {
-        glFormat = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
-        textureFormat_ = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
-    }
-
-    // Allocate texture buffer if needed
-    if (!textureBuffer.isValid() || 
-        textureBuffer.info().width != frameInfo_.width || 
-        textureBuffer.info().height != frameInfo_.height) {
-        if (!textureBuffer.allocate(frameInfo_, glFormat, true)) {
-            return false;
-        }
-    }
-
-    // Calculate compressed texture size
-    // DXT1/DXT5 are block-based: 4x4 pixel blocks
-    // DXT1: 8 bytes per 4x4 block = 0.5 bytes per pixel
-    // DXT5: 16 bytes per 4x4 block = 1 byte per pixel
-    // Width and height must be rounded up to multiples of 4 for block alignment
-    int blockWidth = (frameInfo_.width + 3) / 4;   // Round up to multiple of 4
-    int blockHeight = (frameInfo_.height + 3) / 4; // Round up to multiple of 4
-    size_t compressedSize;
-    if (glFormat == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT) {
-        compressedSize = blockWidth * blockHeight * 16; // 16 bytes per DXT5 block
-    } else {
-        compressedSize = blockWidth * blockHeight * 8;  // 8 bytes per DXT1 block
-    }
-
-    // Try to use actual size from frame if available (more accurate)
-    // frame->linesize[0] may contain the actual compressed chunk size
-    size_t actualSize = compressedSize;
-    if (frame_->linesize[0] > 0 && frame_->linesize[0] <= compressedSize * 2) {
-        // Use actual size if it's reasonable (within 2x of expected)
-        // This handles cases where the actual size might be slightly different
-        actualSize = frame_->linesize[0];
-    }
-
-    // Validate that we have enough data
     if (!frame_->data[0]) {
         return false;
     }
 
-    // Upload compressed texture data directly to GPU
-    // HAP frames are already in compressed format, so we can upload directly
-    if (!textureBuffer.uploadCompressedData(frame_->data[0], actualSize, 
-                                            frameInfo_.width, frameInfo_.height, glFormat)) {
+    // FFmpeg decodes HAP to uncompressed RGBA (pix_fmt=rgb0)
+    // linesize[0] = width * 4 bytes (RGBA)
+    // Total size = linesize[0] * height
+    // Matches mpv's mp_image_from_av_frame approach
+
+    FrameInfo hapInfo = frameInfo_;
+    hapInfo.format = PixelFormat::RGBA32; // FFmpeg outputs RGBA
+    hapInfo.width = frameInfo_.width;
+    hapInfo.height = frameInfo_.height;
+    
+    if (!buffer.allocate(hapInfo)) {
         return false;
     }
+
+    // Copy frame data row by row (matches mpv's memcpy_pic approach)
+    // mpv uses linesize as stride, we copy using linesize[0]
+    int bytesPerLine = frameInfo_.width * 4; // RGBA = 4 bytes per pixel
+    for (int y = 0; y < frameInfo_.height; y++) {
+        memcpy(buffer.data() + y * bytesPerLine,
+               frame_->data[0] + y * frame_->linesize[0],
+               bytesPerLine);
+    }
+    
+    LOG_VERBOSE << "HAP: Copied " << (bytesPerLine * frameInfo_.height) << " bytes RGBA data "
+               << "(linesize[0]=" << frame_->linesize[0] << ", width=" << frameInfo_.width 
+               << ", height=" << frameInfo_.height << ")";
 
     int64_t pts = parsePTSFromFrame(frame_);
     if (pts != AV_NOPTS_VALUE) {
@@ -560,6 +548,17 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
 
     currentFrame_ = frameNumber;
     return true;
+}
+
+bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffer& textureBuffer) {
+    // DEPRECATED: HAP now uses readFrame() (CPU path) which treats HAP as uncompressed RGBA
+    // FFmpeg's HAP decoder outputs uncompressed RGBA (pix_fmt=rgb0), NOT compressed DXT
+    // This method is kept for interface compatibility but should not be used for HAP
+    // Use readFrame() instead, which uploads to GPU during rendering
+    (void)frameNumber;  // Unused
+    (void)textureBuffer;  // Unused
+    LOG_WARNING << "HAP: readFrameToTexture() is deprecated - HAP now uses uncompressed RGBA path via readFrame()";
+    return false;
 }
 
 void HAPVideoInput::refineHAPVariantFromFrame(AVFrame* frame) {
@@ -580,39 +579,17 @@ void HAPVideoInput::refineHAPVariantFromFrame(AVFrame* frame) {
     size_t expectedDXT5Size = blockWidth * blockHeight * 16;  // DXT5
     
     // Get actual compressed data size from frame
-    // For HAP, the compressed data is in frame->data[0]
-    // The size can be determined from frame->linesize[0] or by examining the data
-    size_t actualSize = 0;
-    if (frame->linesize[0] > 0) {
-        // linesize[0] might contain the size of the compressed chunk
-        actualSize = frame->linesize[0];
-    } else if (frame->data[0]) {
-        // Fallback: estimate from data (less reliable)
-        // For HAP, we can't easily determine size without parsing the chunk structure
-        // So we'll use a heuristic based on the expected sizes
-        return; // Can't reliably determine without more information
-    }
+    // For HAP, FFmpeg decodes to compressed DXT data in frame->data[0]
+    // The packet size is the actual compressed HAP data size before decoding
+    // After decoding, we get the full DXT texture data
+    // linesize[0] for compressed textures doesn't represent the data size reliably
+    // So we'll use the packet size if available, otherwise can't determine
     
-    // Compare actual size to expected sizes
-    // Allow some tolerance for compression variations
-    if (actualSize > 0) {
-        size_t dxt1Diff = (actualSize > expectedDXT1Size) ? 
-                          (actualSize - expectedDXT1Size) : 
-                          (expectedDXT1Size - actualSize);
-        size_t dxt5Diff = (actualSize > expectedDXT5Size) ? 
-                          (actualSize - expectedDXT5Size) : 
-                          (expectedDXT5Size - actualSize);
-        
-        // If size is closer to DXT5, it's likely HAP_Q or HAP_ALPHA
-        // We can't distinguish between HAP_Q and HAP_ALPHA from size alone
-        // Default to HAP_Q (higher quality) if it looks like DXT5
-        if (dxt5Diff < dxt1Diff && actualSize >= expectedDXT5Size * 0.9) {
-            // Looks like DXT5 - could be HAP_Q or HAP_ALPHA
-            // Default to HAP_Q (we can't distinguish without alpha channel info)
-            hapVariant_ = HAPVariant::HAP_Q;
-        }
-        // Otherwise, keep as HAP (DXT1)
-    }
+    // Note: We can't reliably determine variant from linesize[0] alone
+    // because it might not represent the actual decoded data size
+    // For now, keep as HAP (DXT1) - variant detection should happen during open()
+    // This refinement is not reliable for compressed textures
+    return; // Can't reliably determine variant from frame data alone
 }
 
 int64_t HAPVideoInput::parsePTSFromFrame(AVFrame* frame) {
@@ -657,9 +634,6 @@ InputSource::CodecType HAPVideoInput::getHAPVariant() const {
     return detectCodec();
 }
 
-unsigned int HAPVideoInput::getTextureFormat() const {
-    return textureFormat_;
-}
 
 void HAPVideoInput::cleanup() {
     // Free frame index
@@ -692,7 +666,6 @@ void HAPVideoInput::cleanup() {
     lastDecodedFrameNo_ = -1;
     scanComplete_ = false;
     currentFrame_ = -1;
-    textureFormat_ = 0;
 }
 
 } // namespace videocomposer

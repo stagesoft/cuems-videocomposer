@@ -55,6 +55,7 @@ public:
     // Get layer state
     bool isReady() const;
     FrameInfo getFrameInfo() const;
+    bool isHAPCodec() const;
 
     // Get frame buffer (for rendering) - backward compatibility
     // Returns CPU frame buffer (for now, until all callers are updated)

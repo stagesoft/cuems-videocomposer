@@ -57,11 +57,6 @@ public:
      */
     CodecType getHAPVariant() const;
 
-    /**
-     * Get OpenGL texture format for this HAP file
-     * @return GL_COMPRESSED_RGB_S3TC_DXT1_EXT or GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
-     */
-    unsigned int getTextureFormat() const;
 
 private:
     enum class HAPVariant {
@@ -112,7 +107,6 @@ private:
     // Internal state
     bool ready_;
     AVRational frameRateQ_;
-    unsigned int textureFormat_; // OpenGL texture format (DXT1 or DXT5)
 };
 
 } // namespace videocomposer

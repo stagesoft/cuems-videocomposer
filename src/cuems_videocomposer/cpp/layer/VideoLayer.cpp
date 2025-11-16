@@ -114,6 +114,10 @@ FrameInfo VideoLayer::getFrameInfo() const {
     return playback_.getFrameInfo();
 }
 
+bool VideoLayer::isHAPCodec() const {
+    return playback_.isHAPCodec();
+}
+
 void VideoLayer::reverse() {
     playback_.reverse();
 }

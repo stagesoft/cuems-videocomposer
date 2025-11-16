@@ -73,21 +73,23 @@ class MTCHelper:
     
     def setup(self) -> bool:
         """
-        Setup and start MTC timecode generation.
+        Setup MTC timecode generation (but don't start playing).
         
         Returns:
-            True if MTC was started successfully, False otherwise
+            True if MTC was set up successfully, False otherwise
         """
         if not self.available:
             return False
         
         try:
             self.mtc_sender = MtcSender(fps=self.fps, port=self.port, portname=self.portname)
+            print(f"DEBUG: MTC sender created (fps={self.fps}, port={self.port})")
             self.mtc_sender.settime_frames(0)
-            self.mtc_sender.play()
+            print("DEBUG: MTC time set to frame 0 in setup()")
+            # Don't call play() here - let start() handle it to avoid double-play toggle
             return True
         except Exception as e:
-            print(f"WARNING: Failed to start MTC: {e}")
+            print(f"WARNING: Failed to setup MTC: {e}")
             return False
     
     def start(self, start_frame: int = 0) -> bool:
@@ -106,7 +108,9 @@ class MTCHelper:
         
         try:
             self.mtc_sender.settime_frames(start_frame)
+            print(f"DEBUG: MTC time set to frame {start_frame}")
             self.mtc_sender.play()
+            print("DEBUG: MTC play() called - MTC should now be rolling")
             return True
         except Exception as e:
             print(f"WARNING: Failed to start MTC playback: {e}")

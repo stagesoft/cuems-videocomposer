@@ -59,14 +59,27 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
     textureFormat_ = textureFormat;
     isHAP_ = isHAP;
 
+    LOG_VERBOSE << "GPUTextureFrameBuffer: Allocating texture (width=" << info.width 
+               << ", height=" << info.height << ", format=0x" << std::hex << textureFormat 
+               << std::dec << ", isHAP=" << isHAP << ")";
+
     // Generate OpenGL texture
+    // Check if OpenGL context is available
+    GLenum error = glGetError(); // Clear any previous errors
     glGenTextures(1, &textureId_);
-    if (textureId_ == 0 || !checkGLError("glGenTextures")) {
+    error = glGetError();
+    if (textureId_ == 0 || error != GL_NO_ERROR) {
+        if (error == GL_NO_ERROR && textureId_ == 0) {
+            LOG_WARNING << "GPUTextureFrameBuffer: glGenTextures returned 0 (no OpenGL context?)";
+        } else {
+            checkGLError("glGenTextures");
+        }
         return false;
     }
 
     glBindTexture(GL_TEXTURE_2D, textureId_);
     if (!checkGLError("glBindTexture")) {
+        LOG_WARNING << "GPUTextureFrameBuffer: glBindTexture failed";
         glDeleteTextures(1, &textureId_);
         textureId_ = 0;
         return false;
@@ -78,6 +91,7 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     if (!checkGLError("glTexParameteri")) {
+        LOG_WARNING << "GPUTextureFrameBuffer: glTexParameteri failed";
         glBindTexture(GL_TEXTURE_2D, 0);
         glDeleteTextures(1, &textureId_);
         textureId_ = 0;

@@ -83,6 +83,63 @@ class CodecFormatTest:
         except Exception as e:
             return {"error": str(e)}
     
+    def test_video_file_interactive(self, video_path: Path, test_duration: int = 10) -> Dict:
+        """Test a single video file interactively - ask user if video is visible."""
+        video_path = Path(video_path)
+        if not video_path.exists():
+            return {"error": f"Video file not found: {video_path}"}
+        
+        print(f"\n{'='*60}")
+        print(f"Testing: {video_path.name}")
+        print(f"{'='*60}")
+        
+        # Get video info
+        info = self.get_video_info(video_path)
+        if "error" in info:
+            print(f"  ERROR: {info['error']}")
+            return {"error": info["error"]}
+        
+        print(f"  Codec: {info['codec']} ({info['codec_long']})")
+        print(f"  Format: {info['format']}")
+        print(f"  Resolution: {info['width']}x{info['height']}")
+        print(f"  FPS: {info['fps']:.2f}")
+        print(f"  Duration: {info['duration']:.2f}s")
+        
+        # Run videocomposer
+        print(f"\n  Playing video for {test_duration} seconds...")
+        print(f"  Please watch the videocomposer window and observe if video is visible.")
+        print(f"  The window should open shortly...\n")
+        
+        result = self._run_videocomposer(video_path, test_duration, verbose_output=False)
+        
+        # Ask user if they saw video
+        print(f"\n  Video playback completed.")
+        while True:
+            response = input("  Did you see video playing? (y/n/s=skip): ").strip().lower()
+            if response in ['y', 'yes']:
+                video_visible = True
+                break
+            elif response in ['n', 'no']:
+                video_visible = False
+                break
+            elif response in ['s', 'skip']:
+                return {"skipped": True, "video": str(video_path), "info": info}
+            else:
+                print("  Please answer 'y' (yes), 'n' (no), or 's' (skip)")
+        
+        test_result = {
+            "video": str(video_path),
+            "info": info,
+            "result": result,
+            "video_visible": video_visible,
+            "success": video_visible
+        }
+        
+        status = "✓ VISIBLE" if video_visible else "✗ NOT VISIBLE"
+        print(f"  Result: {status}\n")
+        
+        return test_result
+    
     def test_video_file(self, video_path: Path, test_duration: int = 5) -> Dict:
         """Test a single video file with videocomposer."""
         video_path = Path(video_path)
@@ -165,7 +222,7 @@ class CodecFormatTest:
         if self.mtc_helper:
             self.mtc_helper.cleanup()
     
-    def _run_videocomposer(self, video_path: Path, duration: int) -> Dict:
+    def _run_videocomposer(self, video_path: Path, duration: int, verbose_output: bool = True) -> Dict:
         """Run videocomposer with the video file."""
         cmd = [
             str(self.videocomposer_bin),
@@ -206,7 +263,9 @@ class CodecFormatTest:
                     line = process.stdout.readline()
                     if line:
                         output_lines.append(line.strip())
-                        # Print all output for debugging
+                        # Print output if verbose mode is enabled
+                        # In interactive mode, user watches the window, not console
+                        if verbose_output:
                         print(f"    {line.strip()}")
                 except:
                     break
@@ -295,13 +354,15 @@ class CodecFormatTest:
     def find_test_videos(self, patterns: List[str] = None) -> List[Path]:
         """Find test video files."""
         if patterns is None:
-            patterns = ["test_*.mp4", "test_*.mov", "test_*.avi", "test_*.mkv", "test_*.webm"]
+            # Include all common video formats from video_test_files directory
+            patterns = ["*.mp4", "*.mov", "*.avi", "*.mkv", "*.webm"]
         
         videos = []
         for pattern in patterns:
             videos.extend(self.video_dir.glob(pattern))
         
-        return sorted(videos)
+        # Remove duplicates and sort
+        return sorted(set(videos))
     
     def run_all_tests(self, test_hw: bool = True, test_sw: bool = True, duration: int = 5) -> Dict:
         """Run tests on all available test videos."""
@@ -318,13 +379,15 @@ class CodecFormatTest:
         
         results = {}
         for video in videos:
-            # Filter by test type if needed
+            # Test all videos from video_test_files directory
+            # Filter by test type only if explicitly disabled
             video_name = video.name.lower()
             if not test_hw and any(codec in video_name for codec in ["h264", "hevc", "av1"]):
                 continue
             if not test_sw and any(codec in video_name for codec in ["vp9", "mpeg4"]):
                 continue
             
+            # Test all other videos (problematic.mp4, test_playback_patterns.mov, etc.)
             result = self.test_video_file(video, duration)
             results[video.name] = result
         
@@ -387,7 +450,7 @@ def main():
     parser = argparse.ArgumentParser(description="Test video codec and format support")
     parser.add_argument("--video-dir", type=str, 
                        default=str(Path(__file__).parent.parent / "video_test_files"),
-                       help="Directory containing test video files")
+                       help="Directory containing test video files (default: video_test_files)")
     parser.add_argument("--videocomposer", type=str,
                        help="Path to videocomposer binary")
     parser.add_argument("--test-all", action="store_true",
@@ -398,14 +461,16 @@ def main():
                        help="Test software codecs (VP9, MPEG-4)")
     parser.add_argument("--test-hap", action="store_true",
                        help="Test HAP codec specifically")
-    parser.add_argument("--duration", type=int, default=5,
-                       help="Test duration per video in seconds")
+    parser.add_argument("--duration", type=int, default=10,
+                       help="Test duration per video in seconds (default: 10, longer for interactive mode)")
     parser.add_argument("--video", type=str,
                        help="Test a specific video file")
     parser.add_argument("--no-mtc", action="store_true",
                        help="Don't start MTC timecode (may cause videocomposer to wait)")
     parser.add_argument("--fps", type=float, default=25.0,
                        help="MTC framerate (default: 25.0)")
+    parser.add_argument("--interactive", action="store_true",
+                       help="Interactive mode: test one video at a time and ask if video is visible")
     
     args = parser.parse_args()
     
@@ -414,14 +479,69 @@ def main():
     
     if not video_dir.exists():
         print(f"ERROR: Video directory not found: {video_dir}")
+        print(f"Expected location: {Path(__file__).parent.parent / 'video_test_files'}")
         print("Run tests/create_test_videos.sh first to create test files")
         sys.exit(1)
+    
+    # Print the directory being used
+    print(f"Using video directory: {video_dir.resolve()}")
     
     tester = CodecFormatTest(video_dir, videocomposer_bin, use_mtc=not args.no_mtc, fps=args.fps)
     
     results = {}
     
-    if args.video:
+    if args.interactive:
+        # Interactive mode: test one video at a time
+        videos = tester.find_test_videos()
+        
+        if not videos:
+            print(f"ERROR: No test videos found in {video_dir}")
+            print("Run tests/create_test_videos.sh first to create test files")
+            sys.exit(1)
+        
+        print(f"\n{'='*60}")
+        print(f"INTERACTIVE MODE")
+        print(f"{'='*60}")
+        print(f"Found {len(videos)} videos to test")
+        print(f"Each video will play for {args.duration} seconds")
+        print(f"You will be asked if you see video after each one")
+        print(f"Answer: 'y' (yes), 'n' (no), or 's' (skip)")
+        print(f"{'='*60}\n")
+        
+        input("Press ENTER to start testing...")
+        
+        for i, video in enumerate(videos, 1):
+            print(f"\n{'='*60}")
+            print(f"Video {i}/{len(videos)}")
+            print(f"{'='*60}")
+            
+            result = tester.test_video_file_interactive(video, args.duration)
+            results[video.name] = result
+            
+            if i < len(videos):
+                response = input(f"\nPress ENTER to continue to next video, or 'q' to quit: ").strip().lower()
+                if response == 'q':
+                    print("\nTesting stopped by user.")
+                    break
+        
+        # Print summary
+        print(f"\n{'='*60}")
+        print("INTERACTIVE TEST SUMMARY")
+        print(f"{'='*60}")
+        visible_count = sum(1 for r in results.values() if r.get("video_visible") == True)
+        not_visible_count = sum(1 for r in results.values() if r.get("video_visible") == False)
+        skipped_count = sum(1 for r in results.values() if r.get("skipped") == True)
+        
+        print(f"Total tested: {len(results)}")
+        print(f"Visible: {visible_count} ✓")
+        print(f"Not visible: {not_visible_count} ✗")
+        print(f"Skipped: {skipped_count}")
+        print(f"\nVideos that were NOT visible:")
+        for name, result in results.items():
+            if result.get("video_visible") == False:
+                print(f"  - {name}")
+        
+    elif args.video:
         # Test single video
         video_path = Path(args.video)
         if not video_path.is_absolute():
