@@ -2,9 +2,12 @@
 #define VIDEOCOMPOSER_VIDEOLAYER_H
 
 #include "LayerProperties.h"
+#include "LayerPlayback.h"
+#include "LayerDisplay.h"
 #include "../input/InputSource.h"
 #include "../sync/SyncSource.h"
 #include "../video/FrameBuffer.h"
+#include "../video/GPUTextureFrameBuffer.h"
 #include <memory>
 #include <cstdint>
 
@@ -28,20 +31,20 @@ public:
     void setInputSource(std::unique_ptr<InputSource> input);
     void setSyncSource(std::unique_ptr<SyncSource> sync);
     
-    InputSource* getInputSource() const { return inputSource_.get(); }
-    SyncSource* getSyncSource() const { return syncSource_.get(); }
+    InputSource* getInputSource() const;
+    SyncSource* getSyncSource() const;
 
     // Properties
-    LayerProperties& properties() { return properties_; }
-    const LayerProperties& properties() const { return properties_; }
+    LayerProperties& properties();
+    const LayerProperties& properties() const;
 
     // Playback control
     bool play();
     bool pause();
-    bool isPlaying() const { return playing_; }
+    bool isPlaying() const;
     
     bool seek(int64_t frameNumber);
-    int64_t getCurrentFrame() const { return currentFrame_; }
+    int64_t getCurrentFrame() const;
     
     // Update layer (called from main loop)
     void update();
@@ -53,49 +56,45 @@ public:
     bool isReady() const;
     FrameInfo getFrameInfo() const;
 
-    // Get frame buffer (for rendering)
-    const FrameBuffer& getFrameBuffer() const { return frameBuffer_; }
-    FrameBuffer& getFrameBuffer() { return frameBuffer_; }
+    // Get frame buffer (for rendering) - backward compatibility
+    // Returns CPU frame buffer (for now, until all callers are updated)
+    const FrameBuffer& getFrameBuffer() const;
+    
+    // Get prepared frame for rendering (new API - supports GPU textures)
+    // Returns true if frame is on GPU, false if on CPU
+    bool getPreparedFrame(FrameBuffer& cpuBuffer, GPUTextureFrameBuffer& gpuBuffer) const;
+    
+    // Check if current frame is on GPU
+    bool isFrameOnGPU() const;
 
     // Layer ID
     void setLayerId(int id) { layerId_ = id; }
     int getLayerId() const { return layerId_; }
     
     // Time-scaling (applied to sync source frames)
-    void setTimeOffset(int64_t offset) { timeOffset_ = offset; }
-    int64_t getTimeOffset() const { return timeOffset_; }
+    void setTimeOffset(int64_t offset);
+    int64_t getTimeOffset() const;
     
-    void setTimeScale(double scale) { timeScale_ = scale; }
-    double getTimeScale() const { return timeScale_; }
+    void setTimeScale(double scale);
+    double getTimeScale() const;
     
-    void setWraparound(bool enabled) { wraparound_ = enabled; }
-    bool getWraparound() const { return wraparound_; }
+    void setWraparound(bool enabled);
+    bool getWraparound() const;
     
     // Reverse playback (multiplies timescale by -1.0 and adjusts offset)
     void reverse();
 
 private:
-    std::unique_ptr<InputSource> inputSource_;
-    std::unique_ptr<SyncSource> syncSource_;
-    LayerProperties properties_;
-    
-    // Playback state
-    bool playing_;
-    int64_t currentFrame_;
-    int64_t lastSyncFrame_;
-    int64_t timeOffset_;  // Time offset applied to sync frames
-    double timeScale_;    // Time multiplier (default: 1.0)
-    bool wraparound_;     // Enable wrap-around/loop
-    
-    // Frame buffer for this layer
-    FrameBuffer frameBuffer_;
+    // Composed components
+    LayerPlayback playback_;
+    LayerDisplay display_;
     
     // Layer identification
     int layerId_;
     
-    // Internal methods
-    void updateFromSyncSource();
-    bool loadFrame(int64_t frameNumber);
+    // Backward compatibility: CPU frame buffer cache
+    mutable FrameBuffer frameBufferCache_;
+    mutable bool frameBufferCacheValid_;
 };
 
 } // namespace videocomposer

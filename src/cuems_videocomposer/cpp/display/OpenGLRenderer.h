@@ -2,6 +2,7 @@
 #define VIDEOCOMPOSER_OPENGLRENDERER_H
 
 #include "../video/FrameBuffer.h"
+#include "../video/GPUTextureFrameBuffer.h"
 #include "../layer/VideoLayer.h"
 #include <vector>
 #include <cstdint>
@@ -30,6 +31,9 @@ public:
 
     // Render a single layer
     bool renderLayer(const VideoLayer* layer);
+    
+    // Render a layer from GPU texture (for HAP and hardware-decoded frames)
+    bool renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, const LayerProperties& properties, const FrameInfo& frameInfo);
 
     // Composite all layers
     void compositeLayers(const std::vector<const VideoLayer*>& layers);
@@ -65,8 +69,11 @@ private:
     void applyLayerTransform(const VideoLayer* layer);
     void applyBlendMode(const VideoLayer* layer);
     bool uploadFrameToTexture(const FrameBuffer& frame);
+    bool bindGPUTexture(const GPUTextureFrameBuffer& gpuFrame);
     void calculateCropCoordinates(const VideoLayer* layer, float& texX, float& texY, 
                                   float& texWidth, float& texHeight);
+    void calculateCropCoordinatesFromProps(const LayerProperties& props, const FrameInfo& frameInfo,
+                                           float& texX, float& texY, float& texWidth, float& texHeight);
 };
 
 } // namespace videocomposer

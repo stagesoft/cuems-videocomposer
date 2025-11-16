@@ -418,6 +418,9 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/VideoComposerApplication.cpp
     src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
     src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
+    src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
+    src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
+    src/cuems_videocomposer/cpp/video/GPUTextureFrameBuffer.cpp
     src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
     src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
     src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
@@ -425,7 +428,11 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
     src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
     src/cuems_videocomposer/cpp/layer/VideoLayer.cpp
+    src/cuems_videocomposer/cpp/layer/LayerPlayback.cpp
+    src/cuems_videocomposer/cpp/layer/LayerDisplay.cpp
     src/cuems_videocomposer/cpp/layer/LayerManager.cpp
+    src/cuems_videocomposer/cpp/display/GPUImageProcessor.cpp
+    src/cuems_videocomposer/cpp/display/CPUImageProcessor.cpp
     src/cuems_videocomposer/cpp/display/OpenGLDisplay.cpp
     src/cuems_videocomposer/cpp/display/OpenGLRenderer.cpp
     src/cuems_videocomposer/cpp/display/DisplayManager.cpp
@@ -475,13 +482,20 @@ if(BUILD_TESTS)
     set(TEST_CPP_SOURCES
         src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
         src/cuems_videocomposer/cpp/layer/VideoLayer.cpp
+        src/cuems_videocomposer/cpp/layer/LayerPlayback.cpp
+        src/cuems_videocomposer/cpp/layer/LayerDisplay.cpp
         src/cuems_videocomposer/cpp/layer/LayerManager.cpp
         src/cuems_videocomposer/cpp/sync/MTCDecoder.cpp
         src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
         src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
         src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
         src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
+        src/cuems_videocomposer/cpp/video/GPUTextureFrameBuffer.cpp
+        src/cuems_videocomposer/cpp/display/GPUImageProcessor.cpp
+        src/cuems_videocomposer/cpp/display/CPUImageProcessor.cpp
         src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
+        src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
+        src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
         src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
         src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
     )
@@ -502,6 +516,7 @@ if(BUILD_TESTS)
         ${FFMPEG_LIBRARIES}
         ${ALSA_LIBS}
         ${RTMIDI_LIBRARIES}
+        ${OPENGL_gl_LIBRARY}
         m
         pthread
     )

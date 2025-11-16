@@ -1,0 +1,336 @@
+#include "LayerPlayback.h"
+#include "../utils/Logger.h"
+#include "../utils/SMPTEUtils.h"
+#include "../sync/MIDISyncSource.h"
+#include "../input/HAPVideoInput.h"
+#include "../input/VideoFileInput.h"
+#include <algorithm>
+#include <cmath>
+
+namespace videocomposer {
+
+LayerPlayback::LayerPlayback()
+    : playing_(false)
+    , currentFrame_(-1)
+    , lastSyncFrame_(-1)
+    , timeOffset_(0)
+    , timeScale_(1.0)
+    , wraparound_(false)
+    , frameOnGPU_(false)
+{
+}
+
+LayerPlayback::~LayerPlayback() {
+    pause();
+}
+
+void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
+    pause();
+    inputSource_ = std::move(input);
+    currentFrame_ = -1;
+    lastSyncFrame_ = -1;
+    frameOnGPU_ = false;
+}
+
+void LayerPlayback::setSyncSource(std::unique_ptr<SyncSource> sync) {
+    syncSource_ = std::move(sync);
+    lastSyncFrame_ = -1;
+}
+
+bool LayerPlayback::play() {
+    if (!isReady()) {
+        return false;
+    }
+    playing_ = true;
+    return true;
+}
+
+bool LayerPlayback::pause() {
+    playing_ = false;
+    return true;
+}
+
+bool LayerPlayback::seek(int64_t frameNumber) {
+    if (!inputSource_) {
+        return false;
+    }
+    
+    if (inputSource_->seek(frameNumber)) {
+        currentFrame_ = frameNumber;
+        lastSyncFrame_ = -1;
+        return true;
+    }
+    
+    return false;
+}
+
+void LayerPlayback::update() {
+    if (!isReady()) {
+        return;
+    }
+
+    // Always check sync source, even when not playing
+    // This allows automatic start when MTC is received
+    if (syncSource_ && syncSource_->isConnected()) {
+        updateFromSyncSource();
+    } else if (playing_) {
+        // No sync source but playing - manual playback mode
+        // (This case can be handled separately if needed)
+    }
+}
+
+void LayerPlayback::updateFromSyncSource() {
+    if (!syncSource_ || !syncSource_->isConnected()) {
+        // No sync source - manual playback or paused
+        return;
+    }
+
+    static bool wasRolling = false;
+    static int64_t lastLoggedFrame = -1;
+    
+    uint8_t rolling = 0;
+    int64_t syncFrame = syncSource_->pollFrame(&rolling);
+    
+    // Debug: log frame and rolling state periodically
+    static int debugCounter = 0;
+    if (++debugCounter % 60 == 0) {  // Log every 60 calls (~1 second at 60fps)
+        LOG_VERBOSE << "MTC poll: syncFrame=" << syncFrame << ", rolling=" << (int)rolling;
+    }
+    
+    // Log MTC status changes
+    if (rolling != 0 && !wasRolling) {
+        // MTC started rolling
+        LOG_INFO << "MTC: Started rolling - playback starting (frame=" << syncFrame << ")";
+        wasRolling = true;
+    } else if (rolling == 0 && wasRolling) {
+        // MTC stopped rolling
+        LOG_INFO << "MTC: Stopped rolling - playback paused";
+        wasRolling = false;
+    }
+    
+    // Also log when we have a frame but not rolling (for debugging)
+    if (syncFrame >= 0 && rolling == 0 && debugCounter % 300 == 0) {
+        LOG_VERBOSE << "MTC: Has frame " << syncFrame << " but not rolling (waiting for MTC to start)";
+    }
+    
+    // Automatically start playing when MTC is rolling (rolling != 0)
+    // OR when we have valid frame data (MTC is providing timecode)
+    // This ensures playback starts automatically when MTC is received on startup
+    // even if the rolling detection is temporarily false due to timing
+    if ((rolling != 0 || syncFrame >= 0) && !playing_) {
+        // Start playing if MTC is rolling OR we have valid frame data
+        // This handles cases where rolling detection is temporarily false
+        // but we're still receiving valid MTC timecode
+        playing_ = true;
+        if (syncFrame >= 0 && rolling == 0) {
+            LOG_VERBOSE << "MTC: Starting playback with frame " << syncFrame << " (rolling detection pending)";
+        }
+    }
+    
+    // Update playing state based on rolling
+    // Only pause if we truly have no MTC data (not just rolling=false)
+    // If rolling stops but we still have frame data, keep playing
+    // (MTC might be paused but still providing position)
+    if (rolling == 0 && syncFrame < 0 && playing_) {
+        // No MTC data at all - pause playback
+        playing_ = false;
+    }
+    
+    // Log MTC timecode periodically (every 30 frames or when frame changes significantly)
+    if (syncFrame >= 0 && rolling != 0) {
+        if (lastLoggedFrame < 0 || std::abs(syncFrame - lastLoggedFrame) >= 30) {
+            // Format timecode for display
+            FrameInfo info = getFrameInfo();
+            if (info.framerate > 0.0) {
+                std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
+                LOG_INFO << "MTC: " << smpte << " (frame " << syncFrame << ", rolling)";
+            } else {
+                LOG_INFO << "MTC: frame " << syncFrame << " (rolling)";
+            }
+            lastLoggedFrame = syncFrame;
+        }
+    } else if (syncFrame >= 0 && rolling == 0) {
+        // Log when we have a frame but not rolling (stopped)
+        if (lastLoggedFrame != syncFrame) {
+            FrameInfo info = getFrameInfo();
+            if (info.framerate > 0.0) {
+                std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
+                LOG_INFO << "MTC: " << smpte << " (frame " << syncFrame << ", stopped)";
+            } else {
+                LOG_INFO << "MTC: frame " << syncFrame << " (stopped)";
+            }
+            lastLoggedFrame = syncFrame;
+        }
+    }
+    
+    // Process frame updates only if we have a valid frame
+    if (syncFrame >= 0) {
+        // Apply time-scaling: multiply by timescale, then add offset
+        // Note: Framerate conversion is handled by FramerateConverterSyncSource wrapper
+        // LayerPlayback doesn't need to know about framerate conversion
+        int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + timeOffset_;
+        
+        // Always apply wraparound if frame exceeds video duration
+        // This allows video to loop when MTC timecode exceeds video length
+        if (inputSource_) {
+            FrameInfo info = inputSource_->getFrameInfo();
+            int64_t totalFrames = info.totalFrames;
+            
+            if (totalFrames > 0) {
+                // Wrap around if frame is beyond duration
+                if (adjustedFrame >= totalFrames) {
+                    adjustedFrame = adjustedFrame % totalFrames;
+                }
+                // Wrap around if frame is negative
+                if (adjustedFrame < 0) {
+                    adjustedFrame = (adjustedFrame % totalFrames + totalFrames) % totalFrames;
+                }
+            }
+        }
+        
+        // Match xjadeo's approach: always try to load the frame if it changed
+        // xjadeo calls display_frame() every loop iteration, but only processes if frame changed
+        // We do the same: poll MTC every update, but only load if frame changed
+        // The seek logic inside loadFrame/readFrame will handle optimization
+        // (no seek for consecutive frames, etc.)
+        // xjadeo doesn't check for full SYSEX frames - it just uses the frame number
+        // and lets seek_frame() decide whether to seek based on frame relationships
+        if (adjustedFrame != lastSyncFrame_) {
+            if (loadFrame(adjustedFrame)) {
+                // Normal update - loadFrame() handles seek optimization internally
+                // (no seek for consecutive frames, seeks for backwards/non-consecutive)
+                currentFrame_ = adjustedFrame;
+                lastSyncFrame_ = adjustedFrame;
+            } else {
+                // If load fails, try seeking first (helps with keyframe-based codecs)
+                if (inputSource_ && inputSource_->seek(adjustedFrame)) {
+                    if (loadFrame(adjustedFrame)) {
+                        currentFrame_ = adjustedFrame;
+                        lastSyncFrame_ = adjustedFrame;
+                    }
+                }
+            }
+        }
+    } else {
+        // No valid sync frame yet (MTC not received or not rolling)
+        // Show frame 0 as fallback so video is visible while waiting for MTC
+        // This matches original xjadeo behavior when newFrame < 0 (uses userFrame)
+        if (inputSource_ && currentFrame_ < 0) {
+            // Only load frame 0 once if we haven't loaded any frame yet
+            // This ensures video is visible even when waiting for MTC
+            if (loadFrame(0)) {
+                currentFrame_ = 0;
+                LOG_INFO << "Loaded frame 0 as fallback (waiting for MTC)";
+                // Keep lastSyncFrame_ as -1 so we reload when MTC arrives
+            } else {
+                LOG_WARNING << "Failed to load frame 0 as fallback";
+            }
+        }
+    }
+}
+
+bool LayerPlayback::loadFrame(int64_t frameNumber) {
+    if (!inputSource_ || !inputSource_->isReady()) {
+        return false;
+    }
+
+    // Check if this is a HAP codec - use GPU texture buffer (zero-copy)
+    HAPVideoInput* hapInput = dynamic_cast<HAPVideoInput*>(inputSource_.get());
+    if (hapInput) {
+        // HAP codec: decode directly to GPU texture
+        if (hapInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
+            frameOnGPU_ = true;
+            LOG_VERBOSE << "Loaded HAP frame " << frameNumber << " to GPU texture";
+            return true;
+        }
+        return false;
+    }
+    
+    // Check if this is VideoFileInput with hardware decoding
+    VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(inputSource_.get());
+    if (videoInput) {
+        // Check if hardware decoding is available and should be used
+        InputSource::DecodeBackend backend = videoInput->getOptimalBackend();
+        if (backend == InputSource::DecodeBackend::GPU_HARDWARE) {
+            // Hardware decoding: decode directly to GPU texture
+            if (videoInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
+                frameOnGPU_ = true;
+                LOG_VERBOSE << "Loaded hardware-decoded frame " << frameNumber << " to GPU texture";
+                return true;
+            }
+            // If hardware decoding fails, fall through to software decoding
+            LOG_WARNING << "Hardware decoding failed for frame " << frameNumber << ", falling back to software";
+        }
+        
+        // Software decoding: use CPU frame buffer
+        if (videoInput->readFrame(frameNumber, cpuFrameBuffer_)) {
+            frameOnGPU_ = false;
+            LOG_VERBOSE << "Loaded software-decoded frame " << frameNumber << " to CPU buffer";
+            return true;
+        }
+        return false;
+    }
+    
+    // Other input sources: use CPU frame buffer (default)
+    if (inputSource_->readFrame(frameNumber, cpuFrameBuffer_)) {
+        frameOnGPU_ = false;
+        LOG_VERBOSE << "Loaded frame " << frameNumber << " to CPU buffer";
+        return true;
+    }
+    return false;
+}
+
+bool LayerPlayback::getFrameBuffer(FrameBuffer& cpuBuffer, GPUTextureFrameBuffer& gpuBuffer) {
+    if (frameOnGPU_) {
+        // Frame is on GPU - return GPU buffer
+        gpuBuffer = gpuFrameBuffer_;
+        return true; // true = on GPU
+    } else {
+        // Frame is on CPU - return CPU buffer
+        cpuBuffer = cpuFrameBuffer_;
+        return false; // false = on CPU
+    }
+}
+
+bool LayerPlayback::isHAPCodec() const {
+    if (!inputSource_) {
+        return false;
+    }
+    
+    InputSource::CodecType codec = inputSource_->detectCodec();
+    return codec == InputSource::CodecType::HAP ||
+           codec == InputSource::CodecType::HAP_Q ||
+           codec == InputSource::CodecType::HAP_ALPHA;
+}
+
+bool LayerPlayback::isReady() const {
+    return inputSource_ != nullptr && inputSource_->isReady();
+}
+
+FrameInfo LayerPlayback::getFrameInfo() const {
+    if (inputSource_) {
+        return inputSource_->getFrameInfo();
+    }
+    return FrameInfo();
+}
+
+void LayerPlayback::reverse() {
+    // Reverse playback: multiply timescale by -1.0 and adjust offset
+    // to keep current frame displayed
+    if (currentFrame_ >= 0) {
+        // Calculate new offset to maintain current frame position
+        // newFrame = (syncFrame * -timeScale) + newOffset
+        // We want: currentFrame = (syncFrame * -timeScale) + newOffset
+        // So: newOffset = currentFrame - (syncFrame * -timeScale)
+        // But we don't have syncFrame here, so we use a simpler approach:
+        // Set offset to currentFrame and negate timescale
+        timeOffset_ = currentFrame_;
+        timeScale_ = -timeScale_;
+    } else {
+        // Just negate timescale if no current frame
+        timeScale_ = -timeScale_;
+    }
+}
+
+} // namespace videocomposer
+

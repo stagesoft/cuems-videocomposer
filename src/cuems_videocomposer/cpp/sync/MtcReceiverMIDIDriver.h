@@ -36,9 +36,6 @@ public:
     void setFramerate(double framerate);
     void setVerbose(bool verbose);
     void setClockAdjustment(bool enable);
-    
-    // Check if last update was likely a full SYSEX frame (for seeking)
-    bool wasLastUpdateFullFrame() const;
 
 private:
     std::unique_ptr<MtcReceiver> mtcReceiver_;
@@ -46,13 +43,6 @@ private:
     bool verbose_;
     bool clockAdjustment_;
     mutable std::mutex mutex_;
-    
-    // Track previous mtcHead to detect full frame jumps
-    mutable long int lastMtcHead_;
-    mutable bool lastWasFullFrame_;
-    
-    // Convert mtcreceiver milliseconds to frame number
-    int64_t millisecondsToFrame(long int ms, double fps) const;
 };
 
 } // namespace videocomposer

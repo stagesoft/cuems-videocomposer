@@ -28,6 +28,7 @@
 #include "VideoComposerApplication.h"
 #include "config/ConfigurationManager.h"
 #include "input/VideoFileInput.h"
+#include "input/HAPVideoInput.h"
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
 #include "layer/LayerManager.h"
@@ -238,15 +239,41 @@ bool VideoComposerApplication::createInitialLayer() {
         return false;
     }
 
-    // Create input source
-    auto inputSource = std::make_unique<VideoFileInput>();
-    
-    // Set no-index option if configured
-    bool noIndex = config_->getBool("want_noindex", false);
-    inputSource->setNoIndex(noIndex);
-    
-    if (!inputSource->open(movieFile)) {
+    // Create input source with codec-aware routing
+    // First, detect codec by opening with VideoFileInput
+    auto tempInput = std::make_unique<VideoFileInput>();
+    if (!tempInput->open(movieFile)) {
         return false;
+    }
+
+    // Detect codec and create appropriate input source
+    std::unique_ptr<InputSource> inputSource;
+    InputSource::CodecType codec = tempInput->detectCodec();
+    
+    // Check for any HAP variant (HAP, HAP_Q, or HAP_ALPHA)
+    if (codec == InputSource::CodecType::HAP || 
+        codec == InputSource::CodecType::HAP_Q || 
+        codec == InputSource::CodecType::HAP_ALPHA) {
+        // HAP codec: use HAPVideoInput for optimal GPU decoding
+        tempInput->close();
+        auto hapInput = std::make_unique<HAPVideoInput>();
+        if (!hapInput->open(movieFile)) {
+            return false;
+        }
+        inputSource = std::move(hapInput);
+    } else {
+        // Other codecs: use VideoFileInput
+        // Set no-index option if configured
+        bool noIndex = config_->getBool("want_noindex", false);
+        tempInput->setNoIndex(noIndex);
+        // Reopen with no-index setting if needed
+        if (noIndex) {
+            tempInput->close();
+            if (!tempInput->open(movieFile)) {
+                return false;
+            }
+        }
+        inputSource = std::move(tempInput);
     }
 
     // Create sync source (optional - can be manual)

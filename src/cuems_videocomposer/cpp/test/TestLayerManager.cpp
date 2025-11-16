@@ -25,6 +25,11 @@ public:
     }
     bool isReady() const override { return true; }
     int64_t getCurrentFrame() const override { return 0; }
+    
+    // New methods from InputSource interface
+    CodecType detectCodec() const override { return CodecType::SOFTWARE; }
+    bool supportsDirectGPUTexture() const override { return false; }
+    DecodeBackend getOptimalBackend() const override { return DecodeBackend::CPU_SOFTWARE; }
 };
 
 bool test_LayerManager_AddLayer() {
@@ -91,9 +96,10 @@ bool test_LayerManager_ZOrder() {
     
     auto sorted = manager.getLayersSortedByZOrder();
     TEST_ASSERT_EQ(sorted.size(), 3);
-    TEST_ASSERT_EQ(sorted[0]->properties().zOrder, 5);
+    // After descending sort (highest zOrder first), order should be: 15, 10, 5
+    TEST_ASSERT_EQ(sorted[0]->properties().zOrder, 15);
     TEST_ASSERT_EQ(sorted[1]->properties().zOrder, 10);
-    TEST_ASSERT_EQ(sorted[2]->properties().zOrder, 15);
+    TEST_ASSERT_EQ(sorted[2]->properties().zOrder, 5);
     
     return true;
 }
@@ -137,15 +143,17 @@ bool test_LayerManager_Reorder() {
     layer2->setLayerId(2);
     layer2->properties().zOrder = 2;
     
-    manager.addLayer(std::move(layer1));
-    manager.addLayer(std::move(layer2));
+    int id1 = manager.addLayer(std::move(layer1));
+    int id2 = manager.addLayer(std::move(layer2));
     
-    bool moved = manager.moveLayerToTop(1);
+    // After addLayer, layers get new IDs assigned, so we need to use the returned IDs
+    bool moved = manager.moveLayerToTop(id1);
     TEST_ASSERT_TRUE(moved);
     
     auto sorted = manager.getLayersSortedByZOrder();
-    TEST_ASSERT_EQ(sorted[0]->getLayerId(), 1);
-    TEST_ASSERT_EQ(sorted[1]->getLayerId(), 2);
+    // After moveLayerToTop, layer with id1 should have highest zOrder and be first
+    TEST_ASSERT_EQ(sorted[0]->getLayerId(), id1);
+    TEST_ASSERT_EQ(sorted[1]->getLayerId(), id2);
     
     return true;
 }

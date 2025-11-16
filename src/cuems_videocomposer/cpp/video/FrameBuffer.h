@@ -11,6 +11,8 @@ namespace videocomposer {
 class FrameBuffer {
 public:
     FrameBuffer();
+    FrameBuffer(const FrameBuffer& other);  // Copy constructor
+    FrameBuffer& operator=(const FrameBuffer& other);  // Copy assignment
     ~FrameBuffer();
 
     // Allocate buffer for given format and dimensions

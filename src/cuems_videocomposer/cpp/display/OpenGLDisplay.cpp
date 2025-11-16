@@ -334,6 +334,10 @@ bool OpenGLDisplay::initGLX() {
 
     XMapRaised(display_, window_);
     XSync(display_, False);
+    
+    // Ensure window is visible and raised
+    XRaiseWindow(display_, window_);
+    XFlush(display_);
 
     return true;
 }

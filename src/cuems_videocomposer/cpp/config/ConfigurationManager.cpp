@@ -15,7 +15,7 @@ ConfigurationManager::~ConfigurationManager() {
 
 void ConfigurationManager::loadDefaults() {
     // Set default values
-    setInt("osc_port", 0);
+    setInt("osc_port", 7000); // Default OSC port
     setBool("remote_en", false);
     setBool("mq_en", false);
     setBool("want_quiet", false);

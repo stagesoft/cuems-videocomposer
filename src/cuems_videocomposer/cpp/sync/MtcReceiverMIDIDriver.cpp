@@ -17,8 +17,6 @@ MtcReceiverMIDIDriver::MtcReceiverMIDIDriver()
     , framerate_(25.0)
     , verbose_(false)
     , clockAdjustment_(false)
-    , lastMtcHead_(0)
-    , lastWasFullFrame_(false)
 {
 }
 
@@ -49,9 +47,13 @@ bool MtcReceiverMIDIDriver::open(const std::string& portId) {
                 fflush(stdout);
             }
             
-            // Use default constructor parameters like cuems-audioplayer does
-            // Default: RtMidi::LINUX_ALSA, "Cuems Mtc Receiver", queueSizeLimit=100
-            mtcReceiver_ = std::make_unique<MtcReceiver>();
+            // Create mtcreceiver with custom client name for aconnect -l
+            // Use "cuems-videocomposer" to match ALSA Sequencer naming
+            mtcReceiver_ = std::make_unique<MtcReceiver>(
+                RtMidi::LINUX_ALSA,
+                "cuems-videocomposer",
+                100  // queueSizeLimit
+            );
             
             errorFlag = false;
             
@@ -124,24 +126,18 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
         return -1;
     }
     
-    // Get current MTC head in milliseconds
-    long int mtcHeadMs = MtcReceiver::mtcHead;
+    // Get current timecode frame directly (like xjadeo - discrete updates)
+    // xjadeo uses smpte_to_frame() which calculates: frame = f + fps * (s + 60*m + 3600*h)
+    // This matches xjadeo's approach: only update when complete timecode is received
+    // No incremental updates, no backwards jumps from mtcHead resets
+    MtcFrame curFrame = MtcReceiver::getCurFrame();
     
-    // If mtcHead is 0, we haven't received any complete timecode yet
+    // Check if we have valid timecode by checking mtcHead (mtcreceiver sets this when timecode is received)
+    // Note: curFrame can be 00:00:00:00 which is valid, so we check mtcHead instead
+    long int mtcHeadMs = MtcReceiver::mtcHead;
     if (mtcHeadMs == 0) {
-        lastMtcHead_ = 0;
-        lastWasFullFrame_ = false;
         return -1;
     }
-    
-    // Use explicit marker from mtcreceiver (feature_full_frame_marker branch)
-    // This is 100% accurate - no heuristics needed
-    // mtcreceiver sets wasLastUpdateFullFrame=true in decodeFullFrame()
-    // and wasLastUpdateFullFrame=false in decodeQuarterFrame() when complete
-    bool isFullFrame = MtcReceiver::wasLastUpdateFullFrame;
-    
-    lastWasFullFrame_ = isFullFrame;
-    lastMtcHead_ = mtcHeadMs; // Keep tracking for potential fallback/debugging
     
     // Check if timecode is running (for rolling state)
     bool isRunning = MtcReceiver::isTimecodeRunning;
@@ -154,25 +150,29 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
         lastRunningState = isRunning;
     }
     
-    // Get current frame rate from mtcreceiver
-    unsigned char mtcFrameRate = MtcReceiver::curFrameRate;
-    
-    // Use mtcreceiver's frame rate if available, otherwise use our framerate
+    // Get frame rate from MTC type (matches xjadeo's smpte_to_frame logic)
     double fps = framerate_;
-    if (mtcFrameRate == 0) fps = 24.0;
-    else if (mtcFrameRate == 1) fps = 25.0;
-    else if (mtcFrameRate == 2) fps = 29.97;
-    else if (mtcFrameRate == 3) fps = 30.0;
+    switch (curFrame.rate) {
+        case 0: fps = 24.0; break;
+        case 1: fps = 25.0; break;
+        case 2: fps = 29.97; break;  // Drop-frame (29.97 fps)
+        case 3: fps = 30.0; break;
+        default: fps = framerate_; break;
+    }
     
-    // Convert milliseconds to frame number
-    int64_t frame = millisecondsToFrame(mtcHeadMs, fps);
+    // Calculate frame number directly from timecode components (like xjadeo)
+    // This matches xjadeo's smpte_to_frame() calculation for non-dropframe:
+    // frame = f + fps * (s + 60*m + 3600*h)
+    // xjadeo only updates when complete timecode is received, so no backwards jumps
+    int64_t totalSeconds = curFrame.hours * 3600 + curFrame.minutes * 60 + curFrame.seconds;
+    int64_t frame = curFrame.frames + static_cast<int64_t>(fps * totalSeconds);
     
     // Return frame even if not "running" - we have valid MTC data
     // The rolling state will be determined separately
     
     if (verbose_ && frame >= 0) {
         // Log frame updates periodically
-        LOG_INFO << "MTC: frame " << frame << " (mtcHead=" << mtcHeadMs << "ms, fps=" << fps << ", rolling)";
+        LOG_INFO << "MTC: frame " << frame << " (fps=" << fps << ", rolling)";
     }
     
     // Apply clock adjustment if enabled
@@ -197,23 +197,6 @@ void MtcReceiverMIDIDriver::setVerbose(bool verbose) {
 void MtcReceiverMIDIDriver::setClockAdjustment(bool enable) {
     std::lock_guard<std::mutex> lock(mutex_);
     clockAdjustment_ = enable;
-}
-
-bool MtcReceiverMIDIDriver::wasLastUpdateFullFrame() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return lastWasFullFrame_;
-}
-
-int64_t MtcReceiverMIDIDriver::millisecondsToFrame(long int ms, double fps) const {
-    if (fps <= 0.0) {
-        return -1;
-    }
-    
-    // Convert milliseconds to seconds, then to frames
-    double seconds = ms / 1000.0;
-    int64_t frame = static_cast<int64_t>(std::round(seconds * fps));
-    
-    return frame;
 }
 
 } // namespace videocomposer

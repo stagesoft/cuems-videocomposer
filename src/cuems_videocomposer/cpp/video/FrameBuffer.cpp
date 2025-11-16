@@ -13,6 +13,36 @@ namespace videocomposer {
 FrameBuffer::FrameBuffer() : buffer_(nullptr), size_(0) {
 }
 
+FrameBuffer::FrameBuffer(const FrameBuffer& other) 
+    : buffer_(nullptr), size_(0), info_(other.info_) {
+    // Deep copy: allocate new buffer and copy data
+    if (other.buffer_ && other.size_ > 0 && other.info_.width > 0 && other.info_.height > 0) {
+        if (allocate(other.info_)) {
+            // Only copy if allocation succeeded and sizes match
+            if (buffer_ && size_ == other.size_) {
+                memcpy(buffer_, other.buffer_, size_);
+            }
+        }
+    }
+}
+
+FrameBuffer& FrameBuffer::operator=(const FrameBuffer& other) {
+    if (this != &other) {
+        release();
+        info_ = other.info_;
+        // Deep copy: allocate new buffer and copy data
+        if (other.buffer_ && other.size_ > 0 && other.info_.width > 0 && other.info_.height > 0) {
+            if (allocate(other.info_)) {
+                // Only copy if allocation succeeded and sizes match
+                if (buffer_ && size_ == other.size_) {
+                    memcpy(buffer_, other.buffer_, size_);
+                }
+            }
+        }
+    }
+    return *this;
+}
+
 FrameBuffer::~FrameBuffer() {
     release();
 }

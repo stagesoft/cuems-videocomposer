@@ -1,15 +1,25 @@
 #include "VideoFileInput.h"
 #include "../../ffcompat.h"
 #include "../utils/CLegacyBridge.h"
+#include "../utils/Logger.h"
 #include <cstring>
 #include <cassert>
 #include <algorithm>
+#include <vector>
+
+// OpenGL includes
+#ifdef __APPLE__
+#include <OpenGL/gl.h>
+#else
+#include <GL/gl.h>
+#endif
 
 extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/mem.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/error.h>
 }
 
 namespace videocomposer {
@@ -33,6 +43,11 @@ VideoFileInput::VideoFileInput()
     , noIndex_(false)
     , currentFrame_(-1)
     , ready_(false)
+    , hwDeviceCtx_(nullptr)
+    , hwFrame_(nullptr)
+    , hwDecoderType_(HardwareDecoder::Type::NONE)
+    , useHardwareDecoding_(false)
+    , codecCtxAllocated_(false)
 {
     frameRateQ_ = {1, 1};
     frameInfo_ = {};
@@ -84,8 +99,8 @@ bool VideoFileInput::open(const std::string& source) {
         return false;
     }
 
-    // Open codec
-    if (!openCodec()) {
+    // Open codec (try hardware first, fallback to software)
+    if (!openHardwareCodec() && !openCodec()) {
         avformat_close_input(&formatCtx_);
         formatCtx_ = nullptr;
         return false;
@@ -189,18 +204,199 @@ bool VideoFileInput::findVideoStream() {
     return videoStream_ >= 0;
 }
 
+bool VideoFileInput::openHardwareCodec() {
+    // Try to open hardware decoder if available
+    // First, we need to detect the codec type
+    AVStream* avStream = formatCtx_->streams[videoStream_];
+    AVCodecID codecId = avStream->codec->codec_id;
+    std::string codecName = avcodec_get_name(codecId);
+    
+    // Hardware decoding only for H.264, HEVC, AV1
+    if (codecId != AV_CODEC_ID_H264 && codecId != AV_CODEC_ID_HEVC && codecId != AV_CODEC_ID_AV1) {
+        LOG_VERBOSE << "Codec " << codecName << " does not support hardware decoding, will use software";
+        return false;
+    }
+
+    LOG_INFO << "Attempting to open hardware decoder for codec: " << codecName;
+
+    // Detect available hardware decoder
+    hwDecoderType_ = HardwareDecoder::detectAvailable();
+    if (hwDecoderType_ == HardwareDecoder::Type::NONE) {
+        LOG_INFO << "No hardware decoder available for " << codecName << ", falling back to software decoding";
+        return false;
+    }
+
+    // Check if hardware decoder is available for this codec
+    if (!HardwareDecoder::isAvailableForCodec(codecId)) {
+        LOG_INFO << "Hardware decoder not available for " << codecName << ", falling back to software decoding";
+        return false;
+    }
+
+    // Get hardware device type
+    AVHWDeviceType hwDeviceType = HardwareDecoder::getFFmpegDeviceType(hwDecoderType_);
+    if (hwDeviceType == AV_HWDEVICE_TYPE_NONE) {
+        return false;
+    }
+
+    // Create hardware device context
+    int ret = av_hwdevice_ctx_create(&hwDeviceCtx_, hwDeviceType, nullptr, nullptr, 0);
+    if (ret < 0) {
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+
+    // Find hardware decoder
+    std::string hwCodecName;
+    switch (hwDecoderType_) {
+        case HardwareDecoder::Type::VAAPI:
+            hwCodecName = codecName + "_vaapi";
+            break;
+        case HardwareDecoder::Type::CUDA:
+            hwCodecName = codecName + "_cuda";
+            break;
+        case HardwareDecoder::Type::VIDEOTOOLBOX:
+            hwCodecName = codecName; // VideoToolbox uses same name
+            break;
+        case HardwareDecoder::Type::DXVA2:
+            hwCodecName = codecName + "_dxva2";
+            break;
+        default:
+            return false;
+    }
+
+    AVCodec* hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
+    if (!hwCodec) {
+        LOG_WARNING << "Hardware decoder " << hwCodecName << " not found, falling back to software";
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+    
+    LOG_INFO << "Found hardware decoder: " << hwCodecName;
+
+    // Allocate codec context for hardware decoder
+    codecCtx_ = avcodec_alloc_context3(hwCodec);
+    if (!codecCtx_) {
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+    codecCtxAllocated_ = true;  // Mark as allocated (must be freed)
+
+    // Copy codec parameters from stream
+    if (avcodec_parameters_to_context(codecCtx_, avStream->codecpar) < 0) {
+        avcodec_free_context(&codecCtx_);
+        codecCtx_ = nullptr;
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+
+    // Set hardware device context
+    codecCtx_->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
+    if (!codecCtx_->hw_device_ctx) {
+        avcodec_free_context(&codecCtx_);
+        codecCtx_ = nullptr;
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+
+    // Get hardware pixel format
+    AVPixelFormat hwPixFmt = HardwareDecoder::getHardwarePixelFormat(hwDecoderType_, codecId);
+    if (hwPixFmt == AV_PIX_FMT_NONE) {
+        avcodec_free_context(&codecCtx_);
+        codecCtx_ = nullptr;
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+
+    // Set hardware pixel format callback
+    codecCtx_->get_format = [](AVCodecContext* ctx, const AVPixelFormat* pix_fmts) -> AVPixelFormat {
+        const AVPixelFormat* p;
+        AVPixelFormat hwPixFmt = *reinterpret_cast<AVPixelFormat*>(ctx->opaque);
+        for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+            if (*p == hwPixFmt) {
+                return *p;
+            }
+        }
+        return AV_PIX_FMT_NONE;
+    };
+    codecCtx_->opaque = reinterpret_cast<void*>(static_cast<intptr_t>(hwPixFmt));
+
+    // Open hardware codec
+    if (avcodec_open2(codecCtx_, hwCodec, nullptr) < 0) {
+        LOG_WARNING << "Failed to open hardware decoder " << hwCodecName << ", falling back to software";
+        avcodec_free_context(&codecCtx_);
+        codecCtx_ = nullptr;
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+    
+    LOG_INFO << "Successfully opened hardware decoder: " << hwCodecName 
+             << " (" << HardwareDecoder::getName(hwDecoderType_) << ")";
+
+    // Allocate frames
+    frame_ = av_frame_alloc();
+    if (!frame_) {
+        avcodec_free_context(&codecCtx_);
+        codecCtx_ = nullptr;
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+
+    hwFrame_ = av_frame_alloc();
+    if (!hwFrame_) {
+        av_frame_free(&frame_);
+        frame_ = nullptr;
+        avcodec_free_context(&codecCtx_);
+        codecCtx_ = nullptr;
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+
+    frameFMT_ = av_frame_alloc();
+    if (!frameFMT_) {
+        av_frame_free(&frame_);
+        frame_ = nullptr;
+        av_frame_free(&hwFrame_);
+        hwFrame_ = nullptr;
+        avcodec_free_context(&codecCtx_);
+        codecCtx_ = nullptr;
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
+
+    useHardwareDecoding_ = true;
+    LOG_INFO << "Using HARDWARE decoding for " << codecName;
+    return true;
+}
+
 bool VideoFileInput::openCodec() {
     AVStream* avStream = formatCtx_->streams[videoStream_];
     codecCtx_ = avStream->codec;
+    codecCtxAllocated_ = false;  // Part of stream (don't free separately)
+    
+    std::string codecName = avcodec_get_name(codecCtx_->codec_id);
+    LOG_INFO << "Opening software decoder for codec: " << codecName;
 
     AVCodec* codec = avcodec_find_decoder(codecCtx_->codec_id);
     if (!codec) {
+        LOG_ERROR << "Software decoder not found for codec: " << codecName;
         return false;
     }
 
     if (avcodec_open2(codecCtx_, codec, nullptr) < 0) {
+        LOG_ERROR << "Failed to open software decoder for codec: " << codecName;
         return false;
     }
+    
+    LOG_INFO << "Successfully opened software decoder: " << codecName;
 
     // Allocate frames
     frame_ = av_frame_alloc();
@@ -210,11 +406,13 @@ bool VideoFileInput::openCodec() {
 
     frameFMT_ = av_frame_alloc();
     if (!frameFMT_) {
-        av_free(frame_);
+        av_frame_free(&frame_);
         frame_ = nullptr;
         return false;
     }
 
+    useHardwareDecoding_ = false;
+    LOG_INFO << "Using SOFTWARE decoding for " << codecName;
     return true;
 }
 
@@ -400,9 +598,24 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         return false;
     }
 
-    // Seek to frame if needed
-    if (!seek(frameNumber)) {
-        return false;
+    // Check if we need to seek (optimize for sequential frame access)
+    bool needSeek = false;
+    if (currentFrame_ < 0 || currentFrame_ != frameNumber) {
+        // Check if this is a sequential frame (next frame after current)
+        if (currentFrame_ >= 0 && frameNumber == currentFrame_ + 1) {
+            // Sequential frame - don't seek, just continue reading
+            needSeek = false;
+        } else {
+            // Non-sequential frame - need to seek
+            needSeek = true;
+        }
+    }
+    
+    // Seek only if needed
+    if (needSeek) {
+        if (!seek(frameNumber)) {
+            return false;
+        }
     }
 
     // Decode frame
@@ -414,7 +627,33 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     int bailout = 20;
     bool frameFinished = false;
 
-    while (bailout > 0 && !frameFinished) {
+    // Get target timestamp for the frame we want (like xjadeo)
+    int64_t targetTimestamp = -1;
+    if (frameIndex_ && frameNumber >= 0 && frameNumber < frameCount_) {
+        targetTimestamp = frameIndex_[frameNumber].timestamp;
+    } else if (!noIndex_ && frameInfo_.totalFrames > 0) {
+        // Fallback: calculate timestamp from frame number
+        AVRational timeBase = formatCtx_->streams[videoStream_]->time_base;
+        double fps = av_q2d(av_guess_frame_rate(formatCtx_, formatCtx_->streams[videoStream_], nullptr));
+        if (fps > 0) {
+            targetTimestamp = static_cast<int64_t>((frameNumber / fps) / av_q2d(timeBase));
+        }
+    }
+
+    // Decode frames until we get the target frame (like xjadeo's seek_frame)
+    // Use PTS matching with fuzzy matching to handle keyframe-based codecs
+    int64_t oneFrame = 1;
+    if (frameIndex_ && frameNumber > 0 && frameNumber < frameCount_) {
+        // Calculate one_frame equivalent (timestamp difference between consecutive frames)
+        if (frameNumber > 0 && frameIndex_[frameNumber-1].timestamp >= 0 && 
+            frameIndex_[frameNumber].timestamp >= 0) {
+            oneFrame = frameIndex_[frameNumber].timestamp - frameIndex_[frameNumber-1].timestamp;
+            if (oneFrame <= 0) oneFrame = 1;
+        }
+    }
+    const int64_t prefuzz = oneFrame > 10 ? 1 : 0;
+
+    while (bailout > 0) {
         int err = av_read_frame(formatCtx_, &packet);
         if (err < 0) {
             if (err == AVERROR_EOF) {
@@ -432,12 +671,12 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
             continue;
         }
 
-    // Decode video frame
-    int gotFrame = 0;
+        // Decode video frame
+        int gotFrame = 0;
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(52, 21, 0)
-    err = avcodec_decode_video(codecCtx_, frame_, &gotFrame, packet.data, packet.size);
+        err = avcodec_decode_video(codecCtx_, frame_, &gotFrame, packet.data, packet.size);
 #else
-    err = avcodec_decode_video2(codecCtx_, frame_, &gotFrame, &packet);
+        err = avcodec_decode_video2(codecCtx_, frame_, &gotFrame, &packet);
 #endif
         av_free_packet(&packet);
 
@@ -446,11 +685,38 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
             continue;
         }
 
-        if (gotFrame) {
-            frameFinished = true;
-        } else {
+        if (!gotFrame) {
             --bailout;
+            continue;
         }
+
+        // Check if we got the target frame (like xjadeo's PTS matching)
+        int64_t pts = parsePTSFromFrame(frame_);
+        if (pts == AV_NOPTS_VALUE) {
+            --bailout;
+            continue;
+        }
+
+        // Match xjadeo's fuzzy PTS matching logic
+        if (targetTimestamp >= 0) {
+            if (pts + prefuzz >= targetTimestamp) {
+                // Fuzzy match: check if PTS is close enough to target
+                if (pts - targetTimestamp < oneFrame) {
+                    // Found target frame!
+                    frameFinished = true;
+                    break;
+                }
+                // PTS is beyond target but not close enough - might need to continue
+                // (this can happen with keyframe-based codecs)
+            }
+            // PTS is before target - continue decoding
+        } else {
+            // No target timestamp - just use first decoded frame
+            frameFinished = true;
+            break;
+        }
+
+        --bailout;
     }
 
     if (!frameFinished) {
@@ -535,6 +801,251 @@ int64_t VideoFileInput::getCurrentFrame() const {
     return currentFrame_;
 }
 
+InputSource::CodecType VideoFileInput::detectCodec() const {
+    if (!codecCtx_) {
+        return CodecType::SOFTWARE;
+    }
+
+    // Check for HAP codec
+    // Note: FFmpeg may use AV_CODEC_ID_HAP for all HAP variants
+    // The specific variant (HAP, HAP_Q, HAP_ALPHA) is determined by HAPVideoInput
+    if (codecCtx_->codec_id == AV_CODEC_ID_HAP) {
+        // Check for variant-specific codec IDs if available
+        #ifdef AV_CODEC_ID_HAPALPHA
+        if (codecCtx_->codec_id == AV_CODEC_ID_HAPALPHA) {
+            return CodecType::HAP_ALPHA;
+        }
+        #endif
+        #ifdef AV_CODEC_ID_HAPQ
+        if (codecCtx_->codec_id == AV_CODEC_ID_HAPQ) {
+            return CodecType::HAP_Q;
+        }
+        #endif
+        // Default to standard HAP - HAPVideoInput will detect the actual variant
+        return CodecType::HAP;
+    }
+
+    // Check for hardware-accelerated codecs
+    if (codecCtx_->codec_id == AV_CODEC_ID_H264) {
+        return CodecType::H264;
+    }
+    if (codecCtx_->codec_id == AV_CODEC_ID_HEVC) {
+        return CodecType::HEVC;
+    }
+    if (codecCtx_->codec_id == AV_CODEC_ID_AV1) {
+        return CodecType::AV1;
+    }
+
+    // Default to software codec
+    return CodecType::SOFTWARE;
+}
+
+bool VideoFileInput::supportsDirectGPUTexture() const {
+    // Only HAP codecs support direct GPU texture decoding
+    return detectCodec() == CodecType::HAP ||
+           detectCodec() == CodecType::HAP_Q ||
+           detectCodec() == CodecType::HAP_ALPHA;
+}
+
+InputSource::DecodeBackend VideoFileInput::getOptimalBackend() const {
+    CodecType codec = detectCodec();
+    
+    // HAP codecs use direct GPU texture (zero-copy)
+    if (codec == CodecType::HAP || codec == CodecType::HAP_Q || codec == CodecType::HAP_ALPHA) {
+        return DecodeBackend::HAP_DIRECT;
+    }
+    
+    // Hardware-accelerated codecs (H.264, HEVC, AV1) can use GPU hardware decoder
+    if (codec == CodecType::H264 || codec == CodecType::HEVC || codec == CodecType::AV1) {
+        // Check if hardware decoder is available for this codec
+        if (!codecCtx_) {
+            // Codec context not yet opened, check if hardware decoder exists
+            AVCodecID codecId = AV_CODEC_ID_NONE;
+            if (codec == CodecType::H264) {
+                codecId = AV_CODEC_ID_H264;
+            } else if (codec == CodecType::HEVC) {
+                codecId = AV_CODEC_ID_HEVC;
+            } else if (codec == CodecType::AV1) {
+                codecId = AV_CODEC_ID_AV1;
+            }
+            
+            if (codecId != AV_CODEC_ID_NONE && HardwareDecoder::isAvailableForCodec(codecId)) {
+                return DecodeBackend::GPU_HARDWARE;
+            }
+        } else {
+            // Codec context is open, check if we're using hardware decoding
+            if (useHardwareDecoding_) {
+                return DecodeBackend::GPU_HARDWARE;
+            }
+        }
+        
+        // Hardware decoder not available, use software
+        return DecodeBackend::CPU_SOFTWARE;
+    }
+    
+    // Software codecs use CPU
+    return DecodeBackend::CPU_SOFTWARE;
+}
+
+bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffer& textureBuffer) {
+    if (!isReady() || !useHardwareDecoding_) {
+        // Hardware decoding not available or not enabled
+        return false;
+    }
+
+    // Seek to frame if needed
+    if (!seek(frameNumber)) {
+        return false;
+    }
+
+    // Decode frame using hardware decoder
+    AVPacket packet;
+    av_init_packet(&packet);
+    packet.data = nullptr;
+    packet.size = 0;
+
+    int bailout = 20;
+    bool frameFinished = false;
+
+    while (bailout > 0 && !frameFinished) {
+        int err = av_read_frame(formatCtx_, &packet);
+        if (err < 0) {
+            if (err == AVERROR_EOF) {
+                --bailout;
+                av_free_packet(&packet);
+                continue;
+            } else {
+                av_free_packet(&packet);
+                return false;
+            }
+        }
+
+        if (packet.stream_index != videoStream_) {
+            av_free_packet(&packet);
+            continue;
+        }
+
+        // Send packet to hardware decoder
+        err = avcodec_send_packet(codecCtx_, &packet);
+        av_free_packet(&packet);
+
+        if (err < 0) {
+            --bailout;
+            continue;
+        }
+
+        // Receive frame from hardware decoder
+        err = avcodec_receive_frame(codecCtx_, hwFrame_);
+        if (err == 0) {
+            frameFinished = true;
+        } else if (err == AVERROR(EAGAIN)) {
+            // Need more input
+            --bailout;
+            continue;
+        } else {
+            --bailout;
+            continue;
+        }
+    }
+
+    if (!frameFinished) {
+        return false;
+    }
+
+    // Transfer hardware frame to GPU texture
+    return transferHardwareFrameToGPU(hwFrame_, textureBuffer);
+}
+
+bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer) {
+    if (!hwFrame || !hwFrame->data[0]) {
+        return false;
+    }
+
+    // Hardware frames need to be transferred to GPU texture
+    // The exact method depends on the hardware decoder type
+    
+    // For now, we'll need to download from hardware frame to CPU,
+    // then upload to GPU texture. In the future, we can optimize this
+    // to use zero-copy methods (e.g., CUDA interop, VAAPI surface export)
+    
+    // Allocate CPU frame for download
+    if (!frame_) {
+        frame_ = av_frame_alloc();
+        if (!frame_) {
+            return false;
+        }
+    }
+
+    // Download from hardware frame to CPU frame
+    int ret = av_hwframe_transfer_data(frame_, hwFrame, 0);
+    if (ret < 0) {
+        return false;
+    }
+
+    // Convert CPU frame to GPU texture
+    // For now, we'll use the existing CPU path and upload to GPU
+    // TODO: Implement zero-copy hardware frame to GPU texture transfer
+    
+    // Allocate texture buffer if needed
+    if (!textureBuffer.isValid() || 
+        textureBuffer.info().width != frameInfo_.width || 
+        textureBuffer.info().height != frameInfo_.height) {
+        GLenum textureFormat = GL_RGBA; // Uncompressed texture
+        if (!textureBuffer.allocate(frameInfo_, textureFormat, false)) {
+            return false;
+        }
+    }
+
+    // Convert frame format to RGBA and upload to GPU
+    // Initialize sws context if needed
+    if (!swsCtx_ || swsCtxWidth_ != frameInfo_.width || swsCtxHeight_ != frameInfo_.height) {
+        if (swsCtx_) {
+            sws_freeContext(swsCtx_);
+            swsCtx_ = nullptr;
+        }
+        
+        swsCtx_ = sws_getContext(
+            frame_->width, frame_->height, static_cast<AVPixelFormat>(frame_->format),
+            frameInfo_.width, frameInfo_.height, AV_PIX_FMT_RGBA,
+            SWS_BICUBIC, nullptr, nullptr, nullptr
+        );
+        if (!swsCtx_) {
+            return false;
+        }
+        swsCtxWidth_ = frameInfo_.width;
+        swsCtxHeight_ = frameInfo_.height;
+    }
+
+    // Allocate temporary CPU buffer for RGBA data
+    int rgbaStride = frameInfo_.width * 4;
+    size_t rgbaSize = rgbaStride * frameInfo_.height;
+    std::vector<uint8_t> rgbaBuffer(rgbaSize);
+
+    // Prepare destination frame (RGBA)
+    uint8_t* dstData[4] = {rgbaBuffer.data(), nullptr, nullptr, nullptr};
+    int dstLinesize[4] = {rgbaStride, 0, 0, 0};
+    
+    // Scale and convert to RGBA
+    int result = sws_scale(swsCtx_,
+              (const uint8_t* const*)frame_->data, frame_->linesize,
+              0, frame_->height,
+              dstData, dstLinesize);
+    
+    if (result <= 0) {
+        return false;
+    }
+
+    // Upload RGBA data to GPU texture
+    // Note: uploadUncompressedData expects stride in bytes, which we already have
+    if (!textureBuffer.uploadUncompressedData(rgbaBuffer.data(), rgbaSize,
+                                             frameInfo_.width, frameInfo_.height,
+                                             GL_RGBA)) {
+        return false;
+    }
+
+    return true;
+}
+
 void VideoFileInput::cleanup() {
     // Free frame index
     if (frameIndex_) {
@@ -551,19 +1062,36 @@ void VideoFileInput::cleanup() {
     swsCtxWidth_ = 0;
     swsCtxHeight_ = 0;
 
-    // Free frames
+    // Free hardware frames (must use av_frame_free for frames allocated with av_frame_alloc)
+    if (hwFrame_) {
+        av_frame_free(&hwFrame_);
+        hwFrame_ = nullptr;
+    }
+
+    // Free frames (must use av_frame_free for frames allocated with av_frame_alloc)
     if (frameFMT_) {
-        av_free(frameFMT_);
+        av_frame_free(&frameFMT_);
         frameFMT_ = nullptr;
     }
     if (frame_) {
-        av_free(frame_);
+        av_frame_free(&frame_);
         frame_ = nullptr;
+    }
+
+    // Free hardware device context
+    if (hwDeviceCtx_) {
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
     }
 
     // Close codec
     if (codecCtx_) {
         avcodec_close(codecCtx_);
+        // Only free if we allocated it separately (hardware decoding)
+        // For software decoding, codecCtx_ is part of the stream and will be freed with format context
+        if (codecCtxAllocated_) {
+        avcodec_free_context(&codecCtx_);
+        }
         codecCtx_ = nullptr;
     }
 
@@ -578,6 +1106,8 @@ void VideoFileInput::cleanup() {
     lastDecodedFrameNo_ = -1;
     scanComplete_ = false;
     currentFrame_ = -1;
+    useHardwareDecoding_ = false;
+    hwDecoderType_ = HardwareDecoder::Type::NONE;
 }
 
 } // namespace videocomposer

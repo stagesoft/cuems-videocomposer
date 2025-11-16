@@ -3,6 +3,17 @@
 #include "../osd/OSDRenderer.h"
 #include <cstring>
 
+// HAP texture format constants
+#ifndef GL_COMPRESSED_RGB_S3TC_DXT1_EXT
+#define GL_COMPRESSED_RGB_S3TC_DXT1_EXT 0x83F0
+#endif
+#ifndef GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
+#define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
+#endif
+#ifndef GL_TEXTURE_2D
+#define GL_TEXTURE_2D 0x0DE1
+#endif
+
 extern "C" {
 #ifdef __APPLE__
 #include "OpenGL/glu.h"
@@ -114,12 +125,45 @@ bool OpenGLRenderer::uploadFrameToTexture(const FrameBuffer& frame) {
     GLenum format = GL_BGRA;
     GLenum type = GL_UNSIGNED_BYTE;
     
-    // Upload texture (using glTexImage2D like original, not glTexSubImage2D)
-    // Original xjadeo uploads texture every frame
-    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA,
-                 textureWidth_, textureHeight_, 0,
+    // Performance optimization: Use glTexSubImage2D when texture size hasn't changed
+    // This is faster than glTexImage2D because it doesn't reallocate texture storage
+    // Only use glTexImage2D when texture size changes (handled above)
+    glTexSubImage2D(GL_TEXTURE_RECTANGLE_ARB, 0,
+                    0, 0,  // xoffset, yoffset
+                    textureWidth_, textureHeight_,
                     format, type, frame.data());
 
+    return true;
+}
+
+bool OpenGLRenderer::bindGPUTexture(const GPUTextureFrameBuffer& gpuFrame) {
+    if (!gpuFrame.isValid()) {
+        return false;
+    }
+
+    GLuint textureId = gpuFrame.getTextureId();
+    if (textureId == 0) {
+        return false;
+    }
+
+    // All GPU textures (HAP and hardware-decoded) use GL_TEXTURE_2D
+    // GPUTextureFrameBuffer always allocates textures as GL_TEXTURE_2D
+    GLenum target = GL_TEXTURE_2D;
+    
+    glEnable(target);
+    glBindTexture(target, textureId);
+    
+    // Set texture parameters
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    
+    // Update texture dimensions for rendering
+    const FrameInfo& info = gpuFrame.info();
+    textureWidth_ = info.width;
+    textureHeight_ = info.height;
+    
     return true;
 }
 
@@ -158,7 +202,16 @@ void OpenGLRenderer::calculateCropCoordinates(const VideoLayer* layer, float& te
     const auto& props = layer->properties();
     const FrameInfo& frameInfo = layer->getFrameInfo();
     
+    calculateCropCoordinatesFromProps(props, frameInfo, texX, texY, texWidth, texHeight);
+}
+
+void OpenGLRenderer::calculateCropCoordinatesFromProps(const LayerProperties& props, const FrameInfo& frameInfo,
+                                                       float& texX, float& texY, float& texWidth, float& texHeight) {
     if (frameInfo.width == 0 || frameInfo.height == 0) {
+        texX = 0.0f;
+        texY = 0.0f;
+        texWidth = 1.0f;
+        texHeight = 1.0f;
         return;
     }
 
@@ -191,6 +244,13 @@ void OpenGLRenderer::calculateCropCoordinates(const VideoLayer* layer, float& te
         if (texY < 0.0f) texY = 0.0f;
         if (texX + texWidth > 1.0f) texWidth = 1.0f - texX;
         if (texY + texHeight > 1.0f) texHeight = 1.0f - texY;
+    }
+    else {
+        // No crop - use full texture
+        texX = 0.0f;
+        texY = 0.0f;
+        texWidth = 1.0f;
+        texHeight = 1.0f;
     }
 }
 
@@ -244,69 +304,77 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         return false;
     }
 
-    // Get layer's frame buffer
-    const FrameBuffer& frameBuffer = layer->getFrameBuffer();
-    if (!frameBuffer.isValid()) {
-        return false;
-    }
-
-    // Upload frame to texture
-    if (!uploadFrameToTexture(frameBuffer)) {
-        return false;
-    }
-
-    // Apply layer transform
-    applyLayerTransform(layer);
-
-    // Apply blend mode
-    applyBlendMode(layer);
-
-    // Set opacity
-    glColor4f(1.0f, 1.0f, 1.0f, props.opacity);
-
-    // Calculate quad size with letterboxing (matches original xjadeo)
-    // Original uses _gl_quad_x and _gl_quad_y for letterboxing
-    float quad_x = 1.0f;
-    float quad_y = 1.0f;
+    // Check if frame is on GPU (HAP or hardware-decoded)
+    FrameBuffer cpuBuffer;
+    GPUTextureFrameBuffer gpuBuffer;
+    bool isOnGPU = layer->getPreparedFrame(cpuBuffer, gpuBuffer);
     
-    // Get frame info for aspect ratio calculation
-    const FrameInfo& frameInfo = layer->getFrameInfo();
-    
-    if (letterbox_) {
-        // Calculate aspect ratios (matches original xjadeo logic)
-        float asp_src = frameInfo.aspect > 0.0f ? frameInfo.aspect : (float)props.width / (float)props.height;
-        float asp_dst = (float)viewportWidth_ / (float)viewportHeight_;
-        
-        if (asp_dst > asp_src) {
-            // Destination is wider - letterbox left/right
-            quad_x = asp_src / asp_dst;
-            quad_y = 1.0f;
-        } else {
-            // Destination is taller - letterbox top/bottom
-            quad_x = 1.0f;
-            quad_y = asp_dst / asp_src;
+    if (isOnGPU && gpuBuffer.isValid()) {
+        // Frame is on GPU - use GPU rendering path (zero-copy for HAP)
+        const FrameInfo& frameInfo = layer->getFrameInfo();
+        return renderLayerFromGPU(gpuBuffer, props, frameInfo);
+    } else if (!isOnGPU && cpuBuffer.isValid()) {
+        // Frame is on CPU - use CPU rendering path (upload to texture)
+        if (!uploadFrameToTexture(cpuBuffer)) {
+            return false;
         }
-    }
-    
-    // Render centered quad (matches original xjadeo)
-    float x = -quad_x;
-    float y = -quad_y;
-    float w = 2.0f * quad_x;
-    float h = 2.0f * quad_y;
+        
+        // Apply layer transform
+        applyLayerTransform(layer);
 
-    // Calculate texture coordinates for cropping/panorama
-    float texX = 0.0f, texY = 0.0f, texWidth = 1.0f, texHeight = 1.0f;
-    calculateCropCoordinates(layer, texX, texY, texWidth, texHeight);
+        // Apply blend mode
+        applyBlendMode(layer);
 
-    // Render quad (matches original xjadeo - always use renderQuad, crop is handled in texture coords)
+        // Set opacity
+        glColor4f(1.0f, 1.0f, 1.0f, props.opacity);
+
+        // Calculate quad size with letterboxing (matches original xjadeo)
+        // Original uses _gl_quad_x and _gl_quad_y for letterboxing
+        float quad_x = 1.0f;
+        float quad_y = 1.0f;
+        
+        // Get frame info for aspect ratio calculation
+        const FrameInfo& frameInfo = layer->getFrameInfo();
+        
+        if (letterbox_) {
+            // Calculate aspect ratios (matches original xjadeo logic)
+            float asp_src = frameInfo.aspect > 0.0f ? frameInfo.aspect : (float)props.width / (float)props.height;
+            float asp_dst = (float)viewportWidth_ / (float)viewportHeight_;
+            
+            if (asp_dst > asp_src) {
+                // Destination is wider - letterbox left/right
+                quad_x = asp_src / asp_dst;
+                quad_y = 1.0f;
+            } else {
+                // Destination is taller - letterbox top/bottom
+                quad_x = 1.0f;
+                quad_y = asp_dst / asp_src;
+            }
+        }
+        
+        // Render centered quad (matches original xjadeo)
+        float x = -quad_x;
+        float y = -quad_y;
+        float w = 2.0f * quad_x;
+        float h = 2.0f * quad_y;
+
+        // Calculate texture coordinates for cropping/panorama
+        float texX = 0.0f, texY = 0.0f, texWidth = 1.0f, texHeight = 1.0f;
+        calculateCropCoordinates(layer, texX, texY, texWidth, texHeight);
+
+        // Render quad (matches original xjadeo - always use renderQuad, crop is handled in texture coords)
         renderQuad(x, y, w, h);
 
-    // Disable texture (matches original xjadeo)
-    glDisable(GL_TEXTURE_2D);
+        // Disable texture (matches original xjadeo)
+        glDisable(GL_TEXTURE_2D);
 
-    glPopMatrix();
+        glPopMatrix();
 
-    return true;
+        return true;
+    } else {
+        // No valid frame available
+        return false;
+    }
 }
 
 void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layers) {
@@ -315,7 +383,9 @@ void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layer
     // Render layers in z-order (already sorted by LayerManager)
     for (const VideoLayer* layer : layers) {
         if (layer && layer->isReady()) {
-            renderLayer(layer);
+            bool rendered = renderLayer(layer);
+            // If no frame was rendered, clear will show black screen (expected)
+            // This is normal when waiting for MTC or when no frames are available yet
         }
     }
 }
@@ -330,6 +400,97 @@ void OpenGLRenderer::updateTexture(int width, int height) {
                      width, height, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
     }
+}
+
+bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, const LayerProperties& properties, const FrameInfo& frameInfo) {
+    if (!gpuFrame.isValid()) {
+        return false;
+    }
+
+    if (!properties.visible) {
+        return false;
+    }
+
+    // Bind GPU texture (HAP or hardware-decoded)
+    if (!bindGPUTexture(gpuFrame)) {
+        return false;
+    }
+
+    // Apply layer transform
+    glPushMatrix();
+    glScalef(properties.scaleX, properties.scaleY, 1.0f);
+    
+    // Apply rotation (around center)
+    if (properties.rotation != 0.0f) {
+        glTranslatef(0.5f, 0.5f, 0.0f);
+        glRotatef(properties.rotation, 0.0f, 0.0f, 1.0f);
+        glTranslatef(-0.5f, -0.5f, 0.0f);
+    }
+
+    // Apply blend mode
+    switch (properties.blendMode) {
+        case LayerProperties::NORMAL:
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            break;
+        case LayerProperties::MULTIPLY:
+            glBlendFunc(GL_DST_COLOR, GL_ZERO);
+            break;
+        case LayerProperties::SCREEN:
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
+            break;
+        case LayerProperties::OVERLAY:
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            break;
+    }
+
+    // Set opacity
+    glColor4f(1.0f, 1.0f, 1.0f, properties.opacity);
+
+    // Calculate quad size with letterboxing
+    float quad_x = 1.0f;
+    float quad_y = 1.0f;
+    
+    if (letterbox_) {
+        float asp_src = frameInfo.aspect > 0.0f ? frameInfo.aspect : (float)properties.width / (float)properties.height;
+        float asp_dst = (float)viewportWidth_ / (float)viewportHeight_;
+        
+        if (asp_dst > asp_src) {
+            quad_x = asp_src / asp_dst;
+            quad_y = 1.0f;
+        } else {
+            quad_x = 1.0f;
+            quad_y = asp_dst / asp_src;
+        }
+    }
+    
+    // Render centered quad
+    float x = -quad_x;
+    float y = -quad_y;
+    float w = 2.0f * quad_x;
+    float h = 2.0f * quad_y;
+
+    // Calculate texture coordinates for cropping/panorama
+    float texX = 0.0f, texY = 0.0f, texWidth = 1.0f, texHeight = 1.0f;
+    calculateCropCoordinatesFromProps(properties, frameInfo, texX, texY, texWidth, texHeight);
+
+    // Render quad with texture coordinates
+    // All GPU textures (HAP and hardware-decoded) use GL_TEXTURE_2D
+    // GL_TEXTURE_2D uses normalized texture coordinates (0.0-1.0)
+    GLenum target = GL_TEXTURE_2D;
+    
+    // Use normalized texture coordinates (0.0-1.0) for GL_TEXTURE_2D
+    glBegin(GL_QUADS);
+    glTexCoord2f(texX, texY + texHeight); glVertex2f(x, y);
+    glTexCoord2f(texX + texWidth, texY + texHeight); glVertex2f(x + w, y);
+    glTexCoord2f(texX + texWidth, texY); glVertex2f(x + w, y + h);
+    glTexCoord2f(texX, texY); glVertex2f(x, y + h);
+    glEnd();
+
+    // Disable texture
+    glDisable(target);
+    glPopMatrix();
+
+    return true;
 }
 
 void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {

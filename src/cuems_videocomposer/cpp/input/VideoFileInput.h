@@ -2,6 +2,8 @@
 #define VIDEOCOMPOSER_VIDEOFILEINPUT_H
 
 #include "InputSource.h"
+#include "HardwareDecoder.h"
+#include "../video/GPUTextureFrameBuffer.h"
 #include <string>
 #include <memory>
 #include <cstdint>
@@ -10,6 +12,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
+#include <libavutil/hwcontext.h>
 }
 
 namespace videocomposer {
@@ -34,6 +37,18 @@ public:
     bool seek(int64_t frameNumber) override;
     FrameInfo getFrameInfo() const override;
     int64_t getCurrentFrame() const override;
+    CodecType detectCodec() const override;
+    bool supportsDirectGPUTexture() const override;
+    DecodeBackend getOptimalBackend() const override;
+
+    // Hardware decoding support
+    /**
+     * Read a frame directly to GPU texture (for hardware-decoded frames)
+     * @param frameNumber Frame number to read
+     * @param textureBuffer GPUTextureFrameBuffer to store the decoded texture
+     * @return true on success, false on failure
+     */
+    bool readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffer& textureBuffer);
 
     // Additional methods specific to video files
     void setIgnoreStartOffset(bool ignore) { ignoreStartOffset_ = ignore; }
@@ -57,10 +72,12 @@ private:
     bool initializeFFmpeg();
     bool findVideoStream();
     bool openCodec();
+    bool openHardwareCodec();
     bool indexFrames();
     bool seekToFrame(int64_t frameNumber);
     bool seekByTimestamp(int64_t frameNumber);
     int64_t parsePTSFromFrame(AVFrame* frame);
+    bool transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer);
     void cleanup();
 
     // FFmpeg objects
@@ -72,6 +89,13 @@ private:
     int swsCtxWidth_;
     int swsCtxHeight_;
     int videoStream_;
+
+    // Hardware decoding
+    AVBufferRef* hwDeviceCtx_;        // Hardware device context
+    AVFrame* hwFrame_;                // Hardware frame (for hardware decoding)
+    HardwareDecoder::Type hwDecoderType_;  // Type of hardware decoder in use
+    bool useHardwareDecoding_;        // Whether hardware decoding is enabled
+    bool codecCtxAllocated_;          // Whether codecCtx_ was allocated separately (hardware) or is part of stream (software)
 
     // Frame indexing
     FrameIndex* frameIndex_;

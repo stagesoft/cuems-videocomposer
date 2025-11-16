@@ -135,22 +135,6 @@ int64_t MIDISyncSource::pollFrame(uint8_t* rolling) {
     return frame;
 }
 
-bool MIDISyncSource::wasLastUpdateFullFrame() const {
-    if (!isConnected()) {
-        return false;
-    }
-    
-#ifdef HAVE_MTCRECEIVER
-    MtcReceiverMIDIDriver* mtcDriver = dynamic_cast<MtcReceiverMIDIDriver*>(driver_.get());
-    if (mtcDriver) {
-        return mtcDriver->wasLastUpdateFullFrame();
-    }
-#endif
-    
-    // For other drivers, we don't have full frame detection yet
-    return false;
-}
-
 int64_t MIDISyncSource::getCurrentFrame() const {
     return currentFrame_;
 }

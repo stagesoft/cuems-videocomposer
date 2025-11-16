@@ -120,13 +120,13 @@ int64_t MTCDecoder::timecodeToFrame(double framerate) const {
         default: fps = framerate; break;
     }
     
-    // Convert to frame number
+    // Convert to frame number using MTC's native FPS (like xjadeo)
+    // xjadeo's default behavior (midi_clkconvert == 0): use MTC fps info directly
     int64_t frame = static_cast<int64_t>(totalSeconds * fps) + tc.frame;
     
-    // Apply framerate adjustment if needed
-    if (std::abs(framerate - fps) > 0.01) {
-        frame = static_cast<int64_t>(frame * (framerate / fps));
-    }
+    // Note: Framerate conversion is handled by FramerateConverterSyncSource wrapper
+    // This matches xjadeo's architecture where conversion is optional and configurable
+    // Don't apply conversion here - let the converter handle it if needed
     
     return frame;
 }

@@ -71,12 +71,6 @@ public:
      * @return true if driver selected successfully
      */
     bool chooseDriver(const std::string& driverName);
-    
-    /**
-     * Check if last update was a full SYSEX frame (for seeking)
-     * @return true if last update was a full frame
-     */
-    bool wasLastUpdateFullFrame() const;
 
 private:
     std::unique_ptr<MIDIDriver> driver_;

@@ -62,6 +62,47 @@ public:
      * @return Current frame number, or -1 if not available
      */
     virtual int64_t getCurrentFrame() const = 0;
+
+    /**
+     * Codec types supported by the system
+     */
+    enum class CodecType {
+        HAP,           // HAP codec (standard)
+        HAP_Q,         // HAP Q variant (higher quality)
+        HAP_ALPHA,     // HAP Alpha variant (with alpha channel)
+        H264,          // H.264/AVC
+        HEVC,          // H.265/HEVC
+        AV1,           // AV1
+        SOFTWARE       // Software codec (fallback)
+    };
+
+    /**
+     * Decode backend types
+     */
+    enum class DecodeBackend {
+        HAP_DIRECT,    // HAP direct GPU texture (zero-copy)
+        GPU_HARDWARE,  // GPU hardware decoder (NVDEC, VAAPI, etc.)
+        CPU_SOFTWARE   // CPU software decoder
+    };
+
+    /**
+     * Detect the codec type of this input source
+     * @return CodecType enum value
+     */
+    virtual CodecType detectCodec() const = 0;
+
+    /**
+     * Check if this input source supports direct GPU texture decoding
+     * HAP codecs can decode directly to OpenGL textures (zero-copy)
+     * @return true if direct GPU texture is supported
+     */
+    virtual bool supportsDirectGPUTexture() const = 0;
+
+    /**
+     * Get the optimal decode backend for this input source
+     * @return DecodeBackend enum value indicating best decoding method
+     */
+    virtual DecodeBackend getOptimalBackend() const = 0;
 };
 
 } // namespace videocomposer

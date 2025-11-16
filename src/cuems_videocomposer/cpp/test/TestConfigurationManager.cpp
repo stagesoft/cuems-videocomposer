@@ -12,7 +12,7 @@ bool test_ConfigurationManager_Defaults() {
     int oscPort = config.getInt("osc_port", 0);
     TEST_ASSERT_EQ(oscPort, 7000); // Default OSC port
     
-    bool letterbox = config.getBool("letterbox", false);
+    bool letterbox = config.getBool("want_letterbox", false);
     TEST_ASSERT_TRUE(letterbox); // Default letterbox enabled
     
     return true;

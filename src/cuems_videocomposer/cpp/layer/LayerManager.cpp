@@ -266,10 +266,10 @@ std::vector<VideoLayer*> LayerManager::getLayersSortedByZOrder() {
         result.push_back(layer.get());
     }
     
-    // Sort by z-order
+    // Sort by z-order (descending - higher zOrder first, so "top" layers are first)
     std::sort(result.begin(), result.end(),
         [](VideoLayer* a, VideoLayer* b) {
-            return a->properties().zOrder < b->properties().zOrder;
+            return a->properties().zOrder > b->properties().zOrder;
         });
     
     return result;
@@ -283,10 +283,10 @@ std::vector<const VideoLayer*> LayerManager::getLayersSortedByZOrder() const {
         result.push_back(layer.get());
     }
     
-    // Sort by z-order
+    // Sort by z-order (descending - higher zOrder first, so "top" layers are first)
     std::sort(result.begin(), result.end(),
         [](const VideoLayer* a, const VideoLayer* b) {
-            return a->properties().zOrder < b->properties().zOrder;
+            return a->properties().zOrder > b->properties().zOrder;
         });
     
     return result;

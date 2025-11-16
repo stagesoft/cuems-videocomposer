@@ -195,8 +195,8 @@ bool ALSASeqMIDIDriver::openSequencer() {
         return true; // Already open
     }
 
-    char seqName[32];
-    snprintf(seqName, sizeof(seqName), "cuems-videocomposer-%i", static_cast<int>(getpid()));
+    // Set client name for ALSA Sequencer (appears in aconnect -l)
+    const char* seqName = "cuems-videocomposer";
 
     int err = snd_seq_open(&seq_, "default", SND_SEQ_OPEN_INPUT, 0);
     if (err < 0) {

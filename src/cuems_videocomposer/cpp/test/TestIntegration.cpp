@@ -26,6 +26,11 @@ public:
     }
     bool isReady() const override { return true; }
     int64_t getCurrentFrame() const override { return 0; }
+    
+    // New methods from InputSource interface
+    CodecType detectCodec() const override { return CodecType::SOFTWARE; }
+    bool supportsDirectGPUTexture() const override { return false; }
+    DecodeBackend getOptimalBackend() const override { return DecodeBackend::CPU_SOFTWARE; }
 };
 
 bool test_Integration_LayerManagerWithMultipleLayers() {
@@ -45,11 +50,12 @@ bool test_Integration_LayerManagerWithMultipleLayers() {
     
     TEST_ASSERT_EQ(manager.getLayerCount(), 5);
     
-    // Test z-order sorting
+    // Test z-order sorting (descending - highest zOrder first)
     auto sorted = manager.getLayersSortedByZOrder();
     TEST_ASSERT_EQ(sorted.size(), 5);
+    // After descending sort, order should be: 4, 3, 2, 1, 0 (highest first)
     for (size_t i = 0; i < sorted.size(); ++i) {
-        TEST_ASSERT_EQ(sorted[i]->properties().zOrder, static_cast<int>(i));
+        TEST_ASSERT_EQ(sorted[i]->properties().zOrder, static_cast<int>(sorted.size() - 1 - i));
     }
     
     // Test layer removal
