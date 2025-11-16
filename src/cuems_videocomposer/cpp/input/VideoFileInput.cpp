@@ -471,7 +471,9 @@ bool VideoFileInput::indexFrames() {
         idx.pkt_pos = packet.pos;
         idx.frame_pts = ts;
         idx.frame_pos = packet.pos;
-        idx.timestamp = frameCount_;
+        // Calculate timestamp in stream's timebase (like xjadeo)
+        // timestamp = av_rescale_q(frameCount_, frameRateQ_, timeBase)
+        idx.timestamp = av_rescale_q(frameCount_, frameRateQ_, timeBase);
         idx.seekpts = ts;
         idx.seekpos = packet.pos;
         idx.key = (packet.flags & AV_PKT_FLAG_KEY) ? 1 : 0;
@@ -624,9 +626,6 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     packet.data = nullptr;
     packet.size = 0;
 
-    int bailout = 20;
-    bool frameFinished = false;
-
     // Get target timestamp for the frame we want (like xjadeo)
     int64_t targetTimestamp = -1;
     if (frameIndex_ && frameNumber >= 0 && frameNumber < frameCount_) {
@@ -636,7 +635,9 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         AVRational timeBase = formatCtx_->streams[videoStream_]->time_base;
         double fps = av_q2d(av_guess_frame_rate(formatCtx_, formatCtx_->streams[videoStream_], nullptr));
         if (fps > 0) {
-            targetTimestamp = static_cast<int64_t>((frameNumber / fps) / av_q2d(timeBase));
+            // Calculate timestamp in stream's timebase (like xjadeo)
+            AVRational frameRateQ = { static_cast<int>(fps * 1000), 1000 }; // Approximate
+            targetTimestamp = av_rescale_q(frameNumber, frameRateQ, timeBase);
         }
     }
 
@@ -645,13 +646,22 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     int64_t oneFrame = 1;
     if (frameIndex_ && frameNumber > 0 && frameNumber < frameCount_) {
         // Calculate one_frame equivalent (timestamp difference between consecutive frames)
-        if (frameNumber > 0 && frameIndex_[frameNumber-1].timestamp >= 0 && 
+        if (frameIndex_[frameNumber-1].timestamp >= 0 && 
             frameIndex_[frameNumber].timestamp >= 0) {
             oneFrame = frameIndex_[frameNumber].timestamp - frameIndex_[frameNumber-1].timestamp;
             if (oneFrame <= 0) oneFrame = 1;
         }
     }
     const int64_t prefuzz = oneFrame > 10 ? 1 : 0;
+    
+    // Increase bailout for formats that need more decoding iterations (like xjadeo uses 2 * seek_threshold)
+    // Some formats (especially keyframe-based codecs) may need to decode many frames to reach target
+    int bailout = 2 * 8; // 16 (xjadeo default), but increase for problematic formats
+    if (targetTimestamp >= 0 && frameIndex_) {
+        // For indexed files, we can be more generous with bailout
+        bailout = 32;
+    }
+    bool frameFinished = false;
 
     while (bailout > 0) {
         int err = av_read_frame(formatCtx_, &packet);
@@ -700,14 +710,15 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         // Match xjadeo's fuzzy PTS matching logic
         if (targetTimestamp >= 0) {
             if (pts + prefuzz >= targetTimestamp) {
-                // Fuzzy match: check if PTS is close enough to target
+                // Fuzzy match: check if PTS is close enough to target (like xjadeo line 674)
                 if (pts - targetTimestamp < oneFrame) {
                     // Found target frame!
                     frameFinished = true;
                     break;
                 }
-                // PTS is beyond target but not close enough - might need to continue
-                // (this can happen with keyframe-based codecs)
+                // PTS is beyond target but not close enough - continue decoding
+                // This can happen with keyframe-based codecs where we need to decode more frames
+                // xjadeo continues in this case and may eventually return an error if bailout expires
             }
             // PTS is before target - continue decoding
         } else {
@@ -720,6 +731,16 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     }
 
     if (!frameFinished) {
+        // Log detailed error information for debugging format-specific issues
+        if (targetTimestamp >= 0) {
+            LOG_WARNING << "Failed to decode target frame " << frameNumber 
+                       << " (target PTS: " << targetTimestamp 
+                       << ", last decoded PTS: " << (lastDecodedPTS_ >= 0 ? std::to_string(lastDecodedPTS_) : "none")
+                       << ", bailout expired)";
+        } else {
+            LOG_WARNING << "Failed to decode frame " << frameNumber 
+                       << " (no target timestamp, bailout expired)";
+        }
         return false;
     }
 
