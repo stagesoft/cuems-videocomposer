@@ -4,35 +4,20 @@
 
 set -e
 
-SOURCE_DIR="${1:-/home/Videos}"
-OUTPUT_DIR="${2:-$(dirname "$0")/../video_test_files}"
-DURATION="${3:-30}"  # Duration in seconds for test clips
+OUTPUT_DIR="${1:-$(dirname "$0")/../video_test_files}"
+DURATION="${2:-30}"  # Duration in seconds for test clips
+
+# Source video file (relative to workspace root)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOURCE_VIDEO="$SCRIPT_DIR/../video_test_files/test_playback_patterns.mov"
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
 echo "Creating test video files..."
-echo "Source directory: $SOURCE_DIR"
+echo "Source video: $SOURCE_VIDEO"
 echo "Output directory: $OUTPUT_DIR"
 echo "Duration: ${DURATION}s"
-
-# Find a source video file
-SOURCE_VIDEO=""
-if [ -d "$SOURCE_DIR" ]; then
-    SOURCE_VIDEO=$(find "$SOURCE_DIR" -type f \( -name "*.mp4" -o -name "*.mov" -o -name "*.avi" -o -name "*.mkv" \) -size +10M 2>/dev/null | head -1)
-fi
-
-# If no source found, try to use existing test file
-if [ -z "$SOURCE_VIDEO" ]; then
-    if [ -f "$OUTPUT_DIR/problematic.mp4" ]; then
-        SOURCE_VIDEO="$OUTPUT_DIR/problematic.mp4"
-        echo "Using existing test file: $SOURCE_VIDEO"
-    else
-        echo "ERROR: No source video found. Please provide a source video file."
-        echo "Usage: $0 [SOURCE_DIR] [OUTPUT_DIR] [DURATION]"
-        exit 1
-    fi
-fi
 
 if [ ! -f "$SOURCE_VIDEO" ]; then
     echo "ERROR: Source video not found: $SOURCE_VIDEO"
@@ -90,11 +75,6 @@ create_test_video "$OUTPUT_DIR/test_av1_mp4.mp4" "libaom-av1" "-cpu-used 4 -crf 
     create_test_video "$OUTPUT_DIR/test_av1_mp4.mp4" "libsvtav1" "-preset 4 -crf 30" "mp4" || \
     echo "  ⚠ AV1 encoder not available, skipping"
 
-# Create VP9 test files (software codec)
-echo ""
-echo "=== Creating VP9 test files ==="
-create_test_video "$OUTPUT_DIR/test_vp9_webm.webm" "libvpx-vp9" "-cpu-used 2 -crf 30" "webm" || \
-    echo "  ⚠ VP9 encoder not available, skipping"
 
 # Create HAP test files (GPU-optimized codec)
 echo ""

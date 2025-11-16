@@ -20,6 +20,8 @@ extern "C" {
 #include <libavutil/mem.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/error.h>
+#include <libavutil/version.h>
+#include <libavutil/frame.h>
 }
 
 namespace videocomposer {
@@ -427,77 +429,344 @@ bool VideoFileInput::openCodec() {
     return true;
 }
 
-bool VideoFileInput::indexFrames() {
-    // Simplified indexing - in full implementation, this would index all frames
-    // For now, we'll do a basic implementation
+// Forward declaration of FrameIndex structure (matches VideoFileInput::FrameIndex)
+struct FrameIndex {
+    int64_t pkt_pts;
+    int64_t pkt_pos;
+    int64_t frame_pts;
+    int64_t frame_pos;
+    int64_t timestamp;
+    int64_t seekpts;
+    int64_t seekpos;
+    uint8_t key;
+};
 
+// Helper function to add index entry (like xjadeo's add_idx)
+static int addIndexEntry(FrameIndex* frameIndex, int64_t fcnt, int64_t frames,
+                         int64_t ts, int64_t pos, uint8_t key, AVRational fr_Q, AVRational tb) {
+    if (fcnt >= frames) {
+        // Overflow - will be handled by caller
+        return -1;
+    }
+    
+    frameIndex[fcnt].pkt_pts = ts;
+    frameIndex[fcnt].pkt_pos = pos;
+    frameIndex[fcnt].timestamp = av_rescale_q(fcnt, fr_Q, tb);
+    frameIndex[fcnt].key = key;
+    frameIndex[fcnt].frame_pts = -1;
+    frameIndex[fcnt].frame_pos = -1;
+    frameIndex[fcnt].seekpts = 0;
+    frameIndex[fcnt].seekpos = 0;
+    
+    return 0;
+}
+
+// Helper function to find keyframe for a given timestamp (like xjadeo's keyframe_lookup_helper)
+static int64_t keyframeLookupHelper(FrameIndex* frameIndex, int64_t fcnt,
+                                     int64_t last, int64_t ts) {
+    if (last >= fcnt) {
+        last = fcnt - 1;
+    }
+    
+    for (int64_t i = last; i >= 0; --i) {
+        if (!frameIndex[i].key) continue;
+        if (frameIndex[i].pkt_pts == AV_NOPTS_VALUE || frameIndex[i].frame_pts == AV_NOPTS_VALUE) {
+            continue;
+        }
+        if (frameIndex[i].frame_pts <= ts) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+bool VideoFileInput::indexFrames() {
+    // xjadeo-style 3-pass indexing implementation
+    
     frameCount_ = 0;
     frameIndex_ = nullptr;
-
-    // Allocate initial index array (will grow as needed)
-    const size_t initialSize = 10000;
-    frameIndex_ = static_cast<FrameIndex*>(calloc(initialSize, sizeof(FrameIndex)));
-    if (!frameIndex_) {
-        return false;
-    }
-
-    size_t indexSize = initialSize;
+    
     AVStream* avStream = mediaReader_.getStream(videoStream_);
     if (!avStream) {
         return false;
     }
+    
     AVRational timeBase = avStream->time_base;
-
-    AVPacket* packet = av_packet_alloc();
-    if (!packet) {
+    int64_t frames = frameInfo_.totalFrames;
+    if (frames <= 0) {
+        // Estimate frames from duration if not available
+        double duration = mediaReader_.getDuration();
+        if (duration > 0 && frameInfo_.framerate > 0) {
+            frames = static_cast<int64_t>(duration * frameInfo_.framerate);
+        } else {
+            frames = 100000; // Large default, will grow as needed
+        }
+    }
+    
+    // Allocate index array (cast to our local FrameIndex type for helper functions)
+    frameIndex_ = static_cast<VideoFileInput::FrameIndex*>(calloc(frames, sizeof(VideoFileInput::FrameIndex)));
+    if (!frameIndex_) {
         return false;
     }
+    
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        free(frameIndex_);
+        frameIndex_ = nullptr;
+        return false;
+    }
+    
+    int use_dts = 0;
+    int max_keyframe_interval = 0;
+    int keyframe_interval = 0;
+    int64_t keyframe_byte_pos = 0;
+    int64_t keyframe_byte_distance = 0;
+    const int keyframe_interval_limit = 300; // xjadeo default
+    
+    LOG_INFO << "Indexing video (Pass 1: Scanning packets)...";
+    
+    /* Pass 1: read all packets
+     * -> find keyframes
+     * -> check if file is complete
+     * -> discover max. keyframe distance
+     * -> get PTS/DTS of every *packet*
+     */
     while (mediaReader_.readPacket(packet) == 0) {
         if (packet->stream_index != videoStream_) {
             av_packet_unref(packet);
             continue;
         }
-
+        
         int64_t ts = AV_NOPTS_VALUE;
-        if (packet->pts != AV_NOPTS_VALUE) {
+        
+        // Try PTS first, fallback to DTS
+        if (!use_dts && packet->pts != AV_NOPTS_VALUE) {
             ts = packet->pts;
-        } else if (packet->dts != AV_NOPTS_VALUE) {
+        }
+        if (ts == AV_NOPTS_VALUE) {
+            use_dts = 1;
+        }
+        if (use_dts && packet->dts != AV_NOPTS_VALUE) {
             ts = packet->dts;
         }
-
+        
         if (ts == AV_NOPTS_VALUE) {
+            LOG_WARNING << "Index error: no PTS, nor DTS at frame " << frameCount_;
             av_packet_unref(packet);
-            continue;
+            break;
         }
-
+        
+        const uint8_t key = (packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
+        
         // Grow array if needed
-        if (frameCount_ >= static_cast<int64_t>(indexSize)) {
-            indexSize *= 2;
-            frameIndex_ = static_cast<FrameIndex*>(realloc(frameIndex_, indexSize * sizeof(FrameIndex)));
+        if (frameCount_ >= frames) {
+            frames *= 2;
+            frameIndex_ = static_cast<FrameIndex*>(realloc(frameIndex_, frames * sizeof(FrameIndex)));
             if (!frameIndex_) {
                 av_packet_unref(packet);
                 av_packet_free(&packet);
                 return false;
             }
         }
-
-        FrameIndex& idx = frameIndex_[frameCount_];
-        idx.pkt_pts = packet->pts;
-        idx.pkt_pos = packet->pos;
-        idx.frame_pts = ts;
-        idx.frame_pos = packet->pos;
-        // Calculate timestamp in stream's timebase (like xjadeo)
-        // timestamp = av_rescale_q(frameCount_, frameRateQ_, timeBase)
-        idx.timestamp = av_rescale_q(frameCount_, frameRateQ_, timeBase);
-        idx.seekpts = ts;
-        idx.seekpos = packet->pos;
-        idx.key = (packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
-
-        frameCount_++;
+        
+        if (addIndexEntry(reinterpret_cast<FrameIndex*>(frameIndex_), frameCount_, frames, ts, packet->pos, key, frameRateQ_, timeBase) < 0) {
+            av_packet_unref(packet);
+            break;
+        }
+        
+        if (key) {
+            int64_t byte_distance = packet->pos - keyframe_byte_pos;
+            keyframe_byte_pos = packet->pos;
+            if (keyframe_byte_distance < byte_distance) {
+                keyframe_byte_distance = byte_distance;
+            }
+        }
+        
         av_packet_unref(packet);
+        
+        if (++keyframe_interval > max_keyframe_interval) {
+            max_keyframe_interval = keyframe_interval;
+        }
+        
+        // Check for problematic files (too many frames between keyframes)
+        if (max_keyframe_interval > keyframe_interval_limit &&
+            (keyframe_byte_distance > 0 && keyframe_byte_distance > 5242880 /* 5 MB */)) {
+            LOG_WARNING << "Keyframe interval too large, stopping indexing";
+            break;
+        }
+        
+        // Optimization: if first 500 frames are all keyframes, use direct seek mode
+        if ((frameCount_ == 500 || frameCount_ == frames) && max_keyframe_interval == 1) {
+            int64_t file_frame_offset = frameInfo_.fileFrameOffset;
+            int64_t ppts_offset = frameIndex_[0].pkt_pts;
+            // Check if file_frame_offset matches packet PTS (like xjadeo)
+            if (file_frame_offset == av_rescale_q(ppts_offset, timeBase, frameRateQ_) || file_frame_offset == 0) {
+                LOG_INFO << "First 500 frames are all keyframes. Using direct seek mode.";
+                // Fill in all frames as keyframes (only if we know total frames)
+                if (frameInfo_.totalFrames > 0) {
+                    for (int64_t i = 0; i < frameInfo_.totalFrames && i < frames; ++i) {
+                        frameIndex_[i].key = 1;
+                        frameIndex_[i].pkt_pts = frameIndex_[i].frame_pts = 
+                            ppts_offset + av_rescale_q(i, frameRateQ_, timeBase);
+                        frameIndex_[i].frame_pos = -1;
+                        frameIndex_[i].timestamp = av_rescale_q(file_frame_offset + i, frameRateQ_, timeBase);
+                        frameIndex_[i].seekpts = frameIndex_[i].pkt_pts;
+                        frameIndex_[i].seekpos = frameIndex_[i].pkt_pos;
+                    }
+                    frameCount_ = frameInfo_.totalFrames;
+                } else {
+                    // Use current frame count
+                    frameCount_ = frameCount_; // Already set
+                }
+                av_packet_free(&packet);
+                scanComplete_ = true;
+                return true;
+            }
+        }
+        
+        if (key) {
+            keyframe_interval = 0;
+        }
+        
+        frameCount_++;
     }
-
+    
     av_packet_free(&packet);
+    
+    if (frameCount_ == 0) {
+        LOG_ERROR << "No frames indexed";
+        free(frameIndex_);
+        frameIndex_ = nullptr;
+        return false;
+    }
+    
+    // Resize array to actual frame count
+    if (frameCount_ < frames) {
+        frameIndex_ = static_cast<FrameIndex*>(realloc(frameIndex_, frameCount_ * sizeof(FrameIndex)));
+        if (!frameIndex_) {
+            free(frameIndex_);
+            frameIndex_ = nullptr;
+            return false;
+        }
+    }
+    
+    LOG_INFO << "Pass 1 complete: indexed " << frameCount_ << " packets, max keyframe interval: " << max_keyframe_interval;
+    
+    /* Pass 2: verify keyframes
+     * seek to [all] keyframe, decode one frame after
+     * the keyframe and check *frame* PTS
+     */
+    LOG_INFO << "Indexing video (Pass 2: Verifying keyframes)...";
+    
+    int64_t keyframecount = 0;
+    
+    // Need a frame for decoding
+    if (!frame_) {
+        frame_ = av_frame_alloc();
+        if (!frame_) {
+            LOG_ERROR << "Failed to allocate frame for indexing";
+            free(frameIndex_);
+            frameIndex_ = nullptr;
+            return false;
+        }
+    }
+    
+    for (int64_t i = 0; i < frameCount_; ++i) {
+        if (!frameIndex_[i].key) continue;
+        
+        // Seek to keyframe
+        if (!mediaReader_.seek(frameIndex_[i].pkt_pts, videoStream_, AVSEEK_FLAG_BACKWARD)) {
+            LOG_WARNING << "IDX2: Seek failed for keyframe " << i;
+            continue;
+        }
+        
+        // Flush codec buffers
+        if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
+            avcodec_flush_buffers(codecCtx_);
+        }
+        
+        // Decode one frame
+        bool got_pic = false;
+        int64_t pts = AV_NOPTS_VALUE;
+        int bailout = 100;
+        
+        while (!got_pic && --bailout > 0) {
+            AVPacket* decodePacket = av_packet_alloc();
+            if (!decodePacket) {
+                break;
+            }
+            
+            int err = mediaReader_.readPacket(decodePacket);
+            if (err < 0) {
+                if (err == AVERROR_EOF) {
+                    LOG_WARNING << "IDX2: Read/Seek compensate for premature EOF at keyframe " << i;
+                    frameIndex_[i].key = 0;
+                }
+                av_packet_free(&decodePacket);
+                break;
+            }
+            
+            if (decodePacket->stream_index == videoStream_) {
+                // Send packet to decoder
+                err = videoDecoder_.sendPacket(decodePacket);
+                if (err < 0 && err != AVERROR(EAGAIN)) {
+                    av_packet_free(&decodePacket);
+                    break;
+                }
+                
+                // Receive frame from decoder
+                err = videoDecoder_.receiveFrame(frame_);
+                if (err == 0) {
+                    got_pic = true;
+                    pts = parsePTSFromFrame(frame_);
+                } else if (err != AVERROR(EAGAIN)) {
+                    av_packet_free(&decodePacket);
+                    break;
+                }
+            }
+            
+            av_packet_free(&decodePacket);
+        }
+        
+        if (!got_pic || pts == AV_NOPTS_VALUE) {
+            continue;
+        }
+        
+        frameIndex_[i].frame_pts = pts;
+        frameIndex_[i].frame_pos = av_frame_get_pkt_pos(frame_);
+        if (pts != AV_NOPTS_VALUE) {
+            keyframecount++;
+        }
+    }
+    
+    LOG_INFO << "Pass 2 complete: verified " << keyframecount << " keyframes";
+    
+    /* Pass 3: Create Seek-Table
+     * -> assign seek-[key]frame to every frame
+     */
+    LOG_INFO << "Indexing video (Pass 3: Creating seek table)...";
+    
+    for (int64_t i = 0; i < frameCount_; ++i) {
+        int64_t searchLimit = std::min(frameCount_ - 1, i + 2 + max_keyframe_interval);
+        int64_t kfi = keyframeLookupHelper(reinterpret_cast<FrameIndex*>(frameIndex_), frameCount_, searchLimit, frameIndex_[i].timestamp);
+        
+        if (kfi < 0) {
+            LOG_WARNING << "Cannot find keyframe for frame " << i << " timestamp " << frameIndex_[i].timestamp;
+            frameIndex_[i].seekpts = 0;
+            frameIndex_[i].seekpos = 0;
+        } else {
+            frameIndex_[i].seekpts = frameIndex_[kfi].pkt_pts;
+            frameIndex_[i].seekpos = frameIndex_[kfi].frame_pos;
+        }
+    }
+    
+    LOG_INFO << "Pass 3 complete: seek table created";
+    
+    // Update total frames if we discovered more frames than estimated
+    if (frameCount_ > frameInfo_.totalFrames) {
+        frameInfo_.totalFrames = frameCount_;
+    }
+    
     scanComplete_ = true;
     return true;
 }
@@ -837,11 +1106,26 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
 int64_t VideoFileInput::parsePTSFromFrame(AVFrame* frame) {
     int64_t pts = AV_NOPTS_VALUE;
     
-    if (frame->pts != AV_NOPTS_VALUE) {
-        pts = frame->pts;
-    } else if (frame->pkt_pts != AV_NOPTS_VALUE) {
+    // Match xjadeo's parse_pts_from_frame logic
+    // Try best effort timestamp first (FFmpeg API)
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(51, 49, 100)
+    if (pts == AV_NOPTS_VALUE) {
+        pts = av_frame_get_best_effort_timestamp(frame);
+    }
+#endif
+    
+    // Fallback to packet PTS
+    if (pts == AV_NOPTS_VALUE) {
         pts = frame->pkt_pts;
-    } else if (frame->pkt_dts != AV_NOPTS_VALUE) {
+    }
+    
+    // Fallback to frame pts (may be bogus with many codecs)
+    if (pts == AV_NOPTS_VALUE) {
+        pts = frame->pts;
+    }
+    
+    // Last resort: packet DTS
+    if (pts == AV_NOPTS_VALUE) {
         pts = frame->pkt_dts;
     }
 

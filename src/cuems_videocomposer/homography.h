@@ -28,12 +28,7 @@
 
 #ifdef HAVE_GL
 
-#ifdef __APPLE__
-#include "OpenGL/glu.h"
-#else
-#include <GL/glu.h>
-#endif
-
+#include <GL/gl.h>
 
 typedef struct {
 	double x;
