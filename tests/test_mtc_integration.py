@@ -371,8 +371,8 @@ class MTCIntegrationTest:
                 print("  This may be normal - MTC connection can take time to establish")
                 print("  The test will pass if MIDI is initialized (connection established)")
                 # Accept MIDI initialization as success for now
-                self.test_passed = True
-                return True
+            self.test_passed = True
+            return True
             else:
                 print("ERROR: MIDI not initialized - connection failed")
                 return False
@@ -419,11 +419,11 @@ class MTCIntegrationTest:
         print()
         
         try:
-            # Step 1: Setup MTC
+            # Step 1: Setup MTC (just creates sender, doesn't play)
             if not self.setup_mtc():
                 return False
             
-            # Step 2: Start MTC playback
+            # Step 2: Start MTC playback (calls play() once)
             if not self.start_mtc(start_frame=0):
                 return False
             

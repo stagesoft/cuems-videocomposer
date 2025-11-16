@@ -206,11 +206,13 @@ class CodecFormatTest:
             return "CPU_SOFTWARE"
     
     def _setup_mtc(self):
-        """Setup MTC timecode sender."""
+        """Setup and start MTC timecode sender."""
         if not self.mtc_helper:
             return False
         
-        if self.mtc_helper.setup():
+        # start() will call setup() if needed, and then play()
+        # This ensures play() is only called once
+        if self.mtc_helper.start(start_frame=0):
             print(f"  MTC timecode started (fps={self.fps})")
             return True
         else:
@@ -266,7 +268,7 @@ class CodecFormatTest:
                         # Print output if verbose mode is enabled
                         # In interactive mode, user watches the window, not console
                         if verbose_output:
-                        print(f"    {line.strip()}")
+                            print(f"    {line.strip()}")
                 except:
                     break
             
@@ -364,7 +366,7 @@ class CodecFormatTest:
         # Remove duplicates and sort
         return sorted(set(videos))
     
-    def run_all_tests(self, test_hw: bool = True, test_sw: bool = True, duration: int = 5) -> Dict:
+    def run_all_tests(self, test_hw: bool = True, test_sw: bool = True, duration: int = 5, one_by_one: bool = False) -> Dict:
         """Run tests on all available test videos."""
         videos = self.find_test_videos()
         
@@ -376,9 +378,11 @@ class CodecFormatTest:
         print(f"\nFound {len(videos)} test videos")
         print(f"Testing hardware decoding: {test_hw}")
         print(f"Testing software decoding: {test_sw}")
+        if one_by_one:
+            print(f"Running tests one by one with {duration} seconds per video\n")
         
         results = {}
-        for video in videos:
+        for i, video in enumerate(videos, 1):
             # Test all videos from video_test_files directory
             # Filter by test type only if explicitly disabled
             video_name = video.name.lower()
@@ -387,9 +391,24 @@ class CodecFormatTest:
             if not test_sw and any(codec in video_name for codec in ["vp9", "mpeg4"]):
                 continue
             
+            if one_by_one:
+                print(f"\n{'='*60}")
+                print(f"TEST {i}/{len(videos)}: {video.name}")
+                print(f"{'='*60}")
+            
             # Test all other videos (problematic.mp4, test_playback_patterns.mov, etc.)
             result = self.test_video_file(video, duration)
             results[video.name] = result
+            
+            if one_by_one:
+                # Show quick result
+                success = result.get("success", False)
+                path = result.get("analysis", {}).get("decoding_path", "UNKNOWN")
+                status = "✓ PASS" if success else "✗ FAIL"
+                print(f"\n  Result: {status} | Path: {path}")
+                if i < len(videos):
+                    print(f"\n  Next: {videos[i].name}")
+                    time.sleep(1)  # Brief pause between tests
         
         return results
     
@@ -471,6 +490,8 @@ def main():
                        help="MTC framerate (default: 25.0)")
     parser.add_argument("--interactive", action="store_true",
                        help="Interactive mode: test one video at a time and ask if video is visible")
+    parser.add_argument("--one-by-one", action="store_true",
+                       help="Test formats one by one with clear output for each")
     
     args = parser.parse_args()
     
@@ -562,7 +583,7 @@ def main():
         tester.print_summary(results)
     else:
         # Test all
-        results = tester.run_all_tests(args.test_hw, args.test_sw, args.duration)
+        results = tester.run_all_tests(args.test_hw, args.test_sw, args.duration, one_by_one=args.one_by_one)
         tester.print_summary(results)
     
     # Exit with error if any tests failed
