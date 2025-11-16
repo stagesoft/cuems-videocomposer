@@ -3,6 +3,8 @@
 
 #include "InputSource.h"
 #include "../video/GPUTextureFrameBuffer.h"
+#include <cuems_mediadecoder/MediaFileReader.h>
+#include <cuems_mediadecoder/VideoDecoder.h>
 #include <string>
 #include <memory>
 #include <cstdint>
@@ -66,7 +68,6 @@ private:
     };
 
     bool initializeFFmpeg();
-    bool findVideoStream();
     bool openCodec();
     bool indexFrames();
     bool seekToFrame(int64_t frameNumber);
@@ -75,9 +76,13 @@ private:
     int64_t parsePTSFromFrame(AVFrame* frame);
     void cleanup();
 
-    // FFmpeg objects
-    AVFormatContext* formatCtx_;
-    AVCodecContext* codecCtx_;
+    // Media decoder module
+    cuems_mediadecoder::MediaFileReader mediaReader_;
+    cuems_mediadecoder::VideoDecoder videoDecoder_;
+    
+    // FFmpeg objects (kept for compatibility and advanced operations)
+    AVFormatContext* formatCtx_;  // Access via mediaReader_.getFormatContext()
+    AVCodecContext* codecCtx_;   // Access via videoDecoder_.getCodecContext()
     AVFrame* frame_;
     int videoStream_;
 

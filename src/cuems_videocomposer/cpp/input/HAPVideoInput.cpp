@@ -74,22 +74,21 @@ bool HAPVideoInput::open(const std::string& source) {
         return false;
     }
 
-    // Open video file
-    if (avformat_open_input(&formatCtx_, source.c_str(), nullptr, nullptr) != 0) {
-        formatCtx_ = nullptr;
+    // Open video file using MediaFileReader
+    if (!mediaReader_.open(source)) {
         return false;
     }
 
-    // Retrieve stream information
-    if (avformat_find_stream_info(formatCtx_, nullptr) < 0) {
-        avformat_close_input(&formatCtx_);
-        formatCtx_ = nullptr;
+    // Get format context for compatibility
+    formatCtx_ = mediaReader_.getFormatContext();
+    if (!formatCtx_) {
         return false;
     }
 
-    // Find video stream
-    if (!findVideoStream()) {
-        avformat_close_input(&formatCtx_);
+    // Find video stream using MediaFileReader
+    videoStream_ = mediaReader_.findStream(AVMEDIA_TYPE_VIDEO);
+    if (videoStream_ < 0) {
+        mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
     }
@@ -97,8 +96,13 @@ bool HAPVideoInput::open(const std::string& source) {
     // Verify this is a HAP codec
     // Note: FFmpeg may use AV_CODEC_ID_HAP for all HAP variants
     // The variant (HAP, HAP_Q, HAP_ALPHA) is determined later by examining the codec
-    AVStream* avStream = formatCtx_->streams[videoStream_];
-    AVCodecID codecId = avStream->codec->codec_id;
+    AVCodecParameters* codecParams = mediaReader_.getCodecParameters(videoStream_);
+    if (!codecParams) {
+        mediaReader_.close();
+        formatCtx_ = nullptr;
+        return false;
+    }
+    AVCodecID codecId = codecParams->codec_id;
     
     // Check for HAP codec (all variants use AV_CODEC_ID_HAP in some FFmpeg versions)
     // We'll detect the specific variant after opening the codec
@@ -106,12 +110,12 @@ bool HAPVideoInput::open(const std::string& source) {
         // Some FFmpeg versions might have separate IDs - check if available
         #ifdef AV_CODEC_ID_HAPQ
         if (codecId != AV_CODEC_ID_HAPQ && codecId != AV_CODEC_ID_HAPALPHA) {
-            avformat_close_input(&formatCtx_);
+            mediaReader_.close();
             formatCtx_ = nullptr;
             return false; // Not a HAP file
         }
         #else
-        avformat_close_input(&formatCtx_);
+        mediaReader_.close();
         formatCtx_ = nullptr;
         return false; // Not a HAP file
         #endif
@@ -119,7 +123,7 @@ bool HAPVideoInput::open(const std::string& source) {
 
     // Open codec
     if (!openCodec()) {
-        avformat_close_input(&formatCtx_);
+        mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
     }
@@ -128,6 +132,13 @@ bool HAPVideoInput::open(const std::string& source) {
     hapVariant_ = detectHAPVariant();
 
     // Get video properties
+    AVStream* avStream = mediaReader_.getStream(videoStream_);
+    if (!avStream) {
+        mediaReader_.close();
+        formatCtx_ = nullptr;
+        return false;
+    }
+    
     // Frame rate
     double framerate = 0.0;
     if (avStream->r_frame_rate.den > 0 && avStream->r_frame_rate.num > 0) {
@@ -136,15 +147,22 @@ bool HAPVideoInput::open(const std::string& source) {
         frameRateQ_.num = avStream->r_frame_rate.den;
     }
 
-    // Dimensions
-    int width = codecCtx_->width;
-    int height = codecCtx_->height;
+    // Dimensions - get from codec context
+    int width = 0;
+    int height = 0;
+    if (codecCtx_) {
+        width = codecCtx_->width;
+        height = codecCtx_->height;
+    } else {
+        // Fallback to codec parameters if codec not opened yet
+        if (codecParams) {
+            width = codecParams->width;
+            height = codecParams->height;
+        }
+    }
     
     // Duration
-    double duration = 0.0;
-    if (formatCtx_->duration != AV_NOPTS_VALUE) {
-        duration = (double)formatCtx_->duration / AV_TIME_BASE;
-    }
+    double duration = mediaReader_.getDuration();
 
     // Store frame info
     frameInfo_.width = width;
@@ -181,36 +199,32 @@ void HAPVideoInput::close() {
 }
 
 bool HAPVideoInput::isReady() const {
-    return ready_;
-}
-
-bool HAPVideoInput::findVideoStream() {
-    videoStream_ = -1;
-    for (unsigned int i = 0; i < formatCtx_->nb_streams; i++) {
-        if (formatCtx_->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
-            videoStream_ = i;
-            break;
-        }
-    }
-    return videoStream_ >= 0;
+    return ready_ && mediaReader_.isReady();
 }
 
 bool HAPVideoInput::openCodec() {
-    AVStream* avStream = formatCtx_->streams[videoStream_];
-    codecCtx_ = avStream->codec;
-
-    AVCodec* codec = avcodec_find_decoder(codecCtx_->codec_id);
-    if (!codec) {
+    // Get codec parameters using MediaFileReader
+    AVCodecParameters* codecParams = mediaReader_.getCodecParameters(videoStream_);
+    if (!codecParams) {
         return false;
     }
 
-    if (avcodec_open2(codecCtx_, codec, nullptr) < 0) {
+    // Open codec using VideoDecoder
+    if (!videoDecoder_.openCodec(codecParams)) {
+        return false;
+    }
+
+    // Get codec context from VideoDecoder
+    codecCtx_ = videoDecoder_.getCodecContext();
+    if (!codecCtx_) {
         return false;
     }
 
     // Allocate frame
     frame_ = av_frame_alloc();
     if (!frame_) {
+        videoDecoder_.close();
+        codecCtx_ = nullptr;
         return false;
     }
 
@@ -260,10 +274,6 @@ HAPVideoInput::HAPVariant HAPVideoInput::detectHAPVariant() {
 bool HAPVideoInput::indexFrames() {
     // Full frame indexing for HAP - similar to VideoFileInput
     // This enables faster seeking by indexing all frames
-    AVPacket packet;
-    av_init_packet(&packet);
-    packet.data = nullptr;
-    packet.size = 0;
 
     frameCount_ = 0;
     frameIndex_ = nullptr;
@@ -275,36 +285,49 @@ bool HAPVideoInput::indexFrames() {
     }
 
     size_t indexSize = initialSize;
-    AVRational timeBase = formatCtx_->streams[videoStream_]->time_base;
+    AVStream* avStream = mediaReader_.getStream(videoStream_);
+    if (!avStream) {
+        free(frameIndex_);
+        frameIndex_ = nullptr;
+        return false;
+    }
+    AVRational timeBase = avStream->time_base;
 
     // Rewind to beginning of file
-    if (av_seek_frame(formatCtx_, -1, 0, AVSEEK_FLAG_BACKWARD) < 0) {
+    if (!mediaReader_.seekToTime(0.0, videoStream_, AVSEEK_FLAG_BACKWARD)) {
         free(frameIndex_);
         frameIndex_ = nullptr;
         return false;
     }
 
     // Flush codec buffers
-    if (codecCtx_->codec->flush) {
+    if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
         avcodec_flush_buffers(codecCtx_);
     }
 
     // Scan all frames and build index
-    while (av_read_frame(formatCtx_, &packet) >= 0) {
-        if (packet.stream_index != videoStream_) {
-            av_free_packet(&packet);
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        free(frameIndex_);
+        frameIndex_ = nullptr;
+        return false;
+    }
+    
+    while (mediaReader_.readPacket(packet) == 0) {
+        if (packet->stream_index != videoStream_) {
+            av_packet_unref(packet);
             continue;
         }
 
         int64_t ts = AV_NOPTS_VALUE;
-        if (packet.pts != AV_NOPTS_VALUE) {
-            ts = packet.pts;
-        } else if (packet.dts != AV_NOPTS_VALUE) {
-            ts = packet.dts;
+        if (packet->pts != AV_NOPTS_VALUE) {
+            ts = packet->pts;
+        } else if (packet->dts != AV_NOPTS_VALUE) {
+            ts = packet->dts;
         }
 
         if (ts == AV_NOPTS_VALUE) {
-            av_free_packet(&packet);
+            av_packet_unref(packet);
             continue;
         }
 
@@ -313,24 +336,27 @@ bool HAPVideoInput::indexFrames() {
             indexSize *= 2;
             frameIndex_ = static_cast<FrameIndex*>(realloc(frameIndex_, indexSize * sizeof(FrameIndex)));
             if (!frameIndex_) {
-                av_free_packet(&packet);
+                av_packet_unref(packet);
+                av_packet_free(&packet);
                 return false;
             }
         }
 
         FrameIndex& idx = frameIndex_[frameCount_];
-        idx.pkt_pts = packet.pts;
-        idx.pkt_pos = packet.pos;
+        idx.pkt_pts = packet->pts;
+        idx.pkt_pos = packet->pos;
         idx.frame_pts = ts;
-        idx.frame_pos = packet.pos;
+        idx.frame_pos = packet->pos;
         idx.timestamp = frameCount_;
         idx.seekpts = ts;
-        idx.seekpos = packet.pos;
-        idx.key = (packet.flags & AV_PKT_FLAG_KEY) ? 1 : 0;
+        idx.seekpos = packet->pos;
+        idx.key = (packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
 
         frameCount_++;
-        av_free_packet(&packet);
+        av_packet_unref(packet);
     }
+    
+    av_packet_free(&packet);
 
     scanComplete_ = true;
     return true;
@@ -373,15 +399,15 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
         if (needSeek) {
             // Try timestamp-based seek (simplest and most reliable)
             if (idx.seekpts >= 0) {
-                int ret = av_seek_frame(formatCtx_, videoStream_, idx.seekpts, AVSEEK_FLAG_BACKWARD);
-                if (ret < 0) {
+                bool ret = mediaReader_.seek(idx.seekpts, videoStream_, AVSEEK_FLAG_BACKWARD);
+                if (!ret) {
                     return false;
                 }
             } else {
                 return false;
             }
 
-            if (codecCtx_->codec->flush) {
+            if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
                 avcodec_flush_buffers(codecCtx_);
             }
         }
@@ -393,7 +419,6 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
     }
 
     // Fallback: timestamp-based seeking
-    AVStream* avStream = formatCtx_->streams[videoStream_];
     double framerate = frameInfo_.framerate;
     
     if (framerate <= 0) {
@@ -401,17 +426,14 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
     }
 
     // Calculate timestamp from frame number
-    AVRational timeBase = avStream->time_base;
-    int64_t timeBaseTimestamp = static_cast<int64_t>((frameNumber / framerate) * AV_TIME_BASE);
-    AVRational timeBaseQ = {1, AV_TIME_BASE};
-    int64_t timestamp = av_rescale_q(timeBaseTimestamp, timeBaseQ, timeBase);
+    double targetTime = (double)frameNumber / framerate;
     
-    int ret = av_seek_frame(formatCtx_, videoStream_, timestamp, AVSEEK_FLAG_BACKWARD);
-    if (ret < 0) {
+    bool ret = mediaReader_.seekToTime(targetTime, videoStream_, AVSEEK_FLAG_BACKWARD);
+    if (!ret) {
         return false;
     }
 
-    if (codecCtx_->codec->flush) {
+    if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
         avcodec_flush_buffers(codecCtx_);
     }
 
@@ -442,43 +464,38 @@ bool HAPVideoInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         }
     }
 
-    // Decode frame using newer FFmpeg API (matches mpv's approach)
-    AVPacket packet;
-    av_init_packet(&packet);
-    packet.data = nullptr;
-    packet.size = 0;
+    // Decode frame using VideoDecoder API
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        return false;
+    }
 
     int bailout = 20;
     bool frameFinished = false;
 
     while (bailout > 0 && !frameFinished) {
-        int err = av_read_frame(formatCtx_, &packet);
+        av_packet_unref(packet);
+        int err = mediaReader_.readPacket(packet);
         if (err < 0) {
             if (err == AVERROR_EOF) {
                 // Flush decoder
-                av_init_packet(&packet);
-                packet.data = nullptr;
-                packet.size = 0;
-                err = avcodec_send_packet(codecCtx_, &packet);
+                err = videoDecoder_.sendPacket(nullptr); // nullptr flushes
                 if (err < 0 && err != AVERROR_EOF) {
                     --bailout;
                     continue;
                 }
             } else {
-                av_free_packet(&packet);
+                av_packet_free(&packet);
                 return false;
             }
         }
 
-        if (packet.stream_index != videoStream_) {
-            av_free_packet(&packet);
+        if (packet->stream_index != videoStream_) {
             continue;
         }
 
-        // Send packet to decoder (newer API - matches mpv)
-        err = avcodec_send_packet(codecCtx_, &packet);
-        av_free_packet(&packet);
-
+        // Send packet to decoder using VideoDecoder
+        err = videoDecoder_.sendPacket(packet);
         if (err < 0) {
             if (err != AVERROR(EAGAIN)) {
                 --bailout;
@@ -486,8 +503,8 @@ bool HAPVideoInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
             }
         }
 
-        // Receive frame from decoder (newer API - matches mpv)
-        err = avcodec_receive_frame(codecCtx_, frame_);
+        // Receive frame from decoder using VideoDecoder
+        err = videoDecoder_.receiveFrame(frame_);
         if (err == 0) {
             frameFinished = true;
         } else if (err == AVERROR(EAGAIN)) {
@@ -504,6 +521,8 @@ bool HAPVideoInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
             continue;
         }
     }
+
+    av_packet_free(&packet);
 
     if (!frameFinished) {
         return false;
@@ -649,17 +668,13 @@ void HAPVideoInput::cleanup() {
         frame_ = nullptr;
     }
 
-    // Close codec
-    if (codecCtx_) {
-        avcodec_close(codecCtx_);
-        codecCtx_ = nullptr;
-    }
+    // Close video decoder
+    videoDecoder_.close();
+    codecCtx_ = nullptr;
 
-    // Close format context
-    if (formatCtx_) {
-        avformat_close_input(&formatCtx_);
-        formatCtx_ = nullptr;
-    }
+    // Close media reader (closes format context)
+    mediaReader_.close();
+    formatCtx_ = nullptr;
 
     videoStream_ = -1;
     lastDecodedPTS_ = -1;

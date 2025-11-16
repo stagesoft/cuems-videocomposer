@@ -79,35 +79,39 @@ bool VideoFileInput::open(const std::string& source) {
         return false;
     }
 
-    // Open video file
-    if (avformat_open_input(&formatCtx_, source.c_str(), nullptr, nullptr) != 0) {
-        formatCtx_ = nullptr;
+    // Open video file using MediaFileReader
+    if (!mediaReader_.open(source)) {
         return false;
     }
 
-    // Retrieve stream information
-    if (avformat_find_stream_info(formatCtx_, nullptr) < 0) {
-        avformat_close_input(&formatCtx_);
-        formatCtx_ = nullptr;
+    // Get format context for compatibility
+    formatCtx_ = mediaReader_.getFormatContext();
+    if (!formatCtx_) {
         return false;
     }
 
-    // Find video stream
-    if (!findVideoStream()) {
-        avformat_close_input(&formatCtx_);
+    // Find video stream using MediaFileReader
+    videoStream_ = mediaReader_.findStream(AVMEDIA_TYPE_VIDEO);
+    if (videoStream_ < 0) {
+        mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
     }
 
     // Open codec (try hardware first, fallback to software)
     if (!openHardwareCodec() && !openCodec()) {
-        avformat_close_input(&formatCtx_);
+        mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
     }
 
     // Get video properties
-    AVStream* avStream = formatCtx_->streams[videoStream_];
+    AVStream* avStream = mediaReader_.getStream(videoStream_);
+    if (!avStream) {
+        mediaReader_.close();
+        formatCtx_ = nullptr;
+        return false;
+    }
     
     // Frame rate
     double framerate = 0.0;
@@ -117,15 +121,23 @@ bool VideoFileInput::open(const std::string& source) {
         frameRateQ_.num = avStream->r_frame_rate.den;
     }
 
-    // Dimensions
-    int width = codecCtx_->width;
-    int height = codecCtx_->height;
+    // Dimensions - get from codec context
+    int width = 0;
+    int height = 0;
+    if (codecCtx_) {
+        width = codecCtx_->width;
+        height = codecCtx_->height;
+    } else {
+        // Fallback to codec parameters if codec not opened yet
+        AVCodecParameters* codecParams = mediaReader_.getCodecParameters(videoStream_);
+        if (codecParams) {
+            width = codecParams->width;
+            height = codecParams->height;
+        }
+    }
     
     // Duration
-    double duration = 0.0;
-    if (formatCtx_->duration != AV_NOPTS_VALUE) {
-        duration = (double)formatCtx_->duration / AV_TIME_BASE;
-    }
+    double duration = mediaReader_.getDuration();
 
     // Store frame info
     frameInfo_.width = width;
@@ -190,25 +202,18 @@ void VideoFileInput::close() {
 }
 
 bool VideoFileInput::isReady() const {
-    return ready_ && formatCtx_ != nullptr;
-}
-
-bool VideoFileInput::findVideoStream() {
-    videoStream_ = -1;
-    for (unsigned int i = 0; i < formatCtx_->nb_streams; ++i) {
-        if (formatCtx_->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
-            videoStream_ = i;
-            break;
-        }
-    }
-    return videoStream_ >= 0;
+    return ready_ && mediaReader_.isReady();
 }
 
 bool VideoFileInput::openHardwareCodec() {
     // Try to open hardware decoder if available
     // First, we need to detect the codec type
-    AVStream* avStream = formatCtx_->streams[videoStream_];
-    AVCodecID codecId = avStream->codec->codec_id;
+    AVCodecParameters* codecParams = mediaReader_.getCodecParameters(videoStream_);
+    if (!codecParams) {
+        return false;
+    }
+    
+    AVCodecID codecId = codecParams->codec_id;
     std::string codecName = avcodec_get_name(codecId);
     
     // Hardware decoding only for H.264, HEVC, AV1
@@ -284,7 +289,7 @@ bool VideoFileInput::openHardwareCodec() {
     codecCtxAllocated_ = true;  // Mark as allocated (must be freed)
 
     // Copy codec parameters from stream
-    if (avcodec_parameters_to_context(codecCtx_, avStream->codecpar) < 0) {
+    if (avcodec_parameters_to_context(codecCtx_, codecParams) < 0) {
         avcodec_free_context(&codecCtx_);
         codecCtx_ = nullptr;
         av_buffer_unref(&hwDeviceCtx_);
@@ -378,29 +383,33 @@ bool VideoFileInput::openHardwareCodec() {
 }
 
 bool VideoFileInput::openCodec() {
-    AVStream* avStream = formatCtx_->streams[videoStream_];
-    codecCtx_ = avStream->codec;
-    codecCtxAllocated_ = false;  // Part of stream (don't free separately)
-    
-    std::string codecName = avcodec_get_name(codecCtx_->codec_id);
-    LOG_INFO << "Opening software decoder for codec: " << codecName;
-
-    AVCodec* codec = avcodec_find_decoder(codecCtx_->codec_id);
-    if (!codec) {
-        LOG_ERROR << "Software decoder not found for codec: " << codecName;
+    // Get codec parameters using MediaFileReader
+    AVCodecParameters* codecParams = mediaReader_.getCodecParameters(videoStream_);
+    if (!codecParams) {
+        LOG_ERROR << "Failed to get codec parameters for video stream";
         return false;
     }
 
-    if (avcodec_open2(codecCtx_, codec, nullptr) < 0) {
+    std::string codecName = avcodec_get_name(codecParams->codec_id);
+    LOG_INFO << "Opening software decoder for codec: " << codecName;
+
+    // Open codec using VideoDecoder
+    if (!videoDecoder_.openCodec(codecParams)) {
         LOG_ERROR << "Failed to open software decoder for codec: " << codecName;
         return false;
     }
+
+    // Get codec context from VideoDecoder
+    codecCtx_ = videoDecoder_.getCodecContext();
+    codecCtxAllocated_ = false;  // Managed by VideoDecoder
     
     LOG_INFO << "Successfully opened software decoder: " << codecName;
 
     // Allocate frames
     frame_ = av_frame_alloc();
     if (!frame_) {
+        videoDecoder_.close();
+        codecCtx_ = nullptr;
         return false;
     }
 
@@ -408,6 +417,8 @@ bool VideoFileInput::openCodec() {
     if (!frameFMT_) {
         av_frame_free(&frame_);
         frame_ = nullptr;
+        videoDecoder_.close();
+        codecCtx_ = nullptr;
         return false;
     }
 
@@ -419,11 +430,6 @@ bool VideoFileInput::openCodec() {
 bool VideoFileInput::indexFrames() {
     // Simplified indexing - in full implementation, this would index all frames
     // For now, we'll do a basic implementation
-    
-    AVPacket packet;
-    av_init_packet(&packet);
-    packet.data = nullptr;
-    packet.size = 0;
 
     frameCount_ = 0;
     frameIndex_ = nullptr;
@@ -436,23 +442,31 @@ bool VideoFileInput::indexFrames() {
     }
 
     size_t indexSize = initialSize;
-    AVRational timeBase = formatCtx_->streams[videoStream_]->time_base;
+    AVStream* avStream = mediaReader_.getStream(videoStream_);
+    if (!avStream) {
+        return false;
+    }
+    AVRational timeBase = avStream->time_base;
 
-    while (av_read_frame(formatCtx_, &packet) >= 0) {
-        if (packet.stream_index != videoStream_) {
-            av_free_packet(&packet);
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        return false;
+    }
+    while (mediaReader_.readPacket(packet) == 0) {
+        if (packet->stream_index != videoStream_) {
+            av_packet_unref(packet);
             continue;
         }
 
         int64_t ts = AV_NOPTS_VALUE;
-        if (packet.pts != AV_NOPTS_VALUE) {
-            ts = packet.pts;
-        } else if (packet.dts != AV_NOPTS_VALUE) {
-            ts = packet.dts;
+        if (packet->pts != AV_NOPTS_VALUE) {
+            ts = packet->pts;
+        } else if (packet->dts != AV_NOPTS_VALUE) {
+            ts = packet->dts;
         }
 
         if (ts == AV_NOPTS_VALUE) {
-            av_free_packet(&packet);
+            av_packet_unref(packet);
             continue;
         }
 
@@ -461,27 +475,29 @@ bool VideoFileInput::indexFrames() {
             indexSize *= 2;
             frameIndex_ = static_cast<FrameIndex*>(realloc(frameIndex_, indexSize * sizeof(FrameIndex)));
             if (!frameIndex_) {
-                av_free_packet(&packet);
+                av_packet_unref(packet);
+                av_packet_free(&packet);
                 return false;
             }
         }
 
         FrameIndex& idx = frameIndex_[frameCount_];
-        idx.pkt_pts = packet.pts;
-        idx.pkt_pos = packet.pos;
+        idx.pkt_pts = packet->pts;
+        idx.pkt_pos = packet->pos;
         idx.frame_pts = ts;
-        idx.frame_pos = packet.pos;
+        idx.frame_pos = packet->pos;
         // Calculate timestamp in stream's timebase (like xjadeo)
         // timestamp = av_rescale_q(frameCount_, frameRateQ_, timeBase)
         idx.timestamp = av_rescale_q(frameCount_, frameRateQ_, timeBase);
         idx.seekpts = ts;
-        idx.seekpos = packet.pos;
-        idx.key = (packet.flags & AV_PKT_FLAG_KEY) ? 1 : 0;
+        idx.seekpos = packet->pos;
+        idx.key = (packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
 
         frameCount_++;
-        av_free_packet(&packet);
+        av_packet_unref(packet);
     }
 
+    av_packet_free(&packet);
     scanComplete_ = true;
     return true;
 }
@@ -545,20 +561,18 @@ bool VideoFileInput::seekToFrame(int64_t frameNumber) {
     lastDecodedFrameNo_ = -1;
 
     if (needSeek) {
-        int seekResult;
+        bool seekResult;
         if (byteSeek_ && idx.seekpos > 0) {
-            seekResult = av_seek_frame(formatCtx_, videoStream_, idx.seekpos, 
-                                      AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_BYTE);
+            seekResult = mediaReader_.seek(idx.seekpos, videoStream_, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_BYTE);
         } else {
-            seekResult = av_seek_frame(formatCtx_, videoStream_, idx.seekpts, 
-                                      AVSEEK_FLAG_BACKWARD);
+            seekResult = mediaReader_.seek(idx.seekpts, videoStream_, AVSEEK_FLAG_BACKWARD);
         }
 
-        if (codecCtx_->codec->flush) {
+        if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
             avcodec_flush_buffers(codecCtx_);
         }
 
-        if (seekResult < 0) {
+        if (!seekResult) {
             return false;
         }
     }
@@ -569,22 +583,21 @@ bool VideoFileInput::seekToFrame(int64_t frameNumber) {
 
 bool VideoFileInput::seekByTimestamp(int64_t frameNumber) {
     // Seek using timestamp calculation (for files without indexing)
-    if (frameInfo_.framerate <= 0.0 || !formatCtx_ || videoStream_ < 0) {
+    if (frameInfo_.framerate <= 0.0 || !mediaReader_.isReady() || videoStream_ < 0) {
         return false;
     }
 
     // Calculate target timestamp from frame number
     double targetTime = (double)frameNumber / frameInfo_.framerate;
-    int64_t targetTimestamp = (int64_t)(targetTime * AV_TIME_BASE);
 
-    // Seek to the target timestamp
-    int seekResult = av_seek_frame(formatCtx_, -1, targetTimestamp, AVSEEK_FLAG_BACKWARD);
-    if (seekResult < 0) {
+    // Seek to the target timestamp using MediaFileReader
+    bool seekResult = mediaReader_.seekToTime(targetTime, videoStream_, AVSEEK_FLAG_BACKWARD);
+    if (!seekResult) {
         return false;
     }
 
     // Flush codec buffers
-    if (codecCtx_->codec->flush) {
+    if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
         avcodec_flush_buffers(codecCtx_);
     }
 
@@ -622,10 +635,10 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     }
 
     // Decode frame
-    AVPacket packet;
-    av_init_packet(&packet);
-    packet.data = nullptr;
-    packet.size = 0;
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        return false;
+    }
 
     // Get target timestamp for the frame we want (like xjadeo)
     // Use frame_pts (actual PTS from packet) instead of calculated timestamp
@@ -640,8 +653,12 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         }
     } else if (!noIndex_ && frameInfo_.totalFrames > 0) {
         // Fallback: calculate timestamp from frame number
-        AVRational timeBase = formatCtx_->streams[videoStream_]->time_base;
-        double fps = av_q2d(av_guess_frame_rate(formatCtx_, formatCtx_->streams[videoStream_], nullptr));
+        AVStream* avStream = mediaReader_.getStream(videoStream_);
+        if (!avStream) {
+            return false;
+        }
+        AVRational timeBase = avStream->time_base;
+        double fps = av_q2d(av_guess_frame_rate(formatCtx_, avStream, nullptr));
         if (fps > 0) {
             // Calculate timestamp in stream's timebase (like xjadeo)
             AVRational frameRateQ = { static_cast<int>(fps * 1000), 1000 }; // Approximate
@@ -673,41 +690,46 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     bool frameFinished = false;
 
     while (bailout > 0) {
-        int err = av_read_frame(formatCtx_, &packet);
+        av_packet_unref(packet);
+        int err = mediaReader_.readPacket(packet);
         if (err < 0) {
             if (err == AVERROR_EOF) {
                 --bailout;
-                av_free_packet(&packet);
                 continue;
             } else {
-                av_free_packet(&packet);
+                av_packet_free(&packet);
                 return false;
             }
         }
 
-        if (packet.stream_index != videoStream_) {
-            av_free_packet(&packet);
+        if (packet->stream_index != videoStream_) {
             continue;
         }
 
-    // Decode video frame
-    int gotFrame = 0;
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(52, 21, 0)
-    err = avcodec_decode_video(codecCtx_, frame_, &gotFrame, packet.data, packet.size);
-#else
-    err = avcodec_decode_video2(codecCtx_, frame_, &gotFrame, &packet);
-#endif
-        av_free_packet(&packet);
+    // Decode video frame using VideoDecoder
+    // Send packet to decoder
+    err = videoDecoder_.sendPacket(packet);
+    if (err < 0 && err != AVERROR(EAGAIN)) {
+        --bailout;
+        continue;
+    }
 
-        if (err < 0) {
-            --bailout;
-            continue;
-        }
+    // Receive frame from decoder
+    err = videoDecoder_.receiveFrame(frame_);
+    bool gotFrame = (err == 0);
+    if (err == AVERROR(EAGAIN)) {
+        // Need more packets
+        --bailout;
+        continue;
+    } else if (err < 0) {
+        --bailout;
+        continue;
+    }
 
-        if (!gotFrame) {
-            --bailout;
-            continue;
-        }
+    if (!gotFrame) {
+        --bailout;
+        continue;
+    }
 
         // Check if we got the target frame (like xjadeo's PTS matching)
         int64_t pts = parsePTSFromFrame(frame_);
@@ -932,35 +954,33 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     }
 
     // Decode frame using hardware decoder
-    AVPacket packet;
-    av_init_packet(&packet);
-    packet.data = nullptr;
-    packet.size = 0;
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        return false;
+    }
 
     int bailout = 20;
     bool frameFinished = false;
 
     while (bailout > 0 && !frameFinished) {
-        int err = av_read_frame(formatCtx_, &packet);
+        av_packet_unref(packet);
+        int err = mediaReader_.readPacket(packet);
         if (err < 0) {
             if (err == AVERROR_EOF) {
                 --bailout;
-                av_free_packet(&packet);
                 continue;
             } else {
-                av_free_packet(&packet);
+                av_packet_free(&packet);
                 return false;
             }
         }
 
-        if (packet.stream_index != videoStream_) {
-            av_free_packet(&packet);
+        if (packet->stream_index != videoStream_) {
             continue;
         }
 
         // Send packet to hardware decoder
-        err = avcodec_send_packet(codecCtx_, &packet);
-        av_free_packet(&packet);
+        err = avcodec_send_packet(codecCtx_, packet);
 
         if (err < 0) {
             --bailout;
@@ -982,8 +1002,11 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     }
 
     if (!frameFinished) {
+        av_packet_free(&packet);
         return false;
     }
+
+    av_packet_free(&packet);
 
     // Transfer hardware frame to GPU texture
     return transferHardwareFrameToGPU(hwFrame_, textureBuffer);
@@ -1117,22 +1140,24 @@ void VideoFileInput::cleanup() {
         hwDeviceCtx_ = nullptr;
     }
 
-    // Close codec
-    if (codecCtx_) {
-        avcodec_close(codecCtx_);
-        // Only free if we allocated it separately (hardware decoding)
-        // For software decoding, codecCtx_ is part of the stream and will be freed with format context
-        if (codecCtxAllocated_) {
-        avcodec_free_context(&codecCtx_);
-        }
+    // Close video decoder (for software decoding)
+    if (!useHardwareDecoding_) {
+        videoDecoder_.close();
         codecCtx_ = nullptr;
+    } else {
+        // For hardware decoding, we need to manually close
+        if (codecCtx_) {
+            avcodec_close(codecCtx_);
+            if (codecCtxAllocated_) {
+                avcodec_free_context(&codecCtx_);
+            }
+            codecCtx_ = nullptr;
+        }
     }
 
-    // Close format context
-    if (formatCtx_) {
-        avformat_close_input(&formatCtx_);
-        formatCtx_ = nullptr;
-    }
+    // Close media reader (closes format context)
+    mediaReader_.close();
+    formatCtx_ = nullptr;
 
     videoStream_ = -1;
     lastDecodedPTS_ = -1;

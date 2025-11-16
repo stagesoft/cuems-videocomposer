@@ -27,10 +27,11 @@
 
 #include "display.h"
 
+// OpenGL includes
 #ifdef __APPLE__
-#include "OpenGL/glu.h"
+#include <OpenGL/gl.h>
 #else
-#include <GL/glu.h>
+#include <GL/gl.h>
 #endif
 
 #ifdef WARP

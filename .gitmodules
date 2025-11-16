@@ -4,3 +4,6 @@
 [submodule "src/cuemslogger"]
 	path = src/cuemslogger
 	url = https://github.com/stagesoft/cuemslogger.git
+[submodule "src/cuems-mediadecoder"]
+	path = src/cuems-mediadecoder
+	url = git@github.com:stagesoft/cuems-mediadecoder.git

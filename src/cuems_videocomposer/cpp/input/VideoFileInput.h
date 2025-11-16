@@ -4,6 +4,8 @@
 #include "InputSource.h"
 #include "HardwareDecoder.h"
 #include "../video/GPUTextureFrameBuffer.h"
+#include <cuems_mediadecoder/MediaFileReader.h>
+#include <cuems_mediadecoder/VideoDecoder.h>
 #include <string>
 #include <memory>
 #include <cstdint>
@@ -70,7 +72,6 @@ private:
     };
 
     bool initializeFFmpeg();
-    bool findVideoStream();
     bool openCodec();
     bool openHardwareCodec();
     bool indexFrames();
@@ -80,9 +81,13 @@ private:
     bool transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer);
     void cleanup();
 
-    // FFmpeg objects
-    AVFormatContext* formatCtx_;
-    AVCodecContext* codecCtx_;
+    // Media decoder module
+    cuems_mediadecoder::MediaFileReader mediaReader_;
+    cuems_mediadecoder::VideoDecoder videoDecoder_;
+    
+    // FFmpeg objects (kept for compatibility and advanced operations)
+    AVFormatContext* formatCtx_;  // Access via mediaReader_.getFormatContext()
+    AVCodecContext* codecCtx_;   // Access via videoDecoder_.getCodecContext()
     AVFrame* frame_;
     AVFrame* frameFMT_;
     SwsContext* swsCtx_;

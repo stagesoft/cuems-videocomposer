@@ -94,18 +94,19 @@ endif()
 
 # OpenGL
 if(ENABLE_OPENGL)
+    # Prefer GLVND (OpenGL Vendor-Neutral Dispatch) over legacy GL library
+    # GLVND allows multiple OpenGL implementations to coexist
+    set(OpenGL_GL_PREFERENCE GLVND)
     find_package(OpenGL)
     if(OpenGL_FOUND)
         add_definitions(-DHAVE_GL)
         if(PLATFORM_OSX)
             set(GL_LIBS "-framework Cocoa -framework OpenGL")
         elseif(PLATFORM_WINDOWS)
-            set(GL_LIBS "-lopengl32 -lglu32 -lgdi32")
+            set(GL_LIBS "-lopengl32 -lgdi32")
         else()
-            find_package(GLU)
-            if(GLU_FOUND)
-                set(GL_LIBS "${GL_LIBS} -lGLU -lGL")
-            endif()
+            # GLU is deprecated and not used - only need OpenGL
+            set(GL_LIBS "-lGL")
         endif()
     endif()
 endif()
@@ -372,6 +373,8 @@ endif()
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/src/cuems_videocomposer)
 include_directories(${CMAKE_SOURCE_DIR}/src/cuems_videocomposer/cpp)
+# cuems-mediadecoder includes (also propagated via PUBLIC interface)
+include_directories(${CMAKE_SOURCE_DIR}/src/cuems-mediadecoder/include)
 
 # Source files for existing C code (will be gradually replaced)
 # Note: main.c removed - using cpp/main.cpp instead
@@ -451,6 +454,10 @@ set(CPP_SOURCES
 # Add cuemslogger library (required by mtcreceiver)
 add_subdirectory(src/cuemslogger)
 
+# Add cuems-mediadecoder module (common FFmpeg operations)
+add_subdirectory(src/cuems-mediadecoder)
+add_definitions(-DHAVE_CUEMS_MEDIADECODER)
+
 # Add mtcreceiver submodule
 if(ENABLE_MIDI AND RTMIDI_FOUND)
     add_subdirectory(src/mtcreceiver)
@@ -513,13 +520,21 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp
     )
     target_link_libraries(cuems_videocomposer_test
+        cuems-mediadecoder
         ${FFMPEG_LIBRARIES}
         ${ALSA_LIBS}
         ${RTMIDI_LIBRARIES}
-        ${OPENGL_gl_LIBRARY}
         m
         pthread
     )
+    
+    # Link OpenGL if available
+    if(PLATFORM_LINUX)
+        find_library(GL_LIBRARY GL)
+        if(GL_LIBRARY)
+            target_link_libraries(cuems_videocomposer_test ${GL_LIBRARY})
+        endif()
+    endif()
     
     # Link mtcreceiver and cuemslogger if MIDI is enabled
     if(ENABLE_MIDI AND RTMIDI_FOUND)
@@ -590,6 +605,10 @@ target_link_libraries(cuems-videocomposer
     m
     pthread
 )
+
+# Link cuems-mediadecoder (always available)
+target_link_libraries(cuems-videocomposer cuems-mediadecoder)
+# Include directories are automatically added via PUBLIC interface of cuems-mediadecoder
 
 # Link mtcreceiver and cuemslogger if available
 if(ENABLE_MIDI AND RTMIDI_FOUND)
