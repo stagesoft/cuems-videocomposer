@@ -384,30 +384,29 @@ void VideoComposerApplication::updateLayers() {
         return;
     }
     
-    layerManager_->updateAll();
-    
-    // Update OSD with current frame information from first layer
-    if (osdManager_ && layerManager_->getLayerCount() > 0) {
-        auto layers = layerManager_->getLayers();
-        if (!layers.empty() && layers[0]) {
-            VideoLayer* layer = layers[0];
-            if (layer->isReady()) {
-                int64_t currentFrame = layer->getCurrentFrame();
-                if (currentFrame >= 0) {
-                    osdManager_->setFrameNumber(currentFrame);
-                    
-                        // Update SMPTE if enabled
-                        if (osdManager_->isModeEnabled(OSDManager::SMPTE)) {
+        layerManager_->updateAll();
+        
+        // Update OSD with current frame information from first layer
+        if (osdManager_ && layerManager_->getLayerCount() > 0) {
+            auto layers = layerManager_->getLayers();
+            if (!layers.empty() && layers[0]) {
+                VideoLayer* layer = layers[0];
+                if (layer->isReady()) {
+                    int64_t currentFrame = layer->getCurrentFrame();
+                    if (currentFrame >= 0) {
+                    // Always set frame number (will be displayed if FRAME mode is enabled)
+                        osdManager_->setFrameNumber(currentFrame);
+                        
+                    // Always update SMPTE timecode (will be displayed if SMPTE mode is enabled)
                             FrameInfo info = layer->getFrameInfo();
                             if (info.framerate > 0.0) {
                                 // Use SMPTEUtils for proper timecode formatting
                                 std::string smpte = SMPTEUtils::frameToSmpteString(currentFrame, info.framerate);
                                 osdManager_->setSMPTETimecode(smpte);
-                            } else {
-                                // If framerate not available yet, set a default timecode
-                                osdManager_->setSMPTETimecode("00:00:00:00");
-                            }
-                        }
+                    } else {
+                        // If framerate not available yet, set a default timecode
+                        osdManager_->setSMPTETimecode("00:00:00:00");
+                    }
                 }
             }
         }

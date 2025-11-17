@@ -5,6 +5,7 @@
 #include "../input/VideoFileInput.h"
 #include "../sync/MIDISyncSource.h"
 #include "../osd/OSDManager.h"
+#include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
 #include <sstream>
 #include <algorithm>
 #include <cstdlib>
@@ -166,6 +167,8 @@ bool RemoteCommandRouter::routeCommand(const std::string& path, const std::vecto
     } else if (cleanPath.find("/videocomposer") == 0) {
         cleanPath = cleanPath.substr(14); // Remove "/videocomposer"
     }
+    
+    LOG_INFO << "OSC: Routing command: path='" << path << "' cleanPath='" << cleanPath << "' args.size()=" << args.size();
 
     // Check if it's a layer-level command
     if (cleanPath.find("layer/") == 0) {
@@ -509,8 +512,10 @@ bool RemoteCommandRouter::handleOSDText(const std::vector<std::string>& args) {
         // Toggle text display
         if (osd->isModeEnabled(OSDManager::TEXT)) {
             osd->disableMode(OSDManager::TEXT);
+            LOG_INFO << "OSD: TEXT disabled";
         } else {
             osd->enableMode(OSDManager::TEXT);
+            LOG_INFO << "OSD: TEXT enabled (text: '" << osd->getText() << "')";
         }
     } else {
         // Set text
@@ -520,6 +525,7 @@ bool RemoteCommandRouter::handleOSDText(const std::vector<std::string>& args) {
             text += args[i];
         }
         osd->setText(text);
+        LOG_INFO << "OSD: Text set to: '" << text << "'";
     }
     return true;
 }
@@ -538,15 +544,19 @@ bool RemoteCommandRouter::handleOSDBox(const std::vector<std::string>& args) {
         // Toggle box
         if (osd->isModeEnabled(OSDManager::BOX)) {
             osd->disableMode(OSDManager::BOX);
+            LOG_INFO << "OSD: BOX disabled";
         } else {
             osd->enableMode(OSDManager::BOX);
+            LOG_INFO << "OSD: BOX enabled";
         }
     } else {
         int enable = std::atoi(args[0].c_str());
         if (enable) {
             osd->enableMode(OSDManager::BOX);
+            LOG_INFO << "OSD: BOX enabled (via arg)";
         } else {
             osd->disableMode(OSDManager::BOX);
+            LOG_INFO << "OSD: BOX disabled (via arg)";
         }
     }
     return true;

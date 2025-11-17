@@ -218,18 +218,32 @@ unsigned int OSDRenderer::renderTextToTexture(const std::string& text, int& widt
     int texWidth = width + padding * 2;
     int texHeight = height + padding * 2;
 
-    // Create bitmap buffer (RGBA)
+    // Create bitmap buffer (RGBA) - initialize to fully transparent
+    // RGB values don't matter when A=0 with proper blending, but use black for consistency
     std::vector<unsigned char> bitmap(texWidth * texHeight * 4, 0);
+    
+    // Initialize all pixels to fully transparent (A=0)
+    // RGB values are set to 0 but won't be visible when alpha blending is correct
+    for (int y = 0; y < texHeight; ++y) {
+        for (int x = 0; x < texWidth; ++x) {
+            int idx = (y * texWidth + x) * 4;
+            bitmap[idx] = 0;       // R = 0
+            bitmap[idx + 1] = 0;   // G = 0
+            bitmap[idx + 2] = 0;   // B = 0
+            bitmap[idx + 3] = 0;   // A = 0 (fully transparent)
+        }
+    }
 
     // Fill with black box if requested
     if (createBox) {
+        // Fill entire bitmap with opaque black (R=0, G=0, B=0, A=255)
         for (int y = 0; y < texHeight; ++y) {
             for (int x = 0; x < texWidth; ++x) {
                 int idx = (y * texWidth + x) * 4;
-                bitmap[idx] = 0;     // R
-                bitmap[idx + 1] = 0; // G
-                bitmap[idx + 2] = 0; // B
-                bitmap[idx + 3] = 255; // A (fully opaque black box for better contrast)
+                bitmap[idx] = 0;     // R = 0 (black)
+                bitmap[idx + 1] = 0; // G = 0 (black)
+                bitmap[idx + 2] = 0; // B = 0 (black)
+                bitmap[idx + 3] = 255; // A = 255 (fully opaque)
             }
         }
     }
@@ -269,10 +283,10 @@ unsigned int OSDRenderer::renderTextToTexture(const std::string& text, int& widt
                     // White text on existing background (black box or transparent)
                     // Only overwrite if there's actual glyph data (alpha > 0)
                     if (alpha > 0) {
-                        bitmap[idx] = 255;     // R
-                        bitmap[idx + 1] = 255; // G
-                        bitmap[idx + 2] = 255; // B
-                        bitmap[idx + 3] = alpha; // A
+                    bitmap[idx] = 255;     // R
+                    bitmap[idx + 1] = 255; // G
+                    bitmap[idx + 2] = 255; // B
+                    bitmap[idx + 3] = alpha; // A
                     }
                     // If alpha is 0, keep existing pixel (black box or transparent)
                 }
@@ -298,26 +312,11 @@ unsigned int OSDRenderer::renderTextToTexture(const std::string& text, int& widt
     // Upload texture data
     // Note: OpenGL expects RGBA with (0,0) at bottom-left, but our bitmap has (0,0) at top-left
     // We'll handle the Y-flip in the texture coordinates during rendering
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texWidth, texHeight, 0,
+    // Use GL_RGBA8 internal format for explicit 8-bit per channel
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, texWidth, texHeight, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, bitmap.data());
-    
-    // Debug: Check if texture was uploaded correctly
-    GLenum err = glGetError();
-    if (err != GL_NO_ERROR) {
-        LOG_WARNING << "OSD: OpenGL error after texture upload: " << err;
-    }
 
     glBindTexture(GL_TEXTURE_2D, 0);
-
-    // Debug: Check if texture has any non-zero alpha pixels
-    int nonZeroAlpha = 0;
-    for (size_t i = 3; i < bitmap.size(); i += 4) {
-        if (bitmap[i] > 0) {
-            nonZeroAlpha++;
-        }
-    }
-    LOG_INFO << "OSD: Created texture " << textureId << " size " << texWidth << "x" << texHeight 
-             << " with " << nonZeroAlpha << " non-zero alpha pixels";
 
     return textureId;
 #else
@@ -359,10 +358,12 @@ std::vector<OSDRenderItem> OSDRenderer::prepareOSDRender(OSDManager* osd, int wi
     }
 
     // Render frame number if enabled
-    if (osd->isModeEnabled(OSDManager::FRAME) && !osd->getFrameText().empty()) {
+    if (osd->isModeEnabled(OSDManager::FRAME)) {
+        std::string frameText = osd->getFrameText();
+        if (!frameText.empty()) {
         int textWidth, textHeight;
         bool hasBox = osd->isModeEnabled(OSDManager::BOX);
-        unsigned int texId = renderTextToTexture(osd->getFrameText(), textWidth, textHeight, hasBox);
+            unsigned int texId = renderTextToTexture(frameText, textWidth, textHeight, hasBox);
         
         if (texId != 0) {
             OSDRenderItem item;
@@ -373,6 +374,11 @@ std::vector<OSDRenderItem> OSDRenderer::prepareOSDRender(OSDManager* osd, int wi
             item.y = calculateYPosition(osd->getFrameYPercent(), textHeight, windowHeight);
             item.x = calculateXPosition(osd->getFrameXAlign(), textWidth, windowWidth);
             items.push_back(item);
+            } else {
+                LOG_WARNING << "OSD: Failed to render frame text: '" << frameText << "'";
+            }
+        } else {
+            LOG_WARNING << "OSD: FRAME mode enabled but text is empty";
         }
     }
 
@@ -380,21 +386,21 @@ std::vector<OSDRenderItem> OSDRenderer::prepareOSDRender(OSDManager* osd, int wi
     if (osd->isModeEnabled(OSDManager::SMPTE)) {
         std::string smpteText = osd->getSMPTETimecode();
         if (!smpteText.empty()) {
-            int textWidth, textHeight;
-            bool hasBox = osd->isModeEnabled(OSDManager::BOX);
+        int textWidth, textHeight;
+        bool hasBox = osd->isModeEnabled(OSDManager::BOX);
             unsigned int texId = renderTextToTexture(smpteText, textWidth, textHeight, hasBox);
-            
-            if (texId != 0) {
-                OSDRenderItem item;
-                item.textureId = texId;
-                item.width = textWidth;
-                item.height = textHeight;
-                item.hasBox = hasBox;
-                item.y = calculateYPosition(osd->getSMPTEYPercent(), textHeight, windowHeight);
-                item.x = calculateXPosition(osd->getSMPTEXAlign(), textWidth, windowWidth);
-                items.push_back(item);
+        
+        if (texId != 0) {
+            OSDRenderItem item;
+            item.textureId = texId;
+            item.width = textWidth;
+            item.height = textHeight;
+            item.hasBox = hasBox;
+            item.y = calculateYPosition(osd->getSMPTEYPercent(), textHeight, windowHeight);
+            item.x = calculateXPosition(osd->getSMPTEXAlign(), textWidth, windowWidth);
+            items.push_back(item);
             } else {
-                LOG_WARNING << "OSD: Failed to render SMPTE text: " << smpteText;
+                LOG_WARNING << "OSD: Failed to render SMPTE text: '" << smpteText << "'";
             }
         } else {
             LOG_WARNING << "OSD: SMPTE mode enabled but text is empty";
@@ -402,10 +408,12 @@ std::vector<OSDRenderItem> OSDRenderer::prepareOSDRender(OSDManager* osd, int wi
     }
 
     // Render custom text if enabled
-    if (osd->isModeEnabled(OSDManager::TEXT) && !osd->getText().empty()) {
+    if (osd->isModeEnabled(OSDManager::TEXT)) {
+        std::string text = osd->getText();
+        if (!text.empty()) {
         int textWidth, textHeight;
         bool hasBox = osd->isModeEnabled(OSDManager::BOX);
-        unsigned int texId = renderTextToTexture(osd->getText(), textWidth, textHeight, hasBox);
+            unsigned int texId = renderTextToTexture(text, textWidth, textHeight, hasBox);
         
         if (texId != 0) {
             OSDRenderItem item;
@@ -416,6 +424,11 @@ std::vector<OSDRenderItem> OSDRenderer::prepareOSDRender(OSDManager* osd, int wi
             item.y = calculateYPosition(osd->getTextYPercent(), textHeight, windowHeight);
             item.x = calculateXPosition(osd->getTextXAlign(), textWidth, windowWidth);
             items.push_back(item);
+            } else {
+                LOG_WARNING << "OSD: Failed to render text: '" << text << "'";
+            }
+        } else {
+            LOG_WARNING << "OSD: TEXT mode enabled but text is empty";
         }
     }
 
@@ -441,23 +454,29 @@ std::vector<OSDRenderItem> OSDRenderer::prepareOSDRender(OSDManager* osd, int wi
 }
 
 int OSDRenderer::calculateXPosition(int xAlign, int textWidth, int windowWidth) {
+    // Match xjadeo: OSD_LEFT=-1, OSD_CENTER=-2, OSD_RIGHT=-3, or positive pixel values
+    // Our xAlign: 0=left, 1=center, 2=right
+    const int ST_PADDING = 10;  // Match xjadeo's padding
+    
     switch (xAlign) {
-        case 0:  // Left
-            return 10;
-        case 1:  // Center
+        case 0:  // Left (OSD_LEFT)
+            return ST_PADDING;
+        case 1:  // Center (OSD_CENTER)
             return (windowWidth - textWidth) / 2;
-        case 2:  // Right
-            return windowWidth - textWidth - 10;
+        case 2:  // Right (OSD_RIGHT)
+            return windowWidth - ST_PADDING - textWidth;
         default:
-            return 10;
+            return ST_PADDING;
     }
 }
 
 int OSDRenderer::calculateYPosition(int yPercent, int textHeight, int windowHeight) {
-    // yPercent is 0-100, where 0 is top and 100 is bottom
-    int pixelY = (windowHeight * yPercent) / 100;
-    // Adjust for text height (anchor at top of text)
-    return pixelY;
+    // Match xjadeo's Y position calculation:
+    // yalign = (movie_height - fh) * yperc / 100.0;
+    // where fh is font height, yperc is 0-100 (0=top, 100=bottom)
+    // This positions text from top, accounting for font height
+    int yalign = ((windowHeight - textHeight) * yPercent) / 100;
+    return yalign;
 }
 
 } // namespace videocomposer

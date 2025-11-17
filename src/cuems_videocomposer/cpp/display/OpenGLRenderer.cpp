@@ -519,11 +519,18 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
     glPushMatrix();
     glLoadIdentity();
 
-    // Disable depth test (we're rendering 2D overlay)
+    // Disable depth test (we're rendering 2D overlay on top of everything)
     glDisable(GL_DEPTH_TEST);
-    
+    // Ensure OSD is rendered on top by using a high depth value if depth test were enabled
+    // Since depth test is disabled, this is just for clarity
+
     // Enable blending for OSD
     glEnable(GL_BLEND);
+    // Use standard alpha blending for correct rendering of textures with alpha
+    // GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA works for non-premultiplied alpha
+    // This ensures transparent pixels (A=0) are completely invisible
+    // When A=0: src contribution = 0, dst contribution = 1.0 * dst (unchanged)
+    // When A=255: src contribution = 1.0 * src, dst contribution = 0 (fully opaque)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     
     // Disable face culling
@@ -543,6 +550,10 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
         }
 
         glBindTexture(GL_TEXTURE_2D, item.textureId);
+        
+        // Set texture environment to MODULATE for proper alpha blending
+        // Video layers use GL_DECAL which ignores alpha - we need MODULATE for transparency
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
         // Calculate normalized coordinates
         // OpenGL coordinates: -1 to 1, with origin at center, Y up (top=1.0, bottom=-1.0)
@@ -555,16 +566,12 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
         // Height is negative because we're going down from top
         float h = -2.0f * item.height / viewportHeight_;
 
-        LOG_INFO << "OSD: Rendering item at screen(" << item.x << "," << item.y << ") size(" 
-                 << item.width << "x" << item.height << ") -> GL(" << x << "," << y << ") size(" << w << "x" << h << ")";
-
         // Ensure texture is bound and enabled
-        glBindTexture(GL_TEXTURE_2D, item.textureId);
         glEnable(GL_TEXTURE_2D);
         
         // Set color to white with full opacity for text
         glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-        
+
         // Render textured quad with proper texture coordinates
         // OpenGL texture coordinates: (0,0) = bottom-left, (1,1) = top-right
         // Our bitmap is stored with (0,0) at top-left, so we need to flip Y
@@ -575,12 +582,6 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
         glTexCoord2f(1.0f, 1.0f); glVertex2f(x + w, y + h);   // Bottom-right vertex -> bitmap bottom-right (1,1)
         glTexCoord2f(0.0f, 1.0f); glVertex2f(x, y + h);       // Bottom-left vertex -> bitmap bottom-left (0,1)
         glEnd();
-        
-        // Check for OpenGL errors
-        GLenum err = glGetError();
-        if (err != GL_NO_ERROR) {
-            LOG_WARNING << "OSD: OpenGL error after rendering: " << err;
-        }
     }
 
     glBindTexture(GL_TEXTURE_2D, 0);

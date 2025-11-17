@@ -8,12 +8,12 @@ namespace videocomposer {
 
 OSDManager::OSDManager()
     : mode_(BOX)  // BOX enabled by default (matches xjadeo: OSD_mode = OSD_BOX in ui_osd_clear)
-    , frameXAlign_(1)  // Center by default
-    , frameYPercent_(95)
-    , smpteXAlign_(1)  // Center by default
-    , smpteYPercent_(89)
-    , textXAlign_(1)   // Center by default
-    , textYPercent_(50)
+    , frameXAlign_(1)  // Center by default (OSD_CENTER = -2 in xjadeo, we use 1)
+    , frameYPercent_(95)  // Default 95% from top (matches xjadeo's default when frame enabled)
+    , smpteXAlign_(1)  // Center by default (OSD_CENTER = -2 in xjadeo, we use 1)
+    , smpteYPercent_(89)  // Default 89% from top (matches xjadeo's default when SMPTE enabled)
+    , textXAlign_(1)   // Center by default (OSD_CENTER = -2 in xjadeo, we use 1)
+    , textYPercent_(50)  // Default 50% from top (center, matches xjadeo's default for text)
 {
 }
 
