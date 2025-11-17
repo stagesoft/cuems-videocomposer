@@ -429,8 +429,9 @@ bool VideoFileInput::openCodec() {
     return true;
 }
 
-// Forward declaration of FrameIndex structure (matches VideoFileInput::FrameIndex)
-struct FrameIndex {
+// Forward declaration of FrameIndex structure (matches VideoFileInput::FrameIndex layout)
+// Note: This is a duplicate struct definition for helper functions since VideoFileInput::FrameIndex is private
+struct LocalFrameIndex {
     int64_t pkt_pts;
     int64_t pkt_pos;
     int64_t frame_pts;
@@ -442,7 +443,7 @@ struct FrameIndex {
 };
 
 // Helper function to add index entry (like xjadeo's add_idx)
-static int addIndexEntry(FrameIndex* frameIndex, int64_t fcnt, int64_t frames,
+static int addIndexEntry(LocalFrameIndex* frameIndex, int64_t fcnt, int64_t frames,
                          int64_t ts, int64_t pos, uint8_t key, AVRational fr_Q, AVRational tb) {
     if (fcnt >= frames) {
         // Overflow - will be handled by caller
@@ -462,7 +463,7 @@ static int addIndexEntry(FrameIndex* frameIndex, int64_t fcnt, int64_t frames,
 }
 
 // Helper function to find keyframe for a given timestamp (like xjadeo's keyframe_lookup_helper)
-static int64_t keyframeLookupHelper(FrameIndex* frameIndex, int64_t fcnt,
+static int64_t keyframeLookupHelper(LocalFrameIndex* frameIndex, int64_t fcnt,
                                      int64_t last, int64_t ts) {
     if (last >= fcnt) {
         last = fcnt - 1;
@@ -569,7 +570,7 @@ bool VideoFileInput::indexFrames() {
             }
         }
         
-        if (addIndexEntry(reinterpret_cast<FrameIndex*>(frameIndex_), frameCount_, frames, ts, packet->pos, key, frameRateQ_, timeBase) < 0) {
+        if (addIndexEntry(reinterpret_cast<LocalFrameIndex*>(frameIndex_), frameCount_, frames, ts, packet->pos, key, frameRateQ_, timeBase) < 0) {
             av_packet_unref(packet);
             break;
         }
@@ -748,7 +749,7 @@ bool VideoFileInput::indexFrames() {
     
     for (int64_t i = 0; i < frameCount_; ++i) {
         int64_t searchLimit = std::min(frameCount_ - 1, i + 2 + max_keyframe_interval);
-        int64_t kfi = keyframeLookupHelper(reinterpret_cast<FrameIndex*>(frameIndex_), frameCount_, searchLimit, frameIndex_[i].timestamp);
+        int64_t kfi = keyframeLookupHelper(reinterpret_cast<LocalFrameIndex*>(frameIndex_), frameCount_, searchLimit, frameIndex_[i].timestamp);
         
         if (kfi < 0) {
             LOG_WARNING << "Cannot find keyframe for frame " << i << " timestamp " << frameIndex_[i].timestamp;
