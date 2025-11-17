@@ -17,8 +17,8 @@ class LayerManager;
  * RemoteCommandRouter - Routes commands to application or specific layers
  * 
  * Parses command paths and delegates to appropriate handlers:
- * - App-level: /jadeo/quit, /jadeo/layer/add, etc.
- * - Layer-level: /jadeo/layer/<id>/seek, /jadeo/layer/<id>/play, etc.
+ * - App-level: /videocomposer/quit, /videocomposer/layer/add, etc.
+ * - Layer-level: /videocomposer/layer/<id>/seek, /videocomposer/layer/<id>/play, etc.
  */
 class RemoteCommandRouter {
 public:

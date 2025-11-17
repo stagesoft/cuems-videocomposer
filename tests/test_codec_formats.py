@@ -19,6 +19,7 @@ import subprocess
 import signal
 import argparse
 import json
+import socket
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -166,8 +167,8 @@ class CodecFormatTest:
         expected_path = self._determine_expected_path(info)
         print(f"  Expected decoding: {expected_path}")
         
-        # Run videocomposer
-        result = self._run_videocomposer(video_path, test_duration)
+        # Run videocomposer with OSD enabled
+        result = self._run_videocomposer(video_path, test_duration, enable_osd=True)
         
         # Analyze output
         analysis = self._analyze_output(result, info, expected_path)
@@ -224,11 +225,65 @@ class CodecFormatTest:
         if self.mtc_helper:
             self.mtc_helper.cleanup()
     
-    def _run_videocomposer(self, video_path: Path, duration: int, verbose_output: bool = True) -> Dict:
+    def _send_osc_command(self, port: int, path: str, value: int):
+        """Send OSC command to videocomposer."""
+        try:
+            # OSC message format:
+            # 1. Path string (null-terminated, padded to 4-byte boundary)
+            # 2. Type tag string (null-terminated, padded to 4-byte boundary)
+            # 3. Arguments (each padded to 4-byte boundary)
+            
+            # Path
+            path_bytes = path.encode('utf-8') + b'\0'
+            path_padded = path_bytes + b'\0' * ((4 - len(path_bytes) % 4) % 4)
+            
+            # Type tag (',i' for integer)
+            type_tag = b',i\0'
+            type_tag_padded = type_tag + b'\0' * ((4 - len(type_tag) % 4) % 4)
+            
+            # Integer value (4 bytes, big-endian)
+            value_bytes = value.to_bytes(4, byteorder='big')
+            
+            # Combine message
+            osc_msg = path_padded + type_tag_padded + value_bytes
+            
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(osc_msg, ('127.0.0.1', port))
+            sock.close()
+        except Exception as e:
+            print(f"    Warning: Failed to send OSC command: {e}")
+    
+    def _send_osc_string_command(self, port: int, path: str, string_value: str):
+        """Send OSC command with string argument."""
+        try:
+            # Path
+            path_bytes = path.encode('utf-8') + b'\0'
+            path_padded = path_bytes + b'\0' * ((4 - len(path_bytes) % 4) % 4)
+            
+            # Type tag (',s' for string)
+            type_tag = b',s\0'
+            type_tag_padded = type_tag + b'\0' * ((4 - len(type_tag) % 4) % 4)
+            
+            # String value (null-terminated, padded to 4-byte boundary)
+            string_bytes = string_value.encode('utf-8') + b'\0'
+            string_padded = string_bytes + b'\0' * ((4 - len(string_bytes) % 4) % 4)
+            
+            # Combine message
+            osc_msg = path_padded + type_tag_padded + string_padded
+            
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(osc_msg, ('127.0.0.1', port))
+            sock.close()
+        except Exception as e:
+            print(f"    Warning: Failed to send OSC string command: {e}")
+    
+    def _run_videocomposer(self, video_path: Path, duration: int, verbose_output: bool = True, enable_osd: bool = False) -> Dict:
         """Run videocomposer with the video file."""
+        osc_port = 7000  # Default OSC port
         cmd = [
             str(self.videocomposer_bin),
             "-v",  # Verbose
+            "--osc", str(osc_port),  # Enable OSC for OSD control
             str(video_path)
         ]
         
@@ -245,6 +300,20 @@ class CodecFormatTest:
                 text=True,
                 bufsize=1
             )
+            
+            # Wait longer for videocomposer to fully initialize OSC server
+            time.sleep(1.5)
+            
+            # Enable OSD timecode display if requested
+            if enable_osd:
+                print(f"  Enabling OSD timecode display...")
+                # Try direct OSC path first (should route to RemoteCommandRouter via catch-all)
+                # Path: /videocomposer/osd/smpte with argument "89"
+                self._send_osc_string_command(osc_port, "/videocomposer/osd/smpte", "89")
+                time.sleep(0.5)  # Give it more time to process
+                # Also try the integer version
+                self._send_osc_command(osc_port, "/videocomposer/osd/timecode", 1)
+                time.sleep(0.3)
             
             # Collect output
             output_lines = []

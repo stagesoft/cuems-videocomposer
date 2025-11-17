@@ -65,8 +65,8 @@ private:
     // Measure text dimensions
     void measureText(const std::string& text, int& width, int& height);
     
-    // Default font size
-    static const int DEFAULT_FONT_SIZE = 24;
+    // Calculate font size based on video/window height (matches xjadeo)
+    int calculateFontSize(int videoHeight) const;
 };
 
 } // namespace videocomposer

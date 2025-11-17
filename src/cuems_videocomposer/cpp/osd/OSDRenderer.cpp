@@ -21,7 +21,7 @@ OSDRenderer::OSDRenderer()
     , initialized_(false)
     , ftLibrary_(nullptr)
     , ftFace_(nullptr)
-    , fontSize_(DEFAULT_FONT_SIZE)
+    , fontSize_(24)  // Will be recalculated based on video height
 {
 }
 
@@ -170,6 +170,14 @@ void OSDRenderer::measureText(const std::string& text, int& width, int& height) 
 #endif
 }
 
+int OSDRenderer::calculateFontSize(int videoHeight) const {
+    // Matches xjadeo formula: MIN(MAX(13, movie_height / 18), 56)
+    int size = videoHeight / 18;
+    if (size < 13) size = 13;
+    if (size > 56) size = 56;
+    return size;
+}
+
 unsigned int OSDRenderer::renderTextToTexture(const std::string& text, int& width, int& height, bool createBox) {
     if (text.empty()) {
         width = 0;
@@ -178,9 +186,17 @@ unsigned int OSDRenderer::renderTextToTexture(const std::string& text, int& widt
     }
 
 #ifdef HAVE_FT
-    if (!freetypeAvailable_ || !ftFace_) {
+    if (!freetypeAvailable_) {
+        LOG_WARNING << "OSD: Freetype not available";
+        width = 0;
+        height = 0;
+        return 0;
+    }
+    
+    if (!ftFace_) {
         // Try to load default font if not loaded
         if (!loadFont("")) {
+            LOG_WARNING << "OSD: Failed to load default font";
             width = 0;
             height = 0;
             return 0;
@@ -213,7 +229,7 @@ unsigned int OSDRenderer::renderTextToTexture(const std::string& text, int& widt
                 bitmap[idx] = 0;     // R
                 bitmap[idx + 1] = 0; // G
                 bitmap[idx + 2] = 0; // B
-                bitmap[idx + 3] = 180; // A (semi-transparent black box)
+                bitmap[idx + 3] = 255; // A (fully opaque black box for better contrast)
             }
         }
     }
@@ -224,11 +240,19 @@ unsigned int OSDRenderer::renderTextToTexture(const std::string& text, int& widt
 
     for (size_t n = 0; n < text.length(); ++n) {
         FT_Error error = FT_Load_Char(face, text[n], FT_LOAD_RENDER);
-        if (error) continue;
+        if (error) {
+            LOG_WARNING << "OSD: Failed to load character: " << text[n] << " (error: " << error << ")";
+            continue;
+        }
 
         FT_Bitmap* bmp = &slot->bitmap;
         int x = penX + slot->bitmap_left;
         int y = penY - slot->bitmap_top;
+
+        // Check bitmap format
+        if (bmp->pixel_mode != FT_PIXEL_MODE_GRAY) {
+            LOG_WARNING << "OSD: Unexpected bitmap pixel mode: " << bmp->pixel_mode << " (expected GRAY)";
+        }
 
         // Draw bitmap
         for (int row = 0; row < static_cast<int>(bmp->rows); ++row) {
@@ -237,14 +261,20 @@ unsigned int OSDRenderer::renderTextToTexture(const std::string& text, int& widt
                 int py = y + row;
 
                 if (px >= 0 && px < texWidth && py >= 0 && py < texHeight) {
+                    // FreeType bitmap is grayscale (alpha channel)
+                    // Buffer is row-major, with pitch bytes per row
                     unsigned char alpha = bmp->buffer[row * bmp->pitch + col];
                     int idx = (py * texWidth + px) * 4;
 
-                    // White text
-                    bitmap[idx] = 255;     // R
-                    bitmap[idx + 1] = 255; // G
-                    bitmap[idx + 2] = 255; // B
-                    bitmap[idx + 3] = alpha; // A
+                    // White text on existing background (black box or transparent)
+                    // Only overwrite if there's actual glyph data (alpha > 0)
+                    if (alpha > 0) {
+                        bitmap[idx] = 255;     // R
+                        bitmap[idx + 1] = 255; // G
+                        bitmap[idx + 2] = 255; // B
+                        bitmap[idx + 3] = alpha; // A
+                    }
+                    // If alpha is 0, keep existing pixel (black box or transparent)
                 }
             }
         }
@@ -265,10 +295,29 @@ unsigned int OSDRenderer::renderTextToTexture(const std::string& text, int& widt
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    // Upload texture data
+    // Note: OpenGL expects RGBA with (0,0) at bottom-left, but our bitmap has (0,0) at top-left
+    // We'll handle the Y-flip in the texture coordinates during rendering
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texWidth, texHeight, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, bitmap.data());
+    
+    // Debug: Check if texture was uploaded correctly
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        LOG_WARNING << "OSD: OpenGL error after texture upload: " << err;
+    }
 
     glBindTexture(GL_TEXTURE_2D, 0);
+
+    // Debug: Check if texture has any non-zero alpha pixels
+    int nonZeroAlpha = 0;
+    for (size_t i = 3; i < bitmap.size(); i += 4) {
+        if (bitmap[i] > 0) {
+            nonZeroAlpha++;
+        }
+    }
+    LOG_INFO << "OSD: Created texture " << textureId << " size " << texWidth << "x" << texHeight 
+             << " with " << nonZeroAlpha << " non-zero alpha pixels";
 
     return textureId;
 #else
@@ -290,6 +339,17 @@ std::vector<OSDRenderItem> OSDRenderer::prepareOSDRender(OSDManager* osd, int wi
 
     if (!osd || !initialized_ || windowWidth <= 0 || windowHeight <= 0) {
         return items;
+    }
+
+    // Calculate font size based on window/video height (matches xjadeo: MIN(MAX(13, height/18), 56))
+    int newFontSize = calculateFontSize(windowHeight);
+    if (newFontSize != fontSize_) {
+        fontSize_ = newFontSize;
+        // Reload font with new size if font is already loaded
+        if (ftFace_) {
+            std::string fontFile = osd->getFontFile();
+            loadFont(fontFile);
+        }
     }
 
     // Load font if needed
@@ -317,20 +377,27 @@ std::vector<OSDRenderItem> OSDRenderer::prepareOSDRender(OSDManager* osd, int wi
     }
 
     // Render SMPTE timecode if enabled
-    if (osd->isModeEnabled(OSDManager::SMPTE) && !osd->getSMPTETimecode().empty()) {
-        int textWidth, textHeight;
-        bool hasBox = osd->isModeEnabled(OSDManager::BOX);
-        unsigned int texId = renderTextToTexture(osd->getSMPTETimecode(), textWidth, textHeight, hasBox);
-        
-        if (texId != 0) {
-            OSDRenderItem item;
-            item.textureId = texId;
-            item.width = textWidth;
-            item.height = textHeight;
-            item.hasBox = hasBox;
-            item.y = calculateYPosition(osd->getSMPTEYPercent(), textHeight, windowHeight);
-            item.x = calculateXPosition(osd->getSMPTEXAlign(), textWidth, windowWidth);
-            items.push_back(item);
+    if (osd->isModeEnabled(OSDManager::SMPTE)) {
+        std::string smpteText = osd->getSMPTETimecode();
+        if (!smpteText.empty()) {
+            int textWidth, textHeight;
+            bool hasBox = osd->isModeEnabled(OSDManager::BOX);
+            unsigned int texId = renderTextToTexture(smpteText, textWidth, textHeight, hasBox);
+            
+            if (texId != 0) {
+                OSDRenderItem item;
+                item.textureId = texId;
+                item.width = textWidth;
+                item.height = textHeight;
+                item.hasBox = hasBox;
+                item.y = calculateYPosition(osd->getSMPTEYPercent(), textHeight, windowHeight);
+                item.x = calculateXPosition(osd->getSMPTEXAlign(), textWidth, windowWidth);
+                items.push_back(item);
+            } else {
+                LOG_WARNING << "OSD: Failed to render SMPTE text: " << smpteText;
+            }
+        } else {
+            LOG_WARNING << "OSD: SMPTE mode enabled but text is empty";
         }
     }
 

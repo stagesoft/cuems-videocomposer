@@ -501,41 +501,102 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
         return;
     }
 
-    // Save current matrix state
+    // Save current OpenGL state before modifying for OSD rendering
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_TEXTURE_BIT);
+    
+    // CRITICAL: Disable GL_TEXTURE_RECTANGLE_ARB (used by video layers) before rendering OSD
+    // OSD uses GL_TEXTURE_2D, and both cannot be active simultaneously
+    glDisable(GL_TEXTURE_RECTANGLE_ARB);
+    
+    // Save and set projection matrix for OSD (2D overlay in normalized coordinates)
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f);
+
+    // Save and set modelview matrix for OSD
+    glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
 
+    // Disable depth test (we're rendering 2D overlay)
+    glDisable(GL_DEPTH_TEST);
+    
     // Enable blending for OSD
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    
+    // Disable face culling
+    glDisable(GL_CULL_FACE);
+    
+    // Enable texture 2D (OSD uses GL_TEXTURE_2D, not GL_TEXTURE_RECTANGLE_ARB)
+    glEnable(GL_TEXTURE_2D);
+    
+    // Set color to white (texture provides color)
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
     // Render each OSD item
     for (const auto& item : items) {
         if (item.textureId == 0) {
+            LOG_WARNING << "OSD: Skipping item with textureId=0";
             continue;
         }
 
         glBindTexture(GL_TEXTURE_2D, item.textureId);
 
         // Calculate normalized coordinates
-        // OpenGL coordinates: -1 to 1, with origin at center
-        // Screen coordinates: 0 to viewportWidth/Height, with origin at top-left
+        // OpenGL coordinates: -1 to 1, with origin at center, Y up (top=1.0, bottom=-1.0)
+        // Screen coordinates: 0 to viewportWidth/Height, with origin at top-left, Y down (top=0, bottom=height)
+        // item.x and item.y are in screen pixels from top-left (item.y is top of text)
         float x = -1.0f + (2.0f * item.x / viewportWidth_);
+        // Convert screen Y (top=0) to OpenGL Y (top=1.0): y_gl = 1.0 - 2.0 * (y_screen / height)
         float y = 1.0f - (2.0f * item.y / viewportHeight_);
         float w = 2.0f * item.width / viewportWidth_;
-        float h = -2.0f * item.height / viewportHeight_; // Negative because Y is flipped
+        // Height is negative because we're going down from top
+        float h = -2.0f * item.height / viewportHeight_;
 
-        // Render textured quad
+        LOG_INFO << "OSD: Rendering item at screen(" << item.x << "," << item.y << ") size(" 
+                 << item.width << "x" << item.height << ") -> GL(" << x << "," << y << ") size(" << w << "x" << h << ")";
+
+        // Ensure texture is bound and enabled
+        glBindTexture(GL_TEXTURE_2D, item.textureId);
+        glEnable(GL_TEXTURE_2D);
+        
+        // Set color to white with full opacity for text
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+        
+        // Render textured quad with proper texture coordinates
+        // OpenGL texture coordinates: (0,0) = bottom-left, (1,1) = top-right
+        // Our bitmap is stored with (0,0) at top-left, so we need to flip Y
+        // Top-left vertex -> (0,0) texture (bitmap top-left), bottom-left -> (0,1) texture (bitmap bottom-left)
         glBegin(GL_QUADS);
-        glTexCoord2f(0.0f, 0.0f); glVertex2f(x, y);
-        glTexCoord2f(1.0f, 0.0f); glVertex2f(x + w, y);
-        glTexCoord2f(1.0f, 1.0f); glVertex2f(x + w, y + h);
-        glTexCoord2f(0.0f, 1.0f); glVertex2f(x, y + h);
+        glTexCoord2f(0.0f, 0.0f); glVertex2f(x, y);           // Top-left vertex -> bitmap top-left (0,0)
+        glTexCoord2f(1.0f, 0.0f); glVertex2f(x + w, y);       // Top-right vertex -> bitmap top-right (1,0)
+        glTexCoord2f(1.0f, 1.0f); glVertex2f(x + w, y + h);   // Bottom-right vertex -> bitmap bottom-right (1,1)
+        glTexCoord2f(0.0f, 1.0f); glVertex2f(x, y + h);       // Bottom-left vertex -> bitmap bottom-left (0,1)
         glEnd();
+        
+        // Check for OpenGL errors
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR) {
+            LOG_WARNING << "OSD: OpenGL error after rendering: " << err;
+        }
     }
 
     glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+    
+    // Restore matrices (must restore in reverse order)
     glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    
+    // Restore all OpenGL state (including GL_TEXTURE_RECTANGLE_ARB if it was enabled)
+    glPopAttrib();
+    
+    // Re-enable GL_TEXTURE_RECTANGLE_ARB for video layers (they need it for next frame)
+    glEnable(GL_TEXTURE_RECTANGLE_ARB);
 }
 
 } // namespace videocomposer

@@ -483,10 +483,10 @@ static int64_t keyframeLookupHelper(LocalFrameIndex* frameIndex, int64_t fcnt,
 
 bool VideoFileInput::indexFrames() {
     // xjadeo-style 3-pass indexing implementation
-    
+
     frameCount_ = 0;
     frameIndex_ = nullptr;
-    
+
     AVStream* avStream = mediaReader_.getStream(videoStream_);
     if (!avStream) {
         return false;
@@ -509,7 +509,7 @@ bool VideoFileInput::indexFrames() {
     if (!frameIndex_) {
         return false;
     }
-    
+
     AVPacket* packet = av_packet_alloc();
     if (!packet) {
         free(frameIndex_);
@@ -537,7 +537,7 @@ bool VideoFileInput::indexFrames() {
             av_packet_unref(packet);
             continue;
         }
-        
+
         int64_t ts = AV_NOPTS_VALUE;
         
         // Try PTS first, fallback to DTS
@@ -550,7 +550,7 @@ bool VideoFileInput::indexFrames() {
         if (use_dts && packet->dts != AV_NOPTS_VALUE) {
             ts = packet->dts;
         }
-        
+
         if (ts == AV_NOPTS_VALUE) {
             LOG_WARNING << "Index error: no PTS, nor DTS at frame " << frameCount_;
             av_packet_unref(packet);
@@ -558,7 +558,7 @@ bool VideoFileInput::indexFrames() {
         }
         
         const uint8_t key = (packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
-        
+
         // Grow array if needed
         if (frameCount_ >= frames) {
             frames *= 2;
@@ -569,7 +569,7 @@ bool VideoFileInput::indexFrames() {
                 return false;
             }
         }
-        
+
         if (addIndexEntry(reinterpret_cast<LocalFrameIndex*>(frameIndex_), frameCount_, frames, ts, packet->pos, key, frameRateQ_, timeBase) < 0) {
             av_packet_unref(packet);
             break;
@@ -628,7 +628,7 @@ bool VideoFileInput::indexFrames() {
         if (key) {
             keyframe_interval = 0;
         }
-        
+
         frameCount_++;
     }
     
@@ -767,7 +767,7 @@ bool VideoFileInput::indexFrames() {
     if (frameCount_ > frameInfo_.totalFrames) {
         frameInfo_.totalFrames = frameCount_;
     }
-    
+
     scanComplete_ = true;
     return true;
 }
@@ -992,14 +992,14 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         --bailout;
         continue;
     } else if (err < 0) {
-        --bailout;
-        continue;
-    }
+            --bailout;
+            continue;
+        }
 
-    if (!gotFrame) {
-        --bailout;
-        continue;
-    }
+        if (!gotFrame) {
+            --bailout;
+            continue;
+        }
 
         // Check if we got the target frame (like xjadeo's PTS matching)
         int64_t pts = parsePTSFromFrame(frame_);
@@ -1431,18 +1431,18 @@ void VideoFileInput::cleanup() {
         codecCtx_ = nullptr;
     } else {
         // For hardware decoding, we need to manually close
-        if (codecCtx_) {
-            avcodec_close(codecCtx_);
-            if (codecCtxAllocated_) {
-                avcodec_free_context(&codecCtx_);
-            }
-            codecCtx_ = nullptr;
+    if (codecCtx_) {
+        avcodec_close(codecCtx_);
+        if (codecCtxAllocated_) {
+        avcodec_free_context(&codecCtx_);
+        }
+        codecCtx_ = nullptr;
         }
     }
 
     // Close media reader (closes format context)
     mediaReader_.close();
-    formatCtx_ = nullptr;
+        formatCtx_ = nullptr;
 
     videoStream_ = -1;
     lastDecodedPTS_ = -1;

@@ -670,11 +670,11 @@ void HAPVideoInput::cleanup() {
 
     // Close video decoder
     videoDecoder_.close();
-    codecCtx_ = nullptr;
+        codecCtx_ = nullptr;
 
     // Close media reader (closes format context)
     mediaReader_.close();
-    formatCtx_ = nullptr;
+        formatCtx_ = nullptr;
 
     videoStream_ = -1;
     lastDecodedPTS_ = -1;

@@ -51,29 +51,36 @@ bool OSCRemoteControl::initialize(int port) {
     lo_server_add_method(oscServer_, nullptr, nullptr, handleOSCMessage, userData_);
 
     // Register specific methods for compatibility with existing OSC interface
-    lo_server_add_method(oscServer_, "/jadeo/quit", "", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/load", "s", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/seek", "i", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/fps", "f", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/offset", "i", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/offset", "s", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/midi/connect", "s", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/midi/disconnect", "", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/quit", "", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/load", "s", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/seek", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/fps", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/offset", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/offset", "s", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/cmd", "s", handleOSCMessage, userData_);  // Remote command interface
+    lo_server_add_method(oscServer_, "/videocomposer/midi/connect", "s", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/midi/disconnect", "", handleOSCMessage, userData_);
+    // OSD commands
+    lo_server_add_method(oscServer_, "/videocomposer/osd/timecode", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/osd/smpte", "s", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/osd/frame", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/osd/box", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/osd/text", "s", handleOSCMessage, userData_);
 
     // Layer-level commands
-    lo_server_add_method(oscServer_, "/jadeo/layer/add", "s", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/remove", "i", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/duplicate", "i", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/reorder", "is", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/list", "", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/*/remove", "", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/*/seek", "i", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/*/play", "", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/*/pause", "", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/*/position", "ii", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/*/opacity", "f", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/*/visible", "i", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/jadeo/layer/*/zorder", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/add", "s", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/remove", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/duplicate", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/reorder", "is", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/list", "", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/remove", "", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/seek", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/play", "", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/pause", "", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/position", "ii", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/opacity", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/visible", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/zorder", "i", handleOSCMessage, userData_);
 
     active_ = true;
     return true;

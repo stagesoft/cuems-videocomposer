@@ -7,7 +7,7 @@
 namespace videocomposer {
 
 OSDManager::OSDManager()
-    : mode_(NONE)
+    : mode_(BOX)  // BOX enabled by default (matches xjadeo: OSD_mode = OSD_BOX in ui_osd_clear)
     , frameXAlign_(1)  // Center by default
     , frameYPercent_(95)
     , smpteXAlign_(1)  // Center by default
@@ -68,7 +68,7 @@ void OSDManager::setMessage(const std::string& msg) {
 }
 
 void OSDManager::clear() {
-    mode_ = NONE;
+    mode_ = BOX;  // Matches xjadeo: OSD_mode = OSD_BOX when clearing
     frameText_.clear();
     smpteText_.clear();
     text_.clear();

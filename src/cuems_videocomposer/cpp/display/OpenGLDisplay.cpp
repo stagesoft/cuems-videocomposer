@@ -152,9 +152,10 @@ void OpenGLDisplay::render(LayerManager* layerManager, OSDManager* osdManager) {
     if (osdManager && osdRenderer_) {
         auto osdItems = osdRenderer_->prepareOSDRender(osdManager, windowWidth_, windowHeight_);
         if (!osdItems.empty()) {
+            LOG_INFO << "OSD: Rendering " << osdItems.size() << " OSD items";
             renderer_->renderOSDItems(osdItems);
             
-            // Cleanup OSD textures after rendering
+            // Cleanup OSD textures after rendering (but before swapBuffers)
             for (const auto& item : osdItems) {
                 if (item.textureId != 0) {
                     glDeleteTextures(1, &item.textureId);

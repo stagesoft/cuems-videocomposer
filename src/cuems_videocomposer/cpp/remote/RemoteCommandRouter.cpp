@@ -8,6 +8,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cstdlib>
+#include <iostream>
 
 namespace videocomposer {
 
@@ -131,12 +132,39 @@ RemoteCommandRouter::~RemoteCommandRouter() {
 }
 
 bool RemoteCommandRouter::routeCommand(const std::string& path, const std::vector<std::string>& args) {
-    // Remove leading /jadeo/ if present
+    // Handle /videocomposer/cmd - remote command interface (takes a string command)
+    if (path == "/videocomposer/cmd" && !args.empty()) {
+        // Parse the command string (e.g., "osd smpte 89")
+        std::string cmd = args[0];
+        size_t firstSpace = cmd.find(' ');
+        std::string cmdPath = (firstSpace != std::string::npos) ? cmd.substr(0, firstSpace) : cmd;
+        std::vector<std::string> cmdArgs;
+        
+        // Parse remaining arguments
+        size_t pos = firstSpace;
+        while (pos != std::string::npos && pos < cmd.length()) {
+            pos = cmd.find_first_not_of(' ', pos);
+            if (pos == std::string::npos) break;
+            size_t end = cmd.find(' ', pos);
+            if (end == std::string::npos) {
+                cmdArgs.push_back(cmd.substr(pos));
+                break;
+            } else {
+                cmdArgs.push_back(cmd.substr(pos, end - pos));
+                pos = end;
+            }
+        }
+        
+        // Route the parsed command
+        return routeCommand(cmdPath, cmdArgs);
+    }
+    
+    // Remove leading /videocomposer/ if present
     std::string cleanPath = path;
-    if (cleanPath.find("/jadeo/") == 0) {
-        cleanPath = cleanPath.substr(7); // Remove "/jadeo/"
-    } else if (cleanPath.find("/jadeo") == 0) {
-        cleanPath = cleanPath.substr(6); // Remove "/jadeo"
+    if (cleanPath.find("/videocomposer/") == 0) {
+        cleanPath = cleanPath.substr(15); // Remove "/videocomposer/"
+    } else if (cleanPath.find("/videocomposer") == 0) {
+        cleanPath = cleanPath.substr(14); // Remove "/videocomposer"
     }
 
     // Check if it's a layer-level command
@@ -426,6 +454,7 @@ bool RemoteCommandRouter::handleOSDFrame(const std::vector<std::string>& args) {
             osd->disableMode(OSDManager::FRAME);
         } else if (yPos <= 100) {
             osd->enableMode(OSDManager::FRAME);
+            // Note: BOX is not automatically enabled (matches xjadeo behavior - BOX is independent toggle)
             osd->setFramePosition(1, yPos); // Center aligned by default
         } else {
             return false;
@@ -457,6 +486,7 @@ bool RemoteCommandRouter::handleOSDSMPTE(const std::vector<std::string>& args) {
             osd->disableMode(OSDManager::SMPTE);
         } else if (yPos <= 100) {
             osd->enableMode(OSDManager::SMPTE);
+            // Note: BOX is not automatically enabled (matches xjadeo behavior - BOX is independent toggle)
             osd->setSMPTEPosition(1, yPos); // Center aligned by default
         } else {
             return false;
