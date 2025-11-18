@@ -72,17 +72,79 @@ void VideoLayer::update() {
     // Update playback (polls sync source and loads frames)
     playback_.update();
     
+    // Check for playback end and handle looping/auto-unload
+    if (playback_.checkPlaybackEnd()) {
+        auto& props = properties();
+        FrameInfo info = playback_.getFrameInfo();
+        int64_t currentFrame = playback_.getCurrentFrame();
+        int64_t totalFrames = info.totalFrames;
+        
+        // Check for region loop first
+        if (props.loopRegion.enabled && currentFrame >= props.loopRegion.endFrame) {
+            // Region loop: check loop count
+            if (props.loopRegion.currentLoopCount == -1) {
+                // Infinite loop - always loop
+                playback_.seek(props.loopRegion.startFrame);
+                LOG_VERBOSE << "Region loop: seeking to startFrame " << props.loopRegion.startFrame;
+            } else if (props.loopRegion.currentLoopCount > 0) {
+                // Finite loop - decrement and loop if not zero
+                props.loopRegion.currentLoopCount--;
+                if (props.loopRegion.currentLoopCount > 0) {
+                    playback_.seek(props.loopRegion.startFrame);
+                    LOG_VERBOSE << "Region loop: " << props.loopRegion.currentLoopCount 
+                                << " loops remaining, seeking to startFrame " << props.loopRegion.startFrame;
+                } else {
+                    // Loop count reached - disable region loop and continue
+                    props.loopRegion.enabled = false;
+                    LOG_VERBOSE << "Region loop: loop count reached, continuing playback";
+                }
+            } else {
+                // Loop count is 0 - disable region loop
+                props.loopRegion.enabled = false;
+                LOG_VERBOSE << "Region loop: disabled, continuing playback";
+            }
+        } else if (currentFrame >= totalFrames) {
+            // Full file end reached
+            // Check if wraparound is enabled (full file loop)
+            if (playback_.getWraparound()) {
+                // Full file loop: check loop count
+                if (props.fullFileLoopCount == -1) {
+                    // Infinite loop - always loop
+                    playback_.seek(0);
+                    LOG_VERBOSE << "Full file loop: seeking to frame 0 (infinite)";
+                } else if (props.fullFileLoopCount > 0) {
+                    // Finite loop - decrement and loop if not zero
+                    if (props.currentFullFileLoopCount == -1) {
+                        props.currentFullFileLoopCount = props.fullFileLoopCount;
+                    }
+                    props.currentFullFileLoopCount--;
+                    if (props.currentFullFileLoopCount > 0) {
+                        playback_.seek(0);
+                        LOG_VERBOSE << "Full file loop: " << props.currentFullFileLoopCount 
+                                    << " loops remaining, seeking to frame 0";
+                    } else {
+                        // Loop count reached - disable wraparound and continue
+                        playback_.setWraparound(false);
+                        props.fullFileLoopCount = 0;
+                        LOG_VERBOSE << "Full file loop: loop count reached, continuing playback";
+                    }
+                } else {
+                    // Loop count is 0 - disable wraparound
+                    playback_.setWraparound(false);
+                    LOG_VERBOSE << "Full file loop: disabled, continuing playback";
+                }
+            } else {
+                // No loop - playback has ended
+                // Auto-unload will be handled by LayerManager::updateAll()
+                LOG_VERBOSE << "Playback ended at frame " << currentFrame << " (total: " << totalFrames << ")";
+            }
+        }
+    }
+    
     // Get frame from playback (CPU or GPU)
     FrameBuffer cpuFrame;
     GPUTextureFrameBuffer gpuFrame;
     bool isFrameOnGPU = playback_.getFrameBuffer(cpuFrame, gpuFrame);
-    
-    // Debug: log frame status
-    if (cpuFrame.isValid() || gpuFrame.isValid()) {
-        LOG_VERBOSE << "VideoLayer::update() - frame available (GPU: " << isFrameOnGPU 
-                    << ", CPU valid: " << cpuFrame.isValid() 
-                    << ", GPU valid: " << gpuFrame.isValid() << ")";
-    }
     
     // Prepare frame for display (apply modifications)
     bool isHAP = playback_.isHAPCodec();
@@ -154,6 +216,14 @@ void VideoLayer::setWraparound(bool enabled) {
 
 bool VideoLayer::getWraparound() const {
     return playback_.getWraparound();
+}
+
+void VideoLayer::setMtcFollow(bool enabled) {
+    playback_.setMtcFollow(enabled);
+}
+
+bool VideoLayer::getMtcFollow() const {
+    return playback_.getMtcFollow();
 }
 
 bool VideoLayer::isPlaying() const {

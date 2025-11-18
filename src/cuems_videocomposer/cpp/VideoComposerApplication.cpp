@@ -28,6 +28,7 @@
 #include "VideoComposerApplication.h"
 #include "config/ConfigurationManager.h"
 #include "input/VideoFileInput.h"
+#include "display/OpenGLDisplay.h"
 #include "input/HAPVideoInput.h"
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
@@ -122,6 +123,9 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
     // Initialize MIDI sync source if ALSA Sequencer is default
     // This ensures the MIDI port is opened and visible in aconnect
     initializeMIDI();
+    
+    // Initialize global sync source (shared across all layers)
+    initializeGlobalSyncSource();
 
     // Create initial layer if movie file provided
     std::string movieFile = config_->getMovieFile();
@@ -239,87 +243,22 @@ bool VideoComposerApplication::createInitialLayer() {
         return false;
     }
 
-    // Create input source with codec-aware routing
-    // First, detect codec by opening with VideoFileInput
-    auto tempInput = std::make_unique<VideoFileInput>();
-    if (!tempInput->open(movieFile)) {
+    // Use common method to create input source
+    auto inputSource = createInputSourceFromFile(movieFile);
+    if (!inputSource) {
         return false;
     }
 
-    // Detect codec and create appropriate input source
-    std::unique_ptr<InputSource> inputSource;
-    InputSource::CodecType codec = tempInput->detectCodec();
-    
-    // Check for any HAP variant (HAP, HAP_Q, or HAP_ALPHA)
-    if (codec == InputSource::CodecType::HAP || 
-        codec == InputSource::CodecType::HAP_Q || 
-        codec == InputSource::CodecType::HAP_ALPHA) {
-        // HAP codec: use HAPVideoInput for optimal GPU decoding
-        tempInput->close();
-        auto hapInput = std::make_unique<HAPVideoInput>();
-        if (!hapInput->open(movieFile)) {
-            return false;
-        }
-        inputSource = std::move(hapInput);
-    } else {
-        // Other codecs: use VideoFileInput
-        // Set no-index option if configured
-        bool noIndex = config_->getBool("want_noindex", false);
-        tempInput->setNoIndex(noIndex);
-        // Reopen with no-index setting if needed
-        if (noIndex) {
-            tempInput->close();
-            if (!tempInput->open(movieFile)) {
+    // Create layer (use empty string as cue ID for initial layer - backward compatibility)
+    auto layer = createEmptyLayer("");
+    if (!layer) {
                 return false;
             }
-        }
-        inputSource = std::move(tempInput);
-    }
+    
+    // Setup layer with input source (sets input, sync source, and properties)
+    setupLayerWithInputSource(layer.get(), std::move(inputSource));
 
-    // Create sync source (optional - can be manual)
-    // Always create MIDI sync source if MIDI is enabled (even with autodetect "-1")
-    std::unique_ptr<SyncSource> syncSource;
-    std::string midiPort = config_->getString("midi_port", "-1");
-    if (midiPort != "none" && midiPort != "off") {
-        auto midiSync = std::make_unique<MIDISyncSource>();
-        
-        // Configure MIDI sync source from config
-        bool verbose = config_->getBool("want_verbose", false);
-        bool midiClkAdj = config_->getBool("midi_clkadj", false);
-        double delay = config_->getDouble("delay", -1.0);
-        
-        // Set configuration before connecting
-        midiSync->setVerbose(verbose);
-        midiSync->setClockAdjustment(midiClkAdj);
-        midiSync->setDelay(delay);
-        
-        // Connect to MIDI port (use "-1" for autodetect, which will use the driver selected in initializeMIDI)
-        midiSync->connect(midiPort.c_str());
-        
-        // Wrap sync source with framerate converter (converts from sync source fps to input source fps)
-        // This is timecode-agnostic and works with any sync source and any input source
-        syncSource = std::make_unique<FramerateConverterSyncSource>(std::move(midiSync), inputSource.get());
-    }
-
-    // Create layer
-    auto layer = std::make_unique<VideoLayer>();
-    layer->setInputSource(std::move(inputSource));
-    if (syncSource) {
-        layer->setSyncSource(std::move(syncSource));
-    }
-
-    // Set layer properties from config
-    auto& props = layer->properties();
-    if (layer->isReady()) {
-        FrameInfo info = layer->getFrameInfo();
-        props.width = info.width;
-        props.height = info.height;
-    }
-    props.visible = true;
-    props.opacity = 1.0f;
-    props.zOrder = 0;
-
-    // Add layer to manager
+    // Add layer to manager (use old addLayer method for backward compatibility)
     int layerId = layerManager_->addLayer(std::move(layer));
     if (layerId < 0) {
         return false;
@@ -351,7 +290,28 @@ int VideoComposerApplication::run() {
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - lastFrameTime);
         
         processEvents();
+        
+        // Make OpenGL context current before updating layers
+        // This is needed because hardware decoding may allocate GPU textures during frame loading
+        if (displayBackend_ && displayBackend_->isWindowOpen()) {
+            // Cast to OpenGLDisplay to access makeCurrent (temporary solution)
+            // TODO: Add makeCurrent/clearCurrent to DisplayBackend interface if needed
+            OpenGLDisplay* glDisplay = dynamic_cast<OpenGLDisplay*>(displayBackend_.get());
+            if (glDisplay) {
+                glDisplay->makeCurrent();
+            }
+        }
+        
         updateLayers();
+        
+        // Clear OpenGL context after updating (render will make it current again)
+        if (displayBackend_ && displayBackend_->isWindowOpen()) {
+            OpenGLDisplay* glDisplay = dynamic_cast<OpenGLDisplay*>(displayBackend_.get());
+            if (glDisplay) {
+                glDisplay->clearCurrent();
+            }
+        }
+        
         render();
         
         // Frame rate limiting - sleep if we're ahead of target frame time
@@ -386,25 +346,75 @@ void VideoComposerApplication::updateLayers() {
     
         layerManager_->updateAll();
         
-        // Update OSD with current frame information from first layer
-        if (osdManager_ && layerManager_->getLayerCount() > 0) {
+    // Update OSD with sync source timecode (like xjadeo: osd_smpte_ts = dispFrame - ts_offset)
+    // Use global sync source frame directly to avoid backwards jumps from video wraparound
+    if (osdManager_ && globalSyncSource_ && globalSyncSource_->isConnected()) {
+        // Poll sync source to ensure current frame is up to date (layers poll their wrappers, but we poll directly)
+        uint8_t rolling = 0;
+        int64_t syncFrame = globalSyncSource_->pollFrame(&rolling);
+        if (syncFrame >= 0) {
+            // Get framerate from sync source (MTC framerate)
+            double syncFps = globalSyncSource_->getFramerate();
+            if (syncFps > 0.0) {
+                // Display sync source timecode (MTC) - this is monotonic and won't jump backwards
+                std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, syncFps);
+                osdManager_->setSMPTETimecode(smpte);
+                
+                // Also set frame number from sync source
+                osdManager_->setFrameNumber(syncFrame);
+            } else {
+                // Fallback: use first layer's frame if sync source framerate not available
+                auto layers = layerManager_->getLayers();
+                if (!layers.empty() && layers[0]) {
+                    VideoLayer* layer = layers[0];
+                    if (layer->isReady()) {
+                        FrameInfo info = layer->getFrameInfo();
+                        if (info.framerate > 0.0) {
+                            std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
+                            osdManager_->setSMPTETimecode(smpte);
+                            osdManager_->setFrameNumber(syncFrame);
+                        } else {
+                            osdManager_->setSMPTETimecode("00:00:00:00");
+                        }
+                    }
+                }
+            }
+        } else {
+            // No valid sync frame - fallback to first layer
+            if (layerManager_->getLayerCount() > 0) {
             auto layers = layerManager_->getLayers();
             if (!layers.empty() && layers[0]) {
                 VideoLayer* layer = layers[0];
                 if (layer->isReady()) {
                     int64_t currentFrame = layer->getCurrentFrame();
                     if (currentFrame >= 0) {
-                    // Always set frame number (will be displayed if FRAME mode is enabled)
-                        osdManager_->setFrameNumber(currentFrame);
-                        
-                    // Always update SMPTE timecode (will be displayed if SMPTE mode is enabled)
                             FrameInfo info = layer->getFrameInfo();
                             if (info.framerate > 0.0) {
-                                // Use SMPTEUtils for proper timecode formatting
                                 std::string smpte = SMPTEUtils::frameToSmpteString(currentFrame, info.framerate);
                                 osdManager_->setSMPTETimecode(smpte);
+                                osdManager_->setFrameNumber(currentFrame);
+                            } else {
+                                osdManager_->setSMPTETimecode("00:00:00:00");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if (osdManager_ && layerManager_->getLayerCount() > 0) {
+        // Fallback: no global sync source, use first layer
+        auto layers = layerManager_->getLayers();
+        if (!layers.empty() && layers[0]) {
+            VideoLayer* layer = layers[0];
+            if (layer->isReady()) {
+                int64_t currentFrame = layer->getCurrentFrame();
+                if (currentFrame >= 0) {
+                    FrameInfo info = layer->getFrameInfo();
+                    if (info.framerate > 0.0) {
+                        std::string smpte = SMPTEUtils::frameToSmpteString(currentFrame, info.framerate);
+                        osdManager_->setSMPTETimecode(smpte);
+                        osdManager_->setFrameNumber(currentFrame);
                     } else {
-                        // If framerate not available yet, set a default timecode
                         osdManager_->setSMPTETimecode("00:00:00:00");
                     }
                 }
@@ -480,6 +490,204 @@ void VideoComposerApplication::shutdown() {
     
     config_.reset();
     initialized_ = false;
+}
+
+void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync) {
+    if (!midiSync) {
+        return;
+    }
+    
+    // Configure MIDI sync source from config
+    bool verbose = config_->getBool("want_verbose", false);
+    bool midiClkAdj = config_->getBool("midi_clkadj", false);
+    double delay = config_->getDouble("delay", -1.0);
+    
+    // Set configuration before connecting
+    midiSync->setVerbose(verbose);
+    midiSync->setClockAdjustment(midiClkAdj);
+    midiSync->setDelay(delay);
+}
+
+bool VideoComposerApplication::initializeGlobalSyncSource() {
+    // Always create and enable global MIDI sync source by default
+    auto midiSync = std::make_unique<MIDISyncSource>();
+    
+    // Configure MIDI sync source
+    configureMIDISyncSource(midiSync.get());
+    
+    // Get MIDI port (default: "-1" for autodetect, can be disabled with "none" or "off")
+    std::string midiPort = config_->getString("midi_port", "-1");
+    
+    // Connect to MIDI port (use "-1" for autodetect)
+    // Only skip if explicitly disabled
+    if (midiPort != "none" && midiPort != "off") {
+        midiSync->connect(midiPort.c_str());
+        
+        if (midiSync->isConnected()) {
+            LOG_INFO << "Global MIDI sync source initialized and connected";
+        } else {
+            LOG_WARNING << "Global MIDI sync source created but not connected (continuing without MIDI)";
+        }
+    } else {
+        LOG_INFO << "Global MIDI sync source created (MIDI explicitly disabled in config)";
+    }
+    
+    // Store as global sync source (always created)
+    globalSyncSource_ = std::move(midiSync);
+    
+    return true;
+}
+
+std::unique_ptr<InputSource> VideoComposerApplication::createInputSourceFromFile(const std::string& filepath) {
+    // Create input source with codec-aware routing
+    // Set no-index option before opening (to avoid reopening)
+    bool noIndex = config_->getBool("want_noindex", false);
+    
+    // First, detect codec by opening with VideoFileInput
+    auto tempInput = std::make_unique<VideoFileInput>();
+    tempInput->setNoIndex(noIndex);  // Set before opening to avoid reopening
+    if (!tempInput->open(filepath)) {
+        return nullptr;
+    }
+
+    // Detect codec and create appropriate input source
+    std::unique_ptr<InputSource> inputSource;
+    InputSource::CodecType codec = tempInput->detectCodec();
+    
+    // Check for any HAP variant (HAP, HAP_Q, or HAP_ALPHA)
+    if (codec == InputSource::CodecType::HAP || 
+        codec == InputSource::CodecType::HAP_Q || 
+        codec == InputSource::CodecType::HAP_ALPHA) {
+        // HAP codec: use HAPVideoInput for optimal GPU decoding
+        tempInput->close();
+        auto hapInput = std::make_unique<HAPVideoInput>();
+        if (!hapInput->open(filepath)) {
+            return nullptr;
+        }
+        inputSource = std::move(hapInput);
+    } else {
+        // Other codecs: use VideoFileInput (already opened with correct settings)
+        inputSource = std::move(tempInput);
+    }
+    
+    return inputSource;
+}
+
+std::unique_ptr<VideoLayer> VideoComposerApplication::createEmptyLayer(const std::string& cueId) {
+    auto layer = std::make_unique<VideoLayer>();
+    
+    // Set basic properties
+    auto& props = layer->properties();
+    props.visible = true;
+    props.opacity = 1.0f;
+    props.zOrder = 0;
+    
+    // Note: Layer ID will be set when added to LayerManager
+    // Input source and sync source are not set here
+    
+    return layer;
+}
+
+std::unique_ptr<SyncSource> VideoComposerApplication::createLayerSyncSource(InputSource* inputSource) {
+    if (!globalSyncSource_) {
+        return nullptr;
+    }
+    
+    // Wrap global sync source with framerate converter (non-owning reference)
+    // Each layer gets its own framerate converter, but they all share the same global sync source
+    return std::make_unique<FramerateConverterSyncSource>(globalSyncSource_.get(), inputSource);
+}
+
+void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource) {
+    if (!layer || !inputSource) {
+        return;
+    }
+    
+    // Set input source
+    layer->setInputSource(std::move(inputSource));
+    
+    // Create and set sync source (wraps shared global sync source with framerate converter)
+    // All layers share the same global MTC sync source, but each has its own framerate converter
+    auto syncSource = createLayerSyncSource(layer->getInputSource());
+    if (syncSource) {
+        layer->setSyncSource(std::move(syncSource));
+    }
+    
+    // Set layer properties from input source
+    auto& props = layer->properties();
+    if (layer->isReady()) {
+        FrameInfo info = layer->getFrameInfo();
+        props.width = info.width;
+        props.height = info.height;
+    }
+}
+
+bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, const std::string& filepath) {
+    // Create input source
+    auto inputSource = createInputSourceFromFile(filepath);
+    if (!inputSource) {
+        LOG_ERROR << "Failed to create input source from file: " << filepath;
+        return false;
+    }
+    
+    // Create empty layer
+    auto layer = createEmptyLayer(cueId);
+    if (!layer) {
+        LOG_ERROR << "Failed to create empty layer";
+        return false;
+    }
+    
+    // Setup layer with input source (sets input, sync source, and properties)
+    setupLayerWithInputSource(layer.get(), std::move(inputSource));
+    
+    // Add layer to manager with cue ID
+    if (!layerManager_->addLayerWithId(cueId, std::move(layer))) {
+        LOG_ERROR << "Failed to add layer with cue ID: " << cueId;
+        return false;
+    }
+    
+    LOG_INFO << "Created layer with file: " << filepath << " (cue ID: " << cueId << ")";
+    return true;
+}
+
+bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const std::string& filepath) {
+    // Get or create layer
+    VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
+    
+    if (!layer) {
+        // Layer doesn't exist - create it
+        return createLayerWithFile(cueId, filepath);
+    }
+    
+    // Layer exists - load file into it
+    auto inputSource = createInputSourceFromFile(filepath);
+    if (!inputSource) {
+        LOG_ERROR << "Failed to create input source from file: " << filepath;
+        return false;
+    }
+    
+    // Setup layer with input source (sets input, sync source, and properties)
+    setupLayerWithInputSource(layer, std::move(inputSource));
+    
+    LOG_INFO << "Loaded file into layer: " << filepath << " (cue ID: " << cueId << ")";
+    return true;
+}
+
+bool VideoComposerApplication::unloadFileFromLayer(const std::string& cueId) {
+    VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
+    if (!layer) {
+        LOG_WARNING << "Layer not found for cue ID: " << cueId;
+        return false;
+    }
+    
+    // Clear input source (unloads file but keeps layer)
+    layer->setInputSource(nullptr);
+    
+    // Clear sync source
+    layer->setSyncSource(nullptr);
+    
+    LOG_INFO << "Unloaded file from layer (cue ID: " << cueId << ")";
+    return true;
 }
 
 } // namespace videocomposer

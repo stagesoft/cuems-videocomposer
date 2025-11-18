@@ -4,6 +4,8 @@
 #include "VideoLayer.h"
 #include <vector>
 #include <memory>
+#include <map>
+#include <string>
 #include <cstdint>
 
 namespace videocomposer {
@@ -24,6 +26,13 @@ public:
     bool removeLayer(int layerId);
     VideoLayer* getLayer(int layerId);
     const VideoLayer* getLayer(int layerId) const;
+    
+    // Layer management by UUID (cue ID)
+    bool addLayerWithId(const std::string& cueId, std::unique_ptr<VideoLayer> layer);
+    bool removeLayerByCueId(const std::string& cueId);
+    VideoLayer* getLayerByCueId(const std::string& cueId);
+    const VideoLayer* getLayerByCueId(const std::string& cueId) const;
+    std::string getCueIdFromLayer(VideoLayer* layer) const;
     
     // Get all layers (sorted by z-order)
     std::vector<VideoLayer*> getLayers();
@@ -54,6 +63,7 @@ public:
 private:
     std::vector<std::unique_ptr<VideoLayer>> layers_;
     int nextLayerId_;
+    std::map<std::string, int> cueIdToLayerId_;  // Map UUID cue ID to internal layer ID
     
     void sortLayersByZOrder();
     int getNextZOrder();

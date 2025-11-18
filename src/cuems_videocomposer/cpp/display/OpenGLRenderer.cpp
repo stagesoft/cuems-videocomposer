@@ -4,9 +4,16 @@
 #include "../utils/Logger.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/InputSource.h"
+extern "C" {
+#ifndef HAVE_GL
+#define HAVE_GL
+#endif
+#include "../../homography.h"
+}
 #include <cstring>
 #include <iomanip>
 #include <sstream>
+#include <cmath>
 
 // HAP texture format constants
 #ifndef GL_COMPRESSED_RGB_S3TC_DXT1_EXT
@@ -40,6 +47,7 @@ OpenGLRenderer::OpenGLRenderer()
     , viewportHeight_(0)
     , letterbox_(true)
     , initialized_(false)
+    , texturesToDelete_()
 {
 }
 
@@ -74,6 +82,15 @@ void OpenGLRenderer::cleanup() {
         glDeleteTextures(1, &textureId_);
         textureId_ = 0;
     }
+    
+    // Cleanup all cached layer textures
+    for (auto& pair : layerTextureCache_) {
+        if (pair.second.textureId != 0) {
+            glDeleteTextures(1, &pair.second.textureId);
+        }
+    }
+    layerTextureCache_.clear();
+    
     initialized_ = false;
 }
 
@@ -257,10 +274,23 @@ void OpenGLRenderer::calculateCropCoordinatesFromProps(const LayerProperties& pr
 
 void OpenGLRenderer::applyLayerTransform(const VideoLayer* layer) {
     if (!layer) return;
+    
+    // Default quad size for backward compatibility
+    applyLayerTransform(layer, 1.0f, 1.0f);
+}
+
+void OpenGLRenderer::applyLayerTransform(const VideoLayer* layer, float quad_x, float quad_y) {
+    if (!layer) return;
 
     const auto& props = layer->properties();
     
-    glPushMatrix();
+    // Apply position (x, y) - convert from pixel coordinates to normalized coordinates
+    // Viewport is -1 to 1, so we need to scale by viewport size
+    if (viewportWidth_ > 0 && viewportHeight_ > 0) {
+        float normX = (2.0f * props.x) / viewportWidth_;
+        float normY = (2.0f * props.y) / viewportHeight_;
+        glTranslatef(normX, -normY, 0.0f);  // Negative Y because OpenGL Y is inverted
+    }
     
     // Apply scale
     glScalef(props.scaleX, props.scaleY, 1.0f);
@@ -270,6 +300,38 @@ void OpenGLRenderer::applyLayerTransform(const VideoLayer* layer) {
         glTranslatef(0.5f, 0.5f, 0.0f);
         glRotatef(props.rotation, 0.0f, 0.0f, 1.0f);
         glTranslatef(-0.5f, -0.5f, 0.0f);
+    }
+    
+    // Apply corner deformation (warping) if enabled
+    if (props.cornerDeform.enabled) {
+        // Calculate source corners (base quad)
+        Point src[4];
+        src[0].x = -quad_x;
+        src[0].y = -quad_y;
+        src[1].x = quad_x;
+        src[1].y = -quad_y;
+        src[2].x = quad_x;
+        src[2].y = quad_y;
+        src[3].x = -quad_x;
+        src[3].y = quad_y;
+        
+        // Calculate destination corners (with deformation offsets)
+        Point dst[4];
+        dst[0].x = src[0].x + props.cornerDeform.corners[0];
+        dst[0].y = src[0].y + props.cornerDeform.corners[1];
+        dst[1].x = src[1].x + props.cornerDeform.corners[2];
+        dst[1].y = src[1].y + props.cornerDeform.corners[3];
+        dst[2].x = src[2].x + props.cornerDeform.corners[4];
+        dst[2].y = src[2].y + props.cornerDeform.corners[5];
+        dst[3].x = src[3].x + props.cornerDeform.corners[6];
+        dst[3].y = src[3].y + props.cornerDeform.corners[7];
+        
+        // Calculate homography matrix
+        GLfloat homography[16];
+        findHomography(src, dst, homography);
+        
+        // Apply homography matrix
+        glMultMatrixf(homography);
     }
 }
 
@@ -315,20 +377,66 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 const FrameInfo& frameInfo = layer->getFrameInfo();
                 return renderLayerFromGPU(gpuBuffer, props, frameInfo);
             } else if (!isOnGPU && cpuBuffer.isValid()) {
-                // Frame is on CPU - use standard upload
-                // HAP frames are now uncompressed RGBA (matches mpv), not compressed DXT
-                if (!uploadFrameToTexture(cpuBuffer)) {
-                    return false;
+                // Frame is on CPU - use cached texture per layer
+                // IMPORTANT: Each layer needs its own texture when using CPU frames
+                // We cache textures per layer to avoid expensive create/delete every frame
+                
+                const FrameInfo& info = cpuBuffer.info();
+                int layerId = layer->getLayerId();
+                int layerTextureWidth = info.width;
+                int layerTextureHeight = info.height;
+                
+                // Check if we have a cached texture for this layer
+                GLuint layerTextureId = 0;
+                auto cacheIt = layerTextureCache_.find(layerId);
+                
+                if (cacheIt != layerTextureCache_.end()) {
+                    // Texture exists - check if size matches
+                    if (cacheIt->second.width == layerTextureWidth && 
+                        cacheIt->second.height == layerTextureHeight) {
+                        // Reuse existing texture
+                        layerTextureId = cacheIt->second.textureId;
+                    } else {
+                        // Size changed - delete old texture and create new one
+                        texturesToDelete_.push_back(cacheIt->second.textureId);
+                        layerTextureCache_.erase(cacheIt);
+                        cacheIt = layerTextureCache_.end();
+                    }
                 }
-        
-        // Apply layer transform
-        applyLayerTransform(layer);
-
-        // Apply blend mode
-        applyBlendMode(layer);
-
-        // Set opacity
-        glColor4f(1.0f, 1.0f, 1.0f, props.opacity);
+                
+                // Create new texture if needed
+                if (layerTextureId == 0) {
+                    glGenTextures(1, &layerTextureId);
+                    if (layerTextureId == 0) {
+                        return false;
+                    }
+                    
+                    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, layerTextureId);
+                    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
+                    
+                    // Allocate texture storage
+                    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA, 
+                                 layerTextureWidth, layerTextureHeight, 0,
+                                 GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+                    
+                    // Cache the texture
+                    LayerTextureCache cache;
+                    cache.textureId = layerTextureId;
+                    cache.width = layerTextureWidth;
+                    cache.height = layerTextureHeight;
+                    layerTextureCache_[layerId] = cache;
+                }
+                
+                // Upload frame data to cached texture
+                glEnable(GL_TEXTURE_RECTANGLE_ARB);
+                glBindTexture(GL_TEXTURE_RECTANGLE_ARB, layerTextureId);
+                glTexSubImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, 0, 0,
+                                layerTextureWidth, layerTextureHeight,
+                                GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer.data());
 
         // Calculate quad size with letterboxing (matches original xjadeo)
         // Original uses _gl_quad_x and _gl_quad_y for letterboxing
@@ -354,6 +462,18 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
             }
         }
         
+        // Save matrix state before applying transforms
+        glPushMatrix();
+        
+        // Apply layer transform (includes position, scale, rotation, and corner deformation)
+        applyLayerTransform(layer, quad_x, quad_y);
+
+        // Apply blend mode
+        applyBlendMode(layer);
+
+        // Set opacity
+        glColor4f(1.0f, 1.0f, 1.0f, props.opacity);
+        
         // Render centered quad (matches original xjadeo)
         float x = -quad_x;
         float y = -quad_y;
@@ -364,12 +484,21 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 float texX = 0.0f, texY = 0.0f, texWidth = 1.0f, texHeight = 1.0f;
                 calculateCropCoordinates(layer, texX, texY, texWidth, texHeight);
 
-                // Regular texture uses GL_TEXTURE_RECTANGLE_ARB (already bound in uploadFrameToTexture)
+                // Regular texture uses GL_TEXTURE_RECTANGLE_ARB (already bound above)
                 // HAP is now treated as regular RGBA, not compressed
                 // Use pixel coordinates for GL_TEXTURE_RECTANGLE_ARB
-                renderQuad(x, y, w, h);
-                // Disable texture (matches original xjadeo)
-                glDisable(GL_TEXTURE_2D);
+                // NOTE: renderQuad uses textureWidth_ and textureHeight_ members, so we need to pass them
+                // Use a custom render here with explicit dimensions
+                glBegin(GL_QUADS);
+                glTexCoord2f(0.0f, (GLfloat)layerTextureHeight); glVertex2f(x, y);
+                glTexCoord2f((GLfloat)layerTextureWidth, (GLfloat)layerTextureHeight); glVertex2f(x + w, y);
+                glTexCoord2f((GLfloat)layerTextureWidth, 0.0f); glVertex2f(x + w, y + h);
+                glTexCoord2f(0.0f, 0.0f); glVertex2f(x, y + h);
+                glEnd();
+                
+                // Unbind texture (texture is cached, don't delete)
+                glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+                glDisable(GL_TEXTURE_RECTANGLE_ARB);
 
                 glPopMatrix();
 
@@ -405,6 +534,15 @@ void OpenGLRenderer::updateTexture(int width, int height) {
     }
 }
 
+void OpenGLRenderer::cleanupDeferredTextures() {
+    // Delete textures that were deferred from previous frame
+    // This is called AFTER swapBuffers() to ensure OpenGL is done using them
+    if (!texturesToDelete_.empty()) {
+        glDeleteTextures(static_cast<GLsizei>(texturesToDelete_.size()), texturesToDelete_.data());
+        texturesToDelete_.clear();
+    }
+}
+
 bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, const LayerProperties& properties, const FrameInfo& frameInfo) {
     if (!gpuFrame.isValid()) {
         return false;
@@ -419,8 +557,33 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
         return false;
     }
 
+    // Calculate quad size with letterboxing first (needed for corner deformation)
+    float quad_x = 1.0f;
+    float quad_y = 1.0f;
+    
+    if (letterbox_) {
+        float asp_src = frameInfo.aspect > 0.0f ? frameInfo.aspect : (float)properties.width / (float)properties.height;
+        float asp_dst = (float)viewportWidth_ / (float)viewportHeight_;
+        
+        if (asp_dst > asp_src) {
+            quad_x = asp_src / asp_dst;
+            quad_y = 1.0f;
+        } else {
+            quad_x = 1.0f;
+            quad_y = asp_dst / asp_src;
+        }
+    }
+
     // Apply layer transform
     glPushMatrix();
+    
+    // Apply position (x, y) - convert from pixel coordinates to normalized coordinates
+    if (viewportWidth_ > 0 && viewportHeight_ > 0) {
+        float normX = (2.0f * properties.x) / viewportWidth_;
+        float normY = (2.0f * properties.y) / viewportHeight_;
+        glTranslatef(normX, -normY, 0.0f);  // Negative Y because OpenGL Y is inverted
+    }
+    
     glScalef(properties.scaleX, properties.scaleY, 1.0f);
     
     // Apply rotation (around center)
@@ -428,6 +591,38 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
         glTranslatef(0.5f, 0.5f, 0.0f);
         glRotatef(properties.rotation, 0.0f, 0.0f, 1.0f);
         glTranslatef(-0.5f, -0.5f, 0.0f);
+    }
+    
+    // Apply corner deformation (warping) if enabled
+    if (properties.cornerDeform.enabled) {
+        // Calculate source corners (base quad)
+        Point src[4];
+        src[0].x = -quad_x;
+        src[0].y = -quad_y;
+        src[1].x = quad_x;
+        src[1].y = -quad_y;
+        src[2].x = quad_x;
+        src[2].y = quad_y;
+        src[3].x = -quad_x;
+        src[3].y = quad_y;
+        
+        // Calculate destination corners (with deformation offsets)
+        Point dst[4];
+        dst[0].x = src[0].x + properties.cornerDeform.corners[0];
+        dst[0].y = src[0].y + properties.cornerDeform.corners[1];
+        dst[1].x = src[1].x + properties.cornerDeform.corners[2];
+        dst[1].y = src[1].y + properties.cornerDeform.corners[3];
+        dst[2].x = src[2].x + properties.cornerDeform.corners[4];
+        dst[2].y = src[2].y + properties.cornerDeform.corners[5];
+        dst[3].x = src[3].x + properties.cornerDeform.corners[6];
+        dst[3].y = src[3].y + properties.cornerDeform.corners[7];
+        
+        // Calculate homography matrix
+        GLfloat homography[16];
+        findHomography(src, dst, homography);
+        
+        // Apply homography matrix
+        glMultMatrixf(homography);
     }
 
     // Apply blend mode
@@ -448,23 +643,6 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
 
     // Set opacity
     glColor4f(1.0f, 1.0f, 1.0f, properties.opacity);
-
-    // Calculate quad size with letterboxing
-    float quad_x = 1.0f;
-    float quad_y = 1.0f;
-    
-    if (letterbox_) {
-        float asp_src = frameInfo.aspect > 0.0f ? frameInfo.aspect : (float)properties.width / (float)properties.height;
-        float asp_dst = (float)viewportWidth_ / (float)viewportHeight_;
-        
-        if (asp_dst > asp_src) {
-            quad_x = asp_src / asp_dst;
-            quad_y = 1.0f;
-        } else {
-            quad_x = 1.0f;
-            quad_y = asp_dst / asp_src;
-        }
-    }
     
     // Render centered quad
     float x = -quad_x;

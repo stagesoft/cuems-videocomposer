@@ -10,6 +10,7 @@ namespace videocomposer {
 class ConfigurationManager;
 class InputSource;
 class SyncSource;
+class MIDISyncSource;
 class RemoteControl;
 class DisplayBackend;
 class LayerManager;
@@ -51,6 +52,11 @@ public:
     ConfigurationManager* getConfig() { return config_.get(); }
     LayerManager* getLayerManager() { return layerManager_.get(); }
     OSDManager* getOSDManager() { return osdManager_.get(); }
+    
+    // File loading methods (called from RemoteCommandRouter)
+    bool createLayerWithFile(const std::string& cueId, const std::string& filepath);
+    bool loadFileIntoLayer(const std::string& cueId, const std::string& filepath);
+    bool unloadFileFromLayer(const std::string& cueId);
 
 private:
     // Component initialization
@@ -60,6 +66,14 @@ private:
     bool initializeMIDI();
     bool initializeLayerManager();
     bool createInitialLayer();
+    bool initializeGlobalSyncSource();
+    
+    // Common helper methods
+    std::unique_ptr<InputSource> createInputSourceFromFile(const std::string& filepath);
+    std::unique_ptr<VideoLayer> createEmptyLayer(const std::string& cueId);
+    std::unique_ptr<SyncSource> createLayerSyncSource(InputSource* inputSource);
+    void configureMIDISyncSource(MIDISyncSource* midiSync);
+    void setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource);
 
     // Event loop
     void processEvents();
@@ -73,6 +87,9 @@ private:
     std::unique_ptr<DisplayManager> displayManager_;
     std::unique_ptr<LayerManager> layerManager_;
     std::unique_ptr<OSDManager> osdManager_;
+    
+    // Global sync source (shared across all layers)
+    std::unique_ptr<SyncSource> globalSyncSource_;
 
     // Application state
     bool running_;

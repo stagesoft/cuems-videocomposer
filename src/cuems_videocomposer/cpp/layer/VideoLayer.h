@@ -82,6 +82,10 @@ public:
     void setWraparound(bool enabled);
     bool getWraparound() const;
     
+    // MTC follow control (enable/disable MTC following for this layer)
+    void setMtcFollow(bool enabled);
+    bool getMtcFollow() const;
+    
     // Reverse playback (multiplies timescale by -1.0 and adjusts offset)
     void reverse();
 

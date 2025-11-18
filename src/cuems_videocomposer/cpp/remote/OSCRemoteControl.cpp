@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdio>
 #include <sstream>
+#include <chrono>
 
 extern "C" {
 #include <lo/lo_lowlevel.h>
@@ -81,6 +82,46 @@ bool OSCRemoteControl::initialize(int port) {
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/opacity", "f", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/visible", "i", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/zorder", "i", handleOSCMessage, userData_);
+    
+    // New file loading commands
+    lo_server_add_method(oscServer_, "/videocomposer/layer/load", "ss", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/unload", "s", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/file", "s", handleOSCMessage, userData_);
+    
+    // Loop and auto-unload commands
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/autounload", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop", "ii", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/region", "ii", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/region", "iii", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/region/disable", "", handleOSCMessage, userData_);
+    
+    // Offset and MTC follow commands
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/offset", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/offset", "s", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/mtcfollow", "i", handleOSCMessage, userData_);
+    
+    // Transform commands
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/scale", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/xscale", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/yscale", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/rotation", "f", handleOSCMessage, userData_);
+    
+    // Corner deformation commands
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/corners", "ffffffff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/corner1", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/corner2", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/corner3", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/corner4", "ff", handleOSCMessage, userData_);
+    
+    // Blend mode command
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/blendmode", "i", handleOSCMessage, userData_);
+    
+    // Crop commands
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/crop", "iiii", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/crop/disable", "", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/panorama", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/pan", "i", handleOSCMessage, userData_);
 
     active_ = true;
     return true;
@@ -91,10 +132,32 @@ int OSCRemoteControl::process() {
         return 0;
     }
 
+    // Use time-based budget to ensure video playback always has priority
+    // Only spend a maximum of 1ms processing OSC messages per frame
+    // This ensures video rendering (60fps = 16.67ms per frame) is never blocked
+    // Video playback has absolute priority - OSC processing is secondary
+    const auto MAX_TIME_BUDGET = std::chrono::microseconds(1000); // 1ms max per frame (6% of frame time)
+    const int MAX_MESSAGES_PER_FRAME = 5; // Additional safety limit - process very few messages per frame
+    
+    auto startTime = std::chrono::high_resolution_clock::now();
     int count = 0;
-    while (lo_server_recv_noblock(oscServer_, 0) > 0) {
+    
+    while (count < MAX_MESSAGES_PER_FRAME) {
+        auto elapsed = std::chrono::high_resolution_clock::now() - startTime;
+        if (elapsed >= MAX_TIME_BUDGET) {
+            // Time budget exceeded - stop processing to preserve video playback priority
+            break;
+        }
+        
+        int result = lo_server_recv_noblock(oscServer_, 0);
+        if (result <= 0) {
+            // No more messages available
+            break;
+        }
+        
         count++;
     }
+    
     return count;
 }
 

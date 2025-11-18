@@ -6,6 +6,7 @@
 #include "../sync/MIDISyncSource.h"
 #include "../osd/OSDManager.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
+#include "../utils/SMPTEUtils.h"
 #include <sstream>
 #include <algorithm>
 #include <cstdlib>
@@ -124,8 +125,59 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerLayerCommand("crop", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerCrop(layer, args);
     });
+    registerLayerCommand("crop/disable", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerCropDisable(layer, args);
+    });
     registerLayerCommand("panorama", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerPanorama(layer, args);
+    });
+    registerLayerCommand("file", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerFile(layer, args);
+    });
+    registerLayerCommand("autounload", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerAutoUnload(layer, args);
+    });
+    registerLayerCommand("loop/region", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerLoopRegion(layer, args);
+    });
+    registerLayerCommand("loop/region/disable", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerLoopRegionDisable(layer, args);
+    });
+    registerLayerCommand("offset", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerOffset(layer, args);
+    });
+    registerLayerCommand("mtcfollow", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerMtcFollow(layer, args);
+    });
+    registerLayerCommand("scale", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerScale(layer, args);
+    });
+    registerLayerCommand("xscale", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerXScale(layer, args);
+    });
+    registerLayerCommand("yscale", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerYScale(layer, args);
+    });
+    registerLayerCommand("rotation", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerRotation(layer, args);
+    });
+    registerLayerCommand("corners", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerCorners(layer, args);
+    });
+    registerLayerCommand("corner1", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerCorner1(layer, args);
+    });
+    registerLayerCommand("corner2", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerCorner2(layer, args);
+    });
+    registerLayerCommand("corner3", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerCorner3(layer, args);
+    });
+    registerLayerCommand("corner4", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerCorner4(layer, args);
+    });
+    registerLayerCommand("blendmode", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerBlendMode(layer, args);
     });
 }
 
@@ -168,39 +220,55 @@ bool RemoteCommandRouter::routeCommand(const std::string& path, const std::vecto
         cleanPath = cleanPath.substr(14); // Remove "/videocomposer"
     }
     
-    LOG_INFO << "OSC: Routing command: path='" << path << "' cleanPath='" << cleanPath << "' args.size()=" << args.size();
+    // Log only in verbose mode to avoid blocking on high message rates
+    // LOG_VERBOSE << "OSC: Routing command: path='" << path << "' cleanPath='" << cleanPath << "' args.size()=" << args.size();
 
     // Check if it's a layer-level command
     if (cleanPath.find("layer/") == 0) {
         std::string remaining = cleanPath.substr(6); // Remove "layer/"
         
-        // Parse layer ID and command
-        int layerId = -1;
+        // Check for special commands: load, unload
+        if (remaining == "load") {
+            // /videocomposer/layer/load s s (filepath, cueId)
+            return handleLayerLoad(args);
+        } else if (remaining == "unload") {
+            // /videocomposer/layer/unload s (cueId)
+            return handleLayerUnload(args);
+        }
+        
+        // Parse layer ID (UUID string) and command
+        std::string cueId;
         std::string command;
         
         size_t slashPos = remaining.find('/');
         if (slashPos != std::string::npos) {
-            std::string layerIdStr = remaining.substr(0, slashPos);
-            layerId = std::atoi(layerIdStr.c_str());
+            cueId = remaining.substr(0, slashPos);
             command = remaining.substr(slashPos + 1);
-        } else {
-            // No layer ID specified - treat as app-level layer command
-            command = remaining;
-        }
-
-        if (layerId >= 0) {
-            // Layer-specific command
-            VideoLayer* layer = layerManager_->getLayer(layerId);
-            if (!layer) {
-                return false;
-            }
-
+            
+            // Try to get layer by cue ID (UUID)
+            VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
+            if (layer) {
+                // Layer found by UUID - route to layer command
+                auto it = layerCommands_.find(command);
+                if (it != layerCommands_.end()) {
+                    return it->second(layer, args);
+                }
+            } else {
+                // Try integer layer ID for backward compatibility
+                int layerId = std::atoi(cueId.c_str());
+                if (layerId >= 0) {
+                    layer = layerManager_->getLayer(layerId);
+                    if (layer) {
             auto it = layerCommands_.find(command);
             if (it != layerCommands_.end()) {
                 return it->second(layer, args);
+                        }
+                    }
+                }
             }
         } else {
-            // App-level layer management command
+            // No layer ID specified - treat as app-level layer command
+            command = remaining;
             auto it = appCommands_.find("layer/" + command);
             if (it != appCommands_.end()) {
                 return it->second(args);
@@ -697,12 +765,29 @@ bool RemoteCommandRouter::handleLayerLoop(VideoLayer* layer, const std::vector<s
         return false;
     }
     
+    auto& props = layer->properties();
+    
+    // Handle loop count if provided (second argument)
+    if (args.size() >= 2) {
+        int loopCount = std::atoi(args[1].c_str());
+        props.fullFileLoopCount = loopCount;
+        props.currentFullFileLoopCount = (loopCount > 0) ? loopCount : -1;
+    }
+    
+    // Handle enable/disable (first argument)
     bool enabled = false;
     if (!args.empty()) {
         int val = std::atoi(args[0].c_str());
         enabled = (val != 0);
     }
     layer->setWraparound(enabled);
+    
+    // If disabling, also reset loop counts
+    if (!enabled) {
+        props.fullFileLoopCount = 0;
+        props.currentFullFileLoopCount = -1;
+    }
+    
     return true;
 }
 
@@ -792,6 +877,15 @@ bool RemoteCommandRouter::handleLayerCrop(VideoLayer* layer, const std::vector<s
     return true;
 }
 
+bool RemoteCommandRouter::handleLayerCropDisable(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer) {
+        return false;
+    }
+    
+    layer->properties().crop.enabled = false;
+    return true;
+}
+
 bool RemoteCommandRouter::handleLayerPanorama(VideoLayer* layer, const std::vector<std::string>& args) {
     if (!layer) {
         return false;
@@ -806,6 +900,253 @@ bool RemoteCommandRouter::handleLayerPanorama(VideoLayer* layer, const std::vect
         // Enable/disable based on argument
         int enabled = std::atoi(args[0].c_str());
         props.panoramaMode = (enabled != 0);
+    }
+    
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerLoad(const std::vector<std::string>& args) {
+    if (!app_ || args.size() < 2) {
+        return false;
+    }
+    
+    std::string filepath = args[0];
+    std::string cueId = args[1];
+    
+    return app_->createLayerWithFile(cueId, filepath);
+}
+
+bool RemoteCommandRouter::handleLayerFile(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || !app_ || args.empty()) {
+        return false;
+    }
+    
+    std::string filepath = args[0];
+    
+    // Get cue ID from layer manager
+    std::string cueId = layerManager_->getCueIdFromLayer(layer);
+    if (cueId.empty()) {
+        LOG_WARNING << "Could not find cue ID for layer";
+        return false;
+    }
+    
+    return app_->loadFileIntoLayer(cueId, filepath);
+}
+
+bool RemoteCommandRouter::handleLayerUnload(const std::vector<std::string>& args) {
+    if (!app_ || args.empty()) {
+        return false;
+    }
+    
+    std::string cueId = args[0];
+    return app_->unloadFileFromLayer(cueId);
+}
+
+bool RemoteCommandRouter::handleLayerAutoUnload(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    int enabled = std::atoi(args[0].c_str());
+    layer->properties().autoUnload = (enabled != 0);
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerLoopRegion(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.size() < 2) {
+        return false;
+    }
+    
+    auto& props = layer->properties();
+    props.loopRegion.startFrame = std::atoll(args[0].c_str());
+    props.loopRegion.endFrame = std::atoll(args[1].c_str());
+    props.loopRegion.enabled = true;
+    
+    // Set loop count if provided (third argument)
+    if (args.size() >= 3) {
+        props.loopRegion.loopCount = std::atoi(args[2].c_str());
+    } else {
+        props.loopRegion.loopCount = -1; // Infinite
+    }
+    
+    // Initialize current loop count
+    props.loopRegion.currentLoopCount = props.loopRegion.loopCount;
+    
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerLoopRegionDisable(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer) {
+        return false;
+    }
+    
+    layer->properties().loopRegion.enabled = false;
+    return true;
+}
+
+
+bool RemoteCommandRouter::handleLayerOffset(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    // Check if it's SMPTE timecode string or integer frame
+    std::string offsetStr = args[0];
+    int64_t offset = 0;
+    
+    if (offsetStr.find(':') != std::string::npos || offsetStr.find(';') != std::string::npos) {
+        // SMPTE timecode string - convert to frames
+        FrameInfo info = layer->getFrameInfo();
+        double framerate = info.framerate;
+        if (framerate <= 0) {
+            framerate = 25.0; // Default framerate if unknown
+        }
+        
+        // Detect drop-frame from separator
+        bool haveDropframes = (offsetStr.find(';') != std::string::npos);
+        
+        offset = SMPTEUtils::smpteStringToFrame(offsetStr, framerate, haveDropframes, false, true);
+    } else {
+        // Integer frame offset
+        offset = std::atoll(offsetStr.c_str());
+    }
+    
+    layer->setTimeOffset(offset);
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerMtcFollow(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    int enabled = std::atoi(args[0].c_str());
+    layer->setMtcFollow(enabled != 0);
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerScale(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.size() < 2) {
+        return false;
+    }
+    
+    auto& props = layer->properties();
+    props.scaleX = std::atof(args[0].c_str());
+    props.scaleY = std::atof(args[1].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerXScale(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    layer->properties().scaleX = std::atof(args[0].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerYScale(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    layer->properties().scaleY = std::atof(args[0].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerRotation(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    layer->properties().rotation = std::atof(args[0].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerCorners(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.size() < 8) {
+        return false;
+    }
+    
+    auto& props = layer->properties();
+    for (int i = 0; i < 8; ++i) {
+        props.cornerDeform.corners[i] = std::atof(args[i].c_str());
+    }
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerCorner1(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.size() < 2) {
+        return false;
+    }
+    
+    auto& props = layer->properties();
+    props.cornerDeform.corners[0] = std::atof(args[0].c_str());
+    props.cornerDeform.corners[1] = std::atof(args[1].c_str());
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerCorner2(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.size() < 2) {
+        return false;
+    }
+    
+    auto& props = layer->properties();
+    props.cornerDeform.corners[2] = std::atof(args[0].c_str());
+    props.cornerDeform.corners[3] = std::atof(args[1].c_str());
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerCorner3(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.size() < 2) {
+        return false;
+    }
+    
+    auto& props = layer->properties();
+    props.cornerDeform.corners[4] = std::atof(args[0].c_str());
+    props.cornerDeform.corners[5] = std::atof(args[1].c_str());
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerCorner4(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.size() < 2) {
+        return false;
+    }
+    
+    auto& props = layer->properties();
+    props.cornerDeform.corners[6] = std::atof(args[0].c_str());
+    props.cornerDeform.corners[7] = std::atof(args[1].c_str());
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerBlendMode(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    int mode = std::atoi(args[0].c_str());
+    auto& props = layer->properties();
+    
+    switch (mode) {
+        case 0:
+            props.blendMode = LayerProperties::NORMAL;
+            break;
+        case 1:
+            props.blendMode = LayerProperties::MULTIPLY;
+            break;
+        case 2:
+            props.blendMode = LayerProperties::SCREEN;
+            break;
+        case 3:
+            props.blendMode = LayerProperties::OVERLAY;
+            break;
+        default:
+            return false;
     }
     
     return true;

@@ -70,8 +70,16 @@ public:
     void setWraparound(bool enabled) { wraparound_ = enabled; }
     bool getWraparound() const { return wraparound_; }
     
+    // MTC follow control (enable/disable MTC following for this layer)
+    void setMtcFollow(bool enabled) { mtcFollow_ = enabled; }
+    bool getMtcFollow() const { return mtcFollow_; }
+    
     // Reverse playback (multiplies timescale by -1.0 and adjusts offset)
     void reverse();
+    
+    // Check if playback has reached the end
+    // Returns true if playback has ended, false otherwise
+    bool checkPlaybackEnd() const;
 
 private:
     std::unique_ptr<InputSource> inputSource_;
@@ -84,6 +92,12 @@ private:
     int64_t timeOffset_;  // Time offset applied to sync frames
     double timeScale_;    // Time multiplier (default: 1.0)
     bool wraparound_;     // Enable wrap-around/loop
+    bool mtcFollow_;      // Enable/disable MTC following (default: true)
+    
+    // MTC sync state (per-layer, not static!)
+    bool wasRolling_;        // Previous rolling state for change detection
+    int64_t lastLoggedFrame_; // Last logged frame for periodic logging
+    int debugCounter_;       // Debug counter for periodic logging
     
     // Frame buffers (CPU and GPU)
     FrameBuffer cpuFrameBuffer_;

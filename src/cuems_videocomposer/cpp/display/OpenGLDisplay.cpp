@@ -166,6 +166,11 @@ void OpenGLDisplay::render(LayerManager* layerManager, OSDManager* osdManager) {
     // Flush and swap buffers (matches original xjadeo)
     glFlush();
     swapBuffers();
+    
+    // Cleanup deferred texture deletions AFTER swapBuffers
+    // This ensures OpenGL is done using the textures before we delete them
+    renderer_->cleanupDeferredTextures();
+    
     clearCurrent();
 }
 

@@ -16,6 +16,10 @@ LayerPlayback::LayerPlayback()
     , timeOffset_(0)
     , timeScale_(1.0)
     , wraparound_(false)
+    , mtcFollow_(true)  // Default: follow MTC
+    , wasRolling_(false)
+    , lastLoggedFrame_(-1)
+    , debugCounter_(0)
     , frameOnGPU_(false)
 {
 }
@@ -84,32 +88,38 @@ void LayerPlayback::updateFromSyncSource() {
         // No sync source - manual playback or paused
         return;
     }
+    
+    // Check if MTC following is disabled for this layer
+    if (!mtcFollow_) {
+        // Layer ignores sync source - manual control only
+        return;
+    }
 
-    static bool wasRolling = false;
-    static int64_t lastLoggedFrame = -1;
+    // NOTE: These were previously static variables shared across ALL layers (bug!)
+    // Now they are instance variables, each layer has its own state
     
     uint8_t rolling = 0;
     int64_t syncFrame = syncSource_->pollFrame(&rolling);
     
     // Debug: log frame and rolling state periodically
-    static int debugCounter = 0;
-    if (++debugCounter % 60 == 0) {  // Log every 60 calls (~1 second at 60fps)
+    debugCounter_++;
+    if (debugCounter_ % 60 == 0) {  // Log every 60 calls (~1 second at 60fps)
         LOG_VERBOSE << "MTC poll: syncFrame=" << syncFrame << ", rolling=" << (int)rolling;
     }
     
     // Log MTC status changes
-    if (rolling != 0 && !wasRolling) {
+    if (rolling != 0 && !wasRolling_) {
         // MTC started rolling
         LOG_INFO << "MTC: Started rolling - playback starting (frame=" << syncFrame << ")";
-        wasRolling = true;
-    } else if (rolling == 0 && wasRolling) {
+        wasRolling_ = true;
+    } else if (rolling == 0 && wasRolling_) {
         // MTC stopped rolling
         LOG_INFO << "MTC: Stopped rolling - playback paused";
-        wasRolling = false;
+        wasRolling_ = false;
     }
     
     // Also log when we have a frame but not rolling (for debugging)
-    if (syncFrame >= 0 && rolling == 0 && debugCounter % 300 == 0) {
+    if (syncFrame >= 0 && rolling == 0 && debugCounter_ % 300 == 0) {
         LOG_VERBOSE << "MTC: Has frame " << syncFrame << " but not rolling (waiting for MTC to start)";
     }
     
@@ -138,7 +148,7 @@ void LayerPlayback::updateFromSyncSource() {
     
     // Log MTC timecode periodically (every 30 frames or when frame changes significantly)
     if (syncFrame >= 0 && rolling != 0) {
-        if (lastLoggedFrame < 0 || std::abs(syncFrame - lastLoggedFrame) >= 30) {
+        if (lastLoggedFrame_ < 0 || std::abs(syncFrame - lastLoggedFrame_) >= 30) {
             // Format timecode for display
             FrameInfo info = getFrameInfo();
             if (info.framerate > 0.0) {
@@ -147,11 +157,11 @@ void LayerPlayback::updateFromSyncSource() {
             } else {
                 LOG_INFO << "MTC: frame " << syncFrame << " (rolling)";
             }
-            lastLoggedFrame = syncFrame;
+            lastLoggedFrame_ = syncFrame;
         }
     } else if (syncFrame >= 0 && rolling == 0) {
         // Log when we have a frame but not rolling (stopped)
-        if (lastLoggedFrame != syncFrame) {
+        if (lastLoggedFrame_ != syncFrame) {
             FrameInfo info = getFrameInfo();
             if (info.framerate > 0.0) {
                 std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
@@ -159,7 +169,7 @@ void LayerPlayback::updateFromSyncSource() {
             } else {
                 LOG_INFO << "MTC: frame " << syncFrame << " (stopped)";
             }
-            lastLoggedFrame = syncFrame;
+            lastLoggedFrame_ = syncFrame;
         }
     }
     
@@ -342,6 +352,26 @@ void LayerPlayback::reverse() {
         // Just negate timescale if no current frame
         timeScale_ = -timeScale_;
     }
+}
+
+bool LayerPlayback::checkPlaybackEnd() const {
+    if (!inputSource_ || !inputSource_->isReady()) {
+        return false;
+    }
+    
+    if (currentFrame_ < 0) {
+        return false; // No frame loaded yet
+    }
+    
+    FrameInfo info = inputSource_->getFrameInfo();
+    int64_t totalFrames = info.totalFrames;
+    
+    if (totalFrames <= 0) {
+        return false; // Unknown duration
+    }
+    
+    // Check if current frame is at or beyond the end
+    return currentFrame_ >= totalFrames;
 }
 
 } // namespace videocomposer

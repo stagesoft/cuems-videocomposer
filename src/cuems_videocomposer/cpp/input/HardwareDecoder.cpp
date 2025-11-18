@@ -12,7 +12,8 @@ namespace videocomposer {
 
 HardwareDecoder::Type HardwareDecoder::detectAvailable() {
     // Try to detect available hardware decoders
-    // Check in order of preference: CUDA > VAAPI > VideoToolbox > DXVA2
+    // Check in order of preference: CUDA > QSV > VAAPI > VideoToolbox > DXVA2
+    // QSV is checked before VAAPI for Intel GPUs (QSV is Intel-specific and often more efficient)
     
     AVBufferRef* hwDeviceCtx = nullptr;
     
@@ -24,6 +25,21 @@ HardwareDecoder::Type HardwareDecoder::detectAvailable() {
         LOG_INFO << "Hardware decoder detected: CUDA (NVIDIA)";
         av_buffer_unref(&hwDeviceCtx);
         return Type::CUDA;
+    }
+    if (hwDeviceCtx) {
+        av_buffer_unref(&hwDeviceCtx);
+        hwDeviceCtx = nullptr;
+    }
+    #endif
+    
+    // Check QSV (Intel Quick Sync Video - Linux/Windows)
+    #if defined(__linux__) || defined(_WIN32)
+    hwDeviceCtx = nullptr;
+    ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_QSV, nullptr, nullptr, 0);
+    if (ret >= 0 && hwDeviceCtx != nullptr) {
+        LOG_INFO << "Hardware decoder detected: QSV (Intel Quick Sync Video)";
+        av_buffer_unref(&hwDeviceCtx);
+        return Type::QSV;
     }
     if (hwDeviceCtx) {
         av_buffer_unref(&hwDeviceCtx);
@@ -82,6 +98,8 @@ HardwareDecoder::Type HardwareDecoder::detectAvailable() {
 
 AVHWDeviceType HardwareDecoder::getFFmpegDeviceType(Type type) {
     switch (type) {
+        case Type::QSV:
+            return AV_HWDEVICE_TYPE_QSV;
         case Type::VAAPI:
             return AV_HWDEVICE_TYPE_VAAPI;
         case Type::CUDA:
@@ -100,6 +118,9 @@ AVPixelFormat HardwareDecoder::getHardwarePixelFormat(Type type, AVCodecID codec
     // This depends on what the hardware decoder outputs
     
     switch (type) {
+        case Type::QSV:
+            // QSV outputs QSV frames
+            return AV_PIX_FMT_QSV;
         case Type::VAAPI:
             // VAAPI typically outputs NV12 or YUV420P
             return AV_PIX_FMT_VAAPI;
@@ -120,13 +141,19 @@ AVPixelFormat HardwareDecoder::getHardwarePixelFormat(Type type, AVCodecID codec
 bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId) {
     // Check if hardware decoder is available for the given codec
     Type hwType = detectAvailable();
+    return isAvailableForCodec(codecId, hwType);
+}
+
+bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId, Type hwType) {
+    // Check if hardware decoder is available for the given codec
     if (hwType == Type::NONE) {
         return false;
     }
     
     // Check if the codec supports hardware decoding
-    // Most hardware decoders support H.264 and HEVC
-    // AV1 support varies by hardware
+    // This works for ALL codecs - if a hardware decoder exists in FFmpeg, it will be found
+    // Examples: h264_qsv, hevc_vaapi, vp9_cuda, av1_qsv, mpeg2_vaapi, etc.
+    // When FFmpeg is updated with new hardware decoders, they are automatically discovered
     
     AVCodec* codec = avcodec_find_decoder(codecId);
     if (!codec) {
@@ -140,11 +167,16 @@ bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId) {
     }
     
     // Try to find hardware decoder for this codec
-    // FFmpeg hardware decoders are typically named like "h264_vaapi", "hevc_cuda", etc.
+    // FFmpeg hardware decoders are typically named like "h264_vaapi", "h264_qsv", "hevc_cuda", etc.
+    // This uses avcodec_find_decoder_by_name() which dynamically queries FFmpeg at runtime,
+    // so it will automatically discover new hardware decoders when FFmpeg is updated.
     std::string codecName = avcodec_get_name(codecId);
     std::string hwCodecName;
     
     switch (hwType) {
+        case Type::QSV:
+            hwCodecName = codecName + "_qsv";
+            break;
         case Type::VAAPI:
             hwCodecName = codecName + "_vaapi";
             break;
@@ -162,6 +194,8 @@ bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId) {
             return false;
     }
     
+    // Dynamically query FFmpeg for the hardware decoder
+    // This will automatically discover new decoders when FFmpeg is updated
     AVCodec* hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
     bool available = hwCodec != nullptr;
     
@@ -178,6 +212,8 @@ bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId) {
 
 const char* HardwareDecoder::getName(Type type) {
     switch (type) {
+        case Type::QSV:
+            return "QSV";
         case Type::VAAPI:
             return "VAAPI";
         case Type::CUDA:

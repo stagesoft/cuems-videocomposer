@@ -1,5 +1,6 @@
 #include "LayerManager.h"
 #include <algorithm>
+#include <map>
 
 namespace videocomposer {
 
@@ -32,6 +33,13 @@ bool LayerManager::removeLayer(int layerId) {
         });
     
     if (it != layers_.end()) {
+        // Remove from cueIdToLayerId_ map if present
+        for (auto mapIt = cueIdToLayerId_.begin(); mapIt != cueIdToLayerId_.end(); ++mapIt) {
+            if (mapIt->second == layerId) {
+                cueIdToLayerId_.erase(mapIt);
+                break;
+            }
+        }
         layers_.erase(it);
         return true;
     }
@@ -88,10 +96,40 @@ std::vector<const VideoLayer*> LayerManager::getLayers() const {
 }
 
 void LayerManager::updateAll() {
+    // Collect layers to remove (auto-unload)
+    std::vector<int> layersToRemove;
+    
     for (auto& layer : layers_) {
         if (layer && layer->isReady()) {
             layer->update();
+            
+            // Check for auto-unload: if playback ended and autoUnload is enabled
+            auto& props = layer->properties();
+            if (props.autoUnload && layer->getInputSource()) {
+                // Check if playback has ended (no loop, at end of file)
+                FrameInfo info = layer->getFrameInfo();
+                int64_t currentFrame = layer->getCurrentFrame();
+                int64_t totalFrames = info.totalFrames;
+                
+                // Playback has ended if:
+                // 1. Current frame is at or beyond total frames
+                // 2. No wraparound (full file loop) is enabled, OR wraparound is enabled but loop count reached
+                // 3. No region loop is enabled
+                bool wraparoundActive = layer->getWraparound() && 
+                                       (props.fullFileLoopCount == -1 || props.currentFullFileLoopCount > 0);
+                if (currentFrame >= totalFrames && 
+                    !wraparoundActive && 
+                    !props.loopRegion.enabled) {
+                    // Mark layer for removal
+                    layersToRemove.push_back(layer->getLayerId());
+                }
+            }
         }
+    }
+    
+    // Remove layers marked for auto-unload
+    for (int layerId : layersToRemove) {
+        removeLayer(layerId);
     }
 }
 
@@ -290,6 +328,63 @@ std::vector<const VideoLayer*> LayerManager::getLayersSortedByZOrder() const {
         });
     
     return result;
+}
+
+bool LayerManager::addLayerWithId(const std::string& cueId, std::unique_ptr<VideoLayer> layer) {
+    if (!layer) {
+        return false;
+    }
+    
+    int layerId = nextLayerId_++;
+    layer->setLayerId(layerId);
+    cueIdToLayerId_[cueId] = layerId;
+    layers_.push_back(std::move(layer));
+    
+    sortLayersByZOrder();
+    return true;
+}
+
+bool LayerManager::removeLayerByCueId(const std::string& cueId) {
+    auto mapIt = cueIdToLayerId_.find(cueId);
+    if (mapIt != cueIdToLayerId_.end()) {
+        int layerId = mapIt->second;
+        cueIdToLayerId_.erase(mapIt);
+        return removeLayer(layerId);
+    }
+    return false;
+}
+
+VideoLayer* LayerManager::getLayerByCueId(const std::string& cueId) {
+    auto mapIt = cueIdToLayerId_.find(cueId);
+    if (mapIt != cueIdToLayerId_.end()) {
+        return getLayer(mapIt->second);
+    }
+    return nullptr;
+}
+
+const VideoLayer* LayerManager::getLayerByCueId(const std::string& cueId) const {
+    auto mapIt = cueIdToLayerId_.find(cueId);
+    if (mapIt != cueIdToLayerId_.end()) {
+        return getLayer(mapIt->second);
+    }
+    return nullptr;
+}
+
+std::string LayerManager::getCueIdFromLayer(VideoLayer* layer) const {
+    if (!layer) {
+        return "";
+    }
+    
+    int layerId = layer->getLayerId();
+    
+    // Search map for cue ID that maps to this layer ID
+    for (const auto& pair : cueIdToLayerId_) {
+        if (pair.second == layerId) {
+            return pair.first;
+        }
+    }
+    
+    return ""; // Not found
 }
 
 } // namespace videocomposer

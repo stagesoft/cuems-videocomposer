@@ -57,6 +57,10 @@ public:
     bool supportsMultiDisplay() const override { return true; }
     void* getContext() override;
 
+    // OpenGL context management (public for frame loading that needs GPU texture allocation)
+    void makeCurrent();
+    void clearCurrent();
+
 private:
     // Platform-specific initialization
 #if defined(USE_GLX) || (!defined(PLATFORM_WINDOWS) && !defined(PLATFORM_OSX))
@@ -73,9 +77,7 @@ private:
     void handleEventsCGL();
 #endif
 
-    // OpenGL context management
-    void makeCurrent();
-    void clearCurrent();
+    // OpenGL context management (implementation details)
     void swapBuffers();
 
     // Window management

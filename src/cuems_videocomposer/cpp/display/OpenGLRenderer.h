@@ -5,7 +5,11 @@
 #include "../video/GPUTextureFrameBuffer.h"
 #include "../layer/VideoLayer.h"
 #include <vector>
+#include <map>
 #include <cstdint>
+
+// Forward declaration for OpenGL types
+typedef unsigned int GLuint;
 
 namespace videocomposer {
 
@@ -50,6 +54,9 @@ public:
 
     // Render OSD items
     void renderOSDItems(const std::vector<struct OSDRenderItem>& items);
+    
+    // Cleanup deferred texture deletions (call after swapBuffers)
+    void cleanupDeferredTextures();
 
 private:
     // OpenGL state
@@ -60,6 +67,17 @@ private:
     int viewportHeight_;
     bool letterbox_;
     bool initialized_;
+    
+    // Deferred texture deletion (textures to delete after swapBuffers)
+    std::vector<GLuint> texturesToDelete_;
+    
+    // Cached textures per layer (layerId -> texture info)
+    struct LayerTextureCache {
+        GLuint textureId;
+        int width;
+        int height;
+    };
+    std::map<int, LayerTextureCache> layerTextureCache_;
 
     // Internal methods
     void setupOrthoProjection();
@@ -67,6 +85,7 @@ private:
     void renderQuadWithCrop(float x, float y, float width, float height,
                            float texX, float texY, float texWidth, float texHeight);
     void applyLayerTransform(const VideoLayer* layer);
+    void applyLayerTransform(const VideoLayer* layer, float quad_x, float quad_y);
     void applyBlendMode(const VideoLayer* layer);
     bool uploadFrameToTexture(const FrameBuffer& frame);
     bool bindGPUTexture(const GPUTextureFrameBuffer& gpuFrame);

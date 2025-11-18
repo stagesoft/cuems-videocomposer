@@ -14,6 +14,7 @@ namespace videocomposer {
  * HardwareDecoder - Utility for detecting and managing hardware video decoders
  * 
  * Supports:
+ * - QSV (Intel Quick Sync Video - Linux/Windows)
  * - VAAPI (Linux, Intel/AMD GPUs)
  * - CUDA (NVIDIA GPUs)
  * - VideoToolbox (macOS)
@@ -23,6 +24,7 @@ class HardwareDecoder {
 public:
     enum class Type {
         NONE,           // No hardware decoder available
+        QSV,            // Intel Quick Sync Video (QSV/libmfx)
         VAAPI,          // VAAPI (Linux)
         CUDA,           // CUDA/NVDEC (NVIDIA)
         VIDEOTOOLBOX,   // VideoToolbox (macOS)
@@ -56,6 +58,14 @@ public:
      * @return true if hardware decoder is available for this codec
      */
     static bool isAvailableForCodec(AVCodecID codecId);
+    
+    /**
+     * Check if hardware decoder is available for the given codec (with pre-detected type)
+     * @param codecId Codec ID (H264, HEVC, AV1)
+     * @param hwType Pre-detected hardware decoder type
+     * @return true if hardware decoder is available for this codec
+     */
+    static bool isAvailableForCodec(AVCodecID codecId, Type hwType);
 
     /**
      * Get name of hardware decoder type (for logging)

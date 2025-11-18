@@ -1,6 +1,8 @@
 #ifndef VIDEOCOMPOSER_LAYERPROPERTIES_H
 #define VIDEOCOMPOSER_LAYERPROPERTIES_H
 
+#include <cstdint>
+
 namespace videocomposer {
 
 /**
@@ -41,6 +43,29 @@ struct LayerProperties {
         OVERLAY
     };
     BlendMode blendMode = NORMAL;
+    
+    // Corner deformation (warping) - 4 corners, each with x,y offset
+    struct {
+        float corners[8];  // [corner1x, corner1y, corner2x, corner2y, corner3x, corner3y, corner4x, corner4y]
+        bool enabled = false;
+    } cornerDeform;
+    
+    // Auto-unload: automatically unload file when playback ends
+    bool autoUnload = false;
+    
+    // Full file loop count (for wraparound)
+    int fullFileLoopCount = -1;        // -1 = infinite, 0 = no loop, >0 = loop N times
+    int currentFullFileLoopCount = -1; // Current loop iteration (starts at fullFileLoopCount, decrements)
+    
+    // Loop region: loop a specific region of the file
+    struct LoopRegion {
+        bool enabled = false;
+        int64_t startFrame = 0;
+        int64_t endFrame = 0;
+        int loopCount = -1;        // -1 = infinite, 0 = no loop, >0 = loop N times
+        int currentLoopCount = -1; // Current loop iteration (starts at loopCount, decrements)
+    };
+    LoopRegion loopRegion;
 };
 
 } // namespace videocomposer

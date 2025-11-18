@@ -4,26 +4,41 @@
 namespace videocomposer {
 
 FramerateConverterSyncSource::FramerateConverterSyncSource(
-    std::unique_ptr<SyncSource> syncSource,
+    SyncSource* syncSource,
     InputSource* inputSource)
-    : wrappedSyncSource_(std::move(syncSource))
+    : wrappedSyncSource_(syncSource)
     , inputSource_(inputSource)
 {
+    if (!wrappedSyncSource_) {
+        // Can't work without a sync source
+        wrappedSyncSource_ = nullptr;
+    }
 }
 
 bool FramerateConverterSyncSource::connect(const char* param) {
+    if (!wrappedSyncSource_) {
+        return false;
+    }
     return wrappedSyncSource_->connect(param);
 }
 
 void FramerateConverterSyncSource::disconnect() {
+    if (wrappedSyncSource_) {
     wrappedSyncSource_->disconnect();
+    }
 }
 
 bool FramerateConverterSyncSource::isConnected() const {
+    if (!wrappedSyncSource_) {
+        return false;
+    }
     return wrappedSyncSource_->isConnected();
 }
 
 int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
+    if (!wrappedSyncSource_) {
+        return -1;
+    }
     // Get frame from wrapped sync source
     int64_t syncFrame = wrappedSyncSource_->pollFrame(rolling);
     
@@ -54,10 +69,16 @@ int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
 }
 
 int64_t FramerateConverterSyncSource::getCurrentFrame() const {
+    if (!wrappedSyncSource_) {
+        return -1;
+    }
     return wrappedSyncSource_->getCurrentFrame();
 }
 
 const char* FramerateConverterSyncSource::getName() const {
+    if (!wrappedSyncSource_) {
+        return "None";
+    }
     return wrappedSyncSource_->getName();
 }
 
@@ -68,6 +89,9 @@ double FramerateConverterSyncSource::getFramerate() const {
         if (info.framerate > 0) {
             return info.framerate;
         }
+    }
+    if (!wrappedSyncSource_) {
+        return -1.0;
     }
     return wrappedSyncSource_->getFramerate();
 }

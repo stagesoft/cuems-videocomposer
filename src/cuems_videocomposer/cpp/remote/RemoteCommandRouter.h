@@ -93,7 +93,38 @@ private:
     // Crop/Panorama command handlers (layer-level)
     bool handleLayerPan(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerCrop(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerCropDisable(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerPanorama(VideoLayer* layer, const std::vector<std::string>& args);
+    
+    // File loading/unloading handlers
+    bool handleLayerLoad(const std::vector<std::string>& args);  // /layer/load s s (filepath, cueId)
+    bool handleLayerFile(VideoLayer* layer, const std::vector<std::string>& args);  // /layer/<cueId>/file s
+    bool handleLayerUnload(const std::vector<std::string>& args);  // /layer/unload s (cueId)
+    
+    // Loop and auto-unload handlers
+    bool handleLayerAutoUnload(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerLoopRegion(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerLoopRegionDisable(VideoLayer* layer, const std::vector<std::string>& args);
+    
+    // Offset and MTC follow handlers
+    bool handleLayerOffset(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerMtcFollow(VideoLayer* layer, const std::vector<std::string>& args);
+    
+    // Transform handlers
+    bool handleLayerScale(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerXScale(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerYScale(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerRotation(VideoLayer* layer, const std::vector<std::string>& args);
+    
+    // Corner deformation handlers
+    bool handleLayerCorners(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerCorner1(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerCorner2(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerCorner3(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerCorner4(VideoLayer* layer, const std::vector<std::string>& args);
+    
+    // Blend mode handler
+    bool handleLayerBlendMode(VideoLayer* layer, const std::vector<std::string>& args);
 };
 
 } // namespace videocomposer

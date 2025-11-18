@@ -3,7 +3,6 @@
 
 #include "SyncSource.h"
 #include "../input/InputSource.h"
-#include <memory>
 
 namespace videocomposer {
 
@@ -22,11 +21,11 @@ namespace videocomposer {
 class FramerateConverterSyncSource : public SyncSource {
 public:
     /**
-     * Create a framerate converter that wraps a sync source
-     * @param syncSource The sync source to wrap (takes ownership)
+     * Create a framerate converter that wraps a sync source (non-owning reference)
+     * @param syncSource The sync source to wrap (keeps reference, does not take ownership)
      * @param inputSource The input source to get target framerate from (keeps reference)
      */
-    FramerateConverterSyncSource(std::unique_ptr<SyncSource> syncSource, InputSource* inputSource);
+    FramerateConverterSyncSource(SyncSource* syncSource, InputSource* inputSource);
     
     virtual ~FramerateConverterSyncSource() = default;
 
@@ -46,7 +45,7 @@ public:
     void setInputSource(InputSource* inputSource) { inputSource_ = inputSource; }
 
 private:
-    std::unique_ptr<SyncSource> wrappedSyncSource_;
+    SyncSource* wrappedSyncSource_;  // Non-owning reference to sync source
     InputSource* inputSource_;  // Non-owning reference
 };
 
