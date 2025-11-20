@@ -300,8 +300,8 @@ bool HAPVideoInput::indexFrames() {
         return false;
     }
 
-    // Flush codec buffers
-    if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
+    // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
+    if (codecCtx_) {
         avcodec_flush_buffers(codecCtx_);
     }
 
@@ -407,7 +407,8 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
                 return false;
             }
 
-            if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
+            // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
+            if (codecCtx_) {
                 avcodec_flush_buffers(codecCtx_);
             }
         }
@@ -433,7 +434,8 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
         return false;
     }
 
-    if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
+    // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
+    if (codecCtx_) {
         avcodec_flush_buffers(codecCtx_);
     }
 
@@ -615,9 +617,17 @@ int64_t HAPVideoInput::parsePTSFromFrame(AVFrame* frame) {
     int64_t pts = AV_NOPTS_VALUE;
     if (frame->pts != AV_NOPTS_VALUE) {
         pts = frame->pts;
-    } else if (frame->pkt_pts != AV_NOPTS_VALUE) {
-        pts = frame->pkt_pts;
-    } else if (frame->pkt_dts != AV_NOPTS_VALUE) {
+    }
+    // pkt_pts was removed in FFmpeg 4.0 (libavutil 56.x+)
+    // Use best_effort_timestamp or pts instead (compatible with all versions)
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
+    // FFmpeg 4.0+: use best_effort_timestamp field directly
+    if (pts == AV_NOPTS_VALUE && frame->best_effort_timestamp != AV_NOPTS_VALUE) {
+        pts = frame->best_effort_timestamp;
+    }
+#endif
+    // Note: pkt_pts removed, using pts above should be sufficient
+    if (pts == AV_NOPTS_VALUE && frame->pkt_dts != AV_NOPTS_VALUE) {
         pts = frame->pkt_dts;
     }
     return pts;

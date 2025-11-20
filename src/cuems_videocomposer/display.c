@@ -220,17 +220,6 @@ const vidout VO[] = {
 			NULLOUTPUT
 #endif
 	},
-	{ AV_PIX_FMT_YUV420P, SUP_SDL, "SDL",
-#ifdef HAVE_SDL
-		&render_sdl, &open_window_sdl, &close_window_sdl,
-		&handle_X_events_sdl, &newsrc_sdl, &resize_sdl,
-		&getsize_sdl, &position_sdl, &get_window_pos_sdl,
-		&sdl_toggle_fullscreen, &sdl_set_ontop, &mousecursor_sdl,
-		&sdl_get_fullscreen, &sdl_get_ontop, &sdl_letterbox_change
-#else
-			NULLOUTPUT
-#endif
-	},
 	{
 #ifdef IMLIB2RGBA
 		AV_PIX_FMT_BGRA32,   SUP_IMLIB2,   "ImLib2/x11 (RGBA32)",

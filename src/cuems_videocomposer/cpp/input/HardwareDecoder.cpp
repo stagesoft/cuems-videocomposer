@@ -155,7 +155,12 @@ bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId, Type hwType) {
     // Examples: h264_qsv, hevc_vaapi, vp9_cuda, av1_qsv, mpeg2_vaapi, etc.
     // When FFmpeg is updated with new hardware decoders, they are automatically discovered
     
+    // FFmpeg 4.0+ (58.x) changed return type to const AVCodec*
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
+    const AVCodec* codec = avcodec_find_decoder(codecId);
+#else
     AVCodec* codec = avcodec_find_decoder(codecId);
+#endif
     if (!codec) {
         return false;
     }
@@ -196,7 +201,12 @@ bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId, Type hwType) {
     
     // Dynamically query FFmpeg for the hardware decoder
     // This will automatically discover new decoders when FFmpeg is updated
+    // FFmpeg 4.0+ (58.x) changed return type to const AVCodec*
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
+    const AVCodec* hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
+#else
     AVCodec* hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
+#endif
     bool available = hwCodec != nullptr;
     
     if (available) {

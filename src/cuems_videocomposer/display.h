@@ -65,36 +65,6 @@ typedef struct {
 
 
 /*******************************************************************************
- * SDL
- */
-
-#ifdef HAVE_SDL
-#include <SDL/SDL.h>
-#include <SDL/SDL_syswm.h>
-#define SUP_SDL 1
-void get_window_pos_sdl (int *rx, int *ry);
-int sdl_get_fullscreen ();
-void sdl_toggle_fullscreen(int action);
-void mousecursor_sdl(int action);
-void sdl_set_ontop (int action);
-int sdl_get_ontop ();
-
-void close_window_sdl(void);
-int open_window_sdl (void);
-void resize_sdl (unsigned int x, unsigned int y) ;
-void getsize_sdl (unsigned int *x, unsigned int *y);
-void position_sdl(int x, int y);
-void render_sdl (uint8_t *mybuffer);
-void newsrc_sdl (void) ;
-void handle_X_events_sdl (void) ;
-void sdl_letterbox_change (void);
-
-#else
-#define SUP_SDL 0
-#endif
-
-
-/*******************************************************************************
  * Shared X11 functions
  */
 

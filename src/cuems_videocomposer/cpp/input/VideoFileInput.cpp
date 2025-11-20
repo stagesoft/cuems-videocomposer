@@ -271,7 +271,12 @@ bool VideoFileInput::openHardwareCodec() {
             return false;
     }
 
+    // FFmpeg 4.0+ (58.x) changed return type to const AVCodec*
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
+    const AVCodec* hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
+#else
     AVCodec* hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
+#endif
     if (!hwCodec) {
         LOG_WARNING << "Hardware decoder " << hwCodecName << " not found, falling back to software";
         av_buffer_unref(&hwDeviceCtx_);
@@ -682,7 +687,8 @@ bool VideoFileInput::indexFrames() {
         }
         
         // Flush codec buffers
-        if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
+        // codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available
+        if (codecCtx_) {
             avcodec_flush_buffers(codecCtx_);
         }
         
@@ -734,6 +740,7 @@ bool VideoFileInput::indexFrames() {
         }
         
         frameIndex_[i].frame_pts = pts;
+        // Use compatibility wrapper from ffcompat.h
         frameIndex_[i].frame_pos = av_frame_get_pkt_pos(frame_);
         if (pts != AV_NOPTS_VALUE) {
             keyframecount++;
@@ -838,7 +845,8 @@ bool VideoFileInput::seekToFrame(int64_t frameNumber) {
             seekResult = mediaReader_.seek(idx.seekpts, videoStream_, AVSEEK_FLAG_BACKWARD);
         }
 
-        if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
+        // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
+        if (codecCtx_) {
             avcodec_flush_buffers(codecCtx_);
         }
 
@@ -866,8 +874,8 @@ bool VideoFileInput::seekByTimestamp(int64_t frameNumber) {
         return false;
     }
 
-    // Flush codec buffers
-    if (codecCtx_ && codecCtx_->codec && codecCtx_->codec->flush) {
+    // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
+    if (codecCtx_) {
         avcodec_flush_buffers(codecCtx_);
     }
 
@@ -1108,16 +1116,17 @@ int64_t VideoFileInput::parsePTSFromFrame(AVFrame* frame) {
     int64_t pts = AV_NOPTS_VALUE;
     
     // Match xjadeo's parse_pts_from_frame logic
-    // Try best effort timestamp first (FFmpeg API)
+    // Try best effort timestamp first (using compatibility wrapper from ffcompat.h)
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(51, 49, 100)
     if (pts == AV_NOPTS_VALUE) {
         pts = av_frame_get_best_effort_timestamp(frame);
     }
 #endif
     
-    // Fallback to packet PTS
+    // Fallback: pkt_pts was removed in FFmpeg 4.0 (libavutil 56.x+)
+    // Use frame->pts instead (which should work in all versions)
     if (pts == AV_NOPTS_VALUE) {
-        pts = frame->pkt_pts;
+        pts = frame->pts;
     }
     
     // Fallback to frame pts (may be bogus with many codecs)

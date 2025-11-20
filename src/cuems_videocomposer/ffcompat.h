@@ -117,4 +117,41 @@ static inline AVFrame *av_frame_alloc()
 }
 #endif
 
+// FFmpeg 4.0+ (58.x) compatibility: av_frame_get_best_effort_timestamp removed
+// Provide compatibility wrapper that works for both old and new FFmpeg
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
+// FFmpeg 4.0+: function removed, use field directly
+static inline int64_t av_frame_get_best_effort_timestamp(const AVFrame *frame)
+{
+	return frame->best_effort_timestamp;
+}
+#else
+// Older FFmpeg: try function first, fallback to field
+#ifndef av_frame_get_best_effort_timestamp
+static inline int64_t av_frame_get_best_effort_timestamp(const AVFrame *frame)
+{
+	return frame->best_effort_timestamp;
+}
+#endif
+#endif
+
+// FFmpeg 4.0+ (58.x) compatibility: av_frame_get_pkt_pos and pkt_pos field removed
+// Provide compatibility wrapper
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
+// FFmpeg 4.0+: pkt_pos removed, return 0 (position tracking moved to packet level)
+static inline int64_t av_frame_get_pkt_pos(const AVFrame *frame)
+{
+	(void)frame; // unused
+	return 0;
+}
+#else
+// Older FFmpeg: try function first, fallback to field
+#ifndef av_frame_get_pkt_pos
+static inline int64_t av_frame_get_pkt_pos(const AVFrame *frame)
+{
+	return frame->pkt_pos;
+}
+#endif
+#endif
+
 #endif /* FFCOMPAT_H */
