@@ -56,49 +56,58 @@ create_test_video() {
 }
 
 # Create H.264 test files (hardware decodable)
+# Explicitly use 8-bit pixel format (yuv420p) to avoid 10-bit H.264 which hardware decoders may not support
 echo ""
 echo "=== Creating H.264 test files ==="
-create_test_video "$OUTPUT_DIR/test_h264_mp4.mp4" "libx264" "-preset fast -crf 23" "mp4"
-create_test_video "$OUTPUT_DIR/test_h264_mov.mov" "libx264" "-preset fast -crf 23" "mov"
-create_test_video "$OUTPUT_DIR/test_h264_avi.avi" "libx264" "-preset fast -crf 23" "avi"
+create_test_video "$OUTPUT_DIR/test_h264_mp4.mp4" "libx264" "-preset fast -crf 23 -pix_fmt yuv420p" "mp4"
+create_test_video "$OUTPUT_DIR/test_h264_mov.mov" "libx264" "-preset fast -crf 23 -pix_fmt yuv420p" "mov"
+create_test_video "$OUTPUT_DIR/test_h264_avi.avi" "libx264" "-preset fast -crf 23 -pix_fmt yuv420p" "avi"
 
 # Create HEVC test files (hardware decodable)
+# Explicitly use 8-bit pixel format (yuv420p) to avoid 10-bit which hardware decoders may not support
 echo ""
 echo "=== Creating HEVC test files ==="
-create_test_video "$OUTPUT_DIR/test_hevc_mp4.mp4" "libx265" "-preset fast -crf 23" "mp4"
-create_test_video "$OUTPUT_DIR/test_hevc_mkv.mkv" "libx265" "-preset fast -crf 23" "matroska"
+create_test_video "$OUTPUT_DIR/test_hevc_mp4.mp4" "libx265" "-preset fast -crf 23 -pix_fmt yuv420p" "mp4"
+create_test_video "$OUTPUT_DIR/test_hevc_mkv.mkv" "libx265" "-preset fast -crf 23 -pix_fmt yuv420p" "matroska"
 
 # Create AV1 test files (hardware decodable on newer hardware)
+# Explicitly use 8-bit pixel format (yuv420p) to avoid 10-bit which hardware decoders may not support
 echo ""
 echo "=== Creating AV1 test files ==="
-create_test_video "$OUTPUT_DIR/test_av1_mp4.mp4" "libaom-av1" "-cpu-used 4 -crf 30" "mp4" || \
-    create_test_video "$OUTPUT_DIR/test_av1_mp4.mp4" "libsvtav1" "-preset 4 -crf 30" "mp4" || \
+create_test_video "$OUTPUT_DIR/test_av1_mp4.mp4" "libaom-av1" "-cpu-used 4 -crf 30 -pix_fmt yuv420p" "mp4" || \
+    create_test_video "$OUTPUT_DIR/test_av1_mp4.mp4" "libsvtav1" "-preset 4 -crf 30 -pix_fmt yuv420p" "mp4" || \
     echo "  ⚠ AV1 encoder not available, skipping"
 
 
 # Create HAP test files (GPU-optimized codec)
+# Create both 8-bit (HAP) and 10-bit (HAP Q) versions
 echo ""
 echo "=== Creating HAP test files ==="
-create_test_video "$OUTPUT_DIR/test_hap.mov" "hap" "-format hap" "mov" || \
+# HAP (8-bit)
+create_test_video "$OUTPUT_DIR/test_hap.mov" "hap" "-format hap -pix_fmt yuv420p" "mov" || \
     echo "  ⚠ HAP encoder not available, skipping"
+# HAP Q (10-bit)
+create_test_video "$OUTPUT_DIR/test_hap_q.mov" "hap" "-format hapq -pix_fmt yuv422p10le" "mov" || \
+    echo "  ⚠ HAP Q encoder not available, skipping"
 
 # Create software-only codec (MPEG-4)
+# Explicitly use 8-bit pixel format (yuv420p)
 echo ""
 echo "=== Creating MPEG-4 test files (software codec) ==="
-create_test_video "$OUTPUT_DIR/test_mpeg4_avi.avi" "mpeg4" "-qscale:v 3" "avi"
+create_test_video "$OUTPUT_DIR/test_mpeg4_avi.avi" "mpeg4" "-qscale:v 3 -pix_fmt yuv420p" "avi"
 
 # Create different frame rates
 echo ""
 echo "=== Creating different frame rate test files ==="
-create_test_video "$OUTPUT_DIR/test_h264_24fps.mp4" "libx264" "-preset fast -crf 23 -r 24" "mp4"
-create_test_video "$OUTPUT_DIR/test_h264_30fps.mp4" "libx264" "-preset fast -crf 23 -r 30" "mp4"
-create_test_video "$OUTPUT_DIR/test_h264_50fps.mp4" "libx264" "-preset fast -crf 23 -r 50" "mp4"
+create_test_video "$OUTPUT_DIR/test_h264_24fps.mp4" "libx264" "-preset fast -crf 23 -pix_fmt yuv420p -r 24" "mp4"
+create_test_video "$OUTPUT_DIR/test_h264_30fps.mp4" "libx264" "-preset fast -crf 23 -pix_fmt yuv420p -r 30" "mp4"
+create_test_video "$OUTPUT_DIR/test_h264_50fps.mp4" "libx264" "-preset fast -crf 23 -pix_fmt yuv420p -r 50" "mp4"
 
 # Create different resolutions
 echo ""
 echo "=== Creating different resolution test files ==="
-create_test_video "$OUTPUT_DIR/test_h264_720p.mp4" "libx264" "-preset fast -crf 23 -vf scale=1280:720" "mp4"
-create_test_video "$OUTPUT_DIR/test_h264_480p.mp4" "libx264" "-preset fast -crf 23 -vf scale=854:480" "mp4"
+create_test_video "$OUTPUT_DIR/test_h264_720p.mp4" "libx264" "-preset fast -crf 23 -pix_fmt yuv420p -vf scale=1280:720" "mp4"
+create_test_video "$OUTPUT_DIR/test_h264_480p.mp4" "libx264" "-preset fast -crf 23 -pix_fmt yuv420p -vf scale=854:480" "mp4"
 
 echo ""
 echo "=== Test video creation complete ==="

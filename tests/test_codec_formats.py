@@ -34,6 +34,11 @@ class CodecFormatTest:
         self.use_mtc = use_mtc and MTC_AVAILABLE
         self.fps = fps
         self.mtc_helper = MTCHelper(fps=fps, port=0, portname="CodecTest") if self.use_mtc else None
+        self.interrupted = False
+        self.current_process = None
+        
+        # Set up signal handler for Ctrl-C
+        signal.signal(signal.SIGINT, self._signal_handler)
         
     def _find_videocomposer(self) -> Path:
         """Find videocomposer binary."""
@@ -49,6 +54,28 @@ class CodecFormatTest:
             return Path(bin_path)
         
         raise FileNotFoundError("Could not find cuems-videocomposer binary")
+    
+    def _signal_handler(self, signum, frame):
+        """Handle Ctrl-C (SIGINT) to stop tests gracefully."""
+        print("\n\n⚠️  Interrupted by user (Ctrl-C)")
+        self.interrupted = True
+        
+        # Kill current videocomposer process if running
+        if self.current_process and self.current_process.poll() is None:
+            print("  Stopping videocomposer process...")
+            try:
+                self.current_process.terminate()
+                time.sleep(0.5)
+                if self.current_process.poll() is None:
+                    self.current_process.kill()
+            except:
+                pass
+        
+        # Stop MTC
+        self._stop_mtc()
+        
+        print("  Test stopped.\n")
+        sys.exit(130)  # Standard exit code for SIGINT
     
     def get_video_info(self, video_path: Path) -> Dict:
         """Get video codec and format information using ffprobe."""
@@ -300,6 +327,7 @@ class CodecFormatTest:
                 text=True,
                 bufsize=1
             )
+            self.current_process = process  # Store for signal handler
             
             # Wait longer for videocomposer to fully initialize OSC server
             time.sleep(1.5)
@@ -320,6 +348,15 @@ class CodecFormatTest:
             start_time = time.time()
             
             while True:
+                # Check if interrupted
+                if self.interrupted:
+                    if process.poll() is None:
+                        process.terminate()
+                        time.sleep(0.5)
+                        if process.poll() is None:
+                            process.kill()
+                    break
+                
                 if process.poll() is not None:
                     break
                 
@@ -338,6 +375,15 @@ class CodecFormatTest:
                         # In interactive mode, user watches the window, not console
                         if verbose_output:
                             print(f"    {line.strip()}")
+                except KeyboardInterrupt:
+                    # Handle Ctrl-C during readline
+                    self.interrupted = True
+                    if process.poll() is None:
+                        process.terminate()
+                        time.sleep(0.5)
+                        if process.poll() is None:
+                            process.kill()
+                    break
                 except:
                     break
             
@@ -355,7 +401,12 @@ class CodecFormatTest:
         finally:
             if process and process.poll() is None:
                 process.kill()
+            self.current_process = None
             self._stop_mtc()
+            
+            # If interrupted, propagate the interrupt
+            if self.interrupted:
+                raise KeyboardInterrupt("Test interrupted by user")
     
     def _analyze_output(self, result: Dict, info: Dict, expected_path: str) -> Dict:
         """Analyze videocomposer output to determine what happened."""
@@ -452,6 +503,11 @@ class CodecFormatTest:
         
         results = {}
         for i, video in enumerate(videos, 1):
+            # Check if interrupted
+            if self.interrupted:
+                print("\n⚠️  Test stopped by user")
+                break
+            
             # Test all videos from video_test_files directory
             # Filter by test type only if explicitly disabled
             video_name = video.name.lower()
@@ -465,9 +521,14 @@ class CodecFormatTest:
                 print(f"TEST {i}/{len(videos)}: {video.name}")
                 print(f"{'='*60}")
             
-            # Test all other videos (problematic.mp4, test_playback_patterns.mov, etc.)
-            result = self.test_video_file(video, duration)
-            results[video.name] = result
+            try:
+                # Test all other videos (problematic.mp4, test_playback_patterns.mov, etc.)
+                result = self.test_video_file(video, duration)
+                results[video.name] = result
+            except KeyboardInterrupt:
+                print("\n⚠️  Test interrupted during video file test")
+                self.interrupted = True
+                break
             
             if one_by_one:
                 # Show quick result
@@ -601,17 +662,35 @@ def main():
         input("Press ENTER to start testing...")
         
         for i, video in enumerate(videos, 1):
+            # Check if interrupted
+            if tester.interrupted:
+                print("\n⚠️  Test stopped by user")
+                break
+            
             print(f"\n{'='*60}")
             print(f"Video {i}/{len(videos)}")
             print(f"{'='*60}")
             
-            result = tester.test_video_file_interactive(video, args.duration)
-            results[video.name] = result
+            try:
+                result = tester.test_video_file_interactive(video, args.duration)
+                results[video.name] = result
+            except KeyboardInterrupt:
+                print("\n⚠️  Test interrupted during video playback")
+                tester.interrupted = True
+                break
+            
+            if tester.interrupted:
+                break
             
             if i < len(videos):
-                response = input(f"\nPress ENTER to continue to next video, or 'q' to quit: ").strip().lower()
-                if response == 'q':
-                    print("\nTesting stopped by user.")
+                try:
+                    response = input(f"\nPress ENTER to continue to next video, or 'q' to quit: ").strip().lower()
+                    if response == 'q':
+                        print("\nTesting stopped by user.")
+                        break
+                except KeyboardInterrupt:
+                    print("\n⚠️  Test stopped by user")
+                    tester.interrupted = True
                     break
         
         # Print summary
