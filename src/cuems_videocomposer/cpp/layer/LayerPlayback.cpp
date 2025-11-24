@@ -175,7 +175,6 @@ void LayerPlayback::updateFromSyncSource() {
     
     // Process frame updates only if we have a valid frame
     if (syncFrame >= 0) {
-        LOG_VERBOSE << "Processing syncFrame=" << syncFrame << ", lastSyncFrame_=" << lastSyncFrame_;
         // Apply time-scaling: multiply by timescale, then add offset
         // Note: Framerate conversion is handled by FramerateConverterSyncSource wrapper
         // LayerPlayback doesn't need to know about framerate conversion
@@ -209,7 +208,6 @@ void LayerPlayback::updateFromSyncSource() {
         // xjadeo doesn't check for full SYSEX frames - it just uses the frame number
         // and lets seek_frame() decide whether to seek based on frame relationships
         if (adjustedFrame != lastSyncFrame_) {
-            LOG_VERBOSE << "Frame changed: " << lastSyncFrame_ << " -> " << adjustedFrame << " (syncFrame=" << syncFrame << ")";
                     if (loadFrame(adjustedFrame)) {
                 // Normal update - loadFrame() handles seek optimization internally
                 // (no seek for consecutive frames, seeks for backwards/non-consecutive)
@@ -287,7 +285,6 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         // Software decoding: use CPU frame buffer
         if (videoInput->readFrame(frameNumber, cpuFrameBuffer_)) {
             frameOnGPU_ = false;
-            LOG_VERBOSE << "Loaded software-decoded frame " << frameNumber << " to CPU buffer";
             return true;
         }
         return false;

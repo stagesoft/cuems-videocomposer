@@ -229,26 +229,14 @@ bool VideoFileInput::openHardwareCodec() {
     // Detect available hardware decoder
     hwDecoderType_ = HardwareDecoder::detectAvailable();
     if (hwDecoderType_ == HardwareDecoder::Type::NONE) {
-        LOG_INFO << "No hardware decoder available for " << codecName << ", falling back to software decoding";
+        // HardwareDecoder::isAvailableForCodec() will log the details, no need to duplicate
         return false;
     }
 
     // Check if hardware decoder is available for this codec
-    if (!HardwareDecoder::isAvailableForCodec(codecId)) {
-        LOG_INFO << "Hardware decoder not available for " << codecName << ", falling back to software decoding";
-        return false;
-    }
-
-    // Get hardware device type
-    AVHWDeviceType hwDeviceType = HardwareDecoder::getFFmpegDeviceType(hwDecoderType_);
-    if (hwDeviceType == AV_HWDEVICE_TYPE_NONE) {
-        return false;
-    }
-
-    // Create hardware device context
-    int ret = av_hwdevice_ctx_create(&hwDeviceCtx_, hwDeviceType, nullptr, nullptr, 0);
-    if (ret < 0) {
-        hwDeviceCtx_ = nullptr;
+    // Pass the already-detected type to avoid calling detectAvailable() again
+    // HardwareDecoder::isAvailableForCodec() already logs the result, no need to duplicate
+    if (!HardwareDecoder::isAvailableForCodec(codecId, hwDecoderType_)) {
         return false;
     }
 
@@ -259,7 +247,8 @@ bool VideoFileInput::openHardwareCodec() {
             hwCodecName = codecName + "_vaapi";
             break;
         case HardwareDecoder::Type::CUDA:
-            hwCodecName = codecName + "_cuda";
+            // FFmpeg uses "cuvid" suffix for NVIDIA CUDA decoders (e.g., h264_cuvid, hevc_cuvid)
+            hwCodecName = codecName + "_cuvid";
             break;
         case HardwareDecoder::Type::VIDEOTOOLBOX:
             hwCodecName = codecName; // VideoToolbox uses same name
@@ -279,12 +268,66 @@ bool VideoFileInput::openHardwareCodec() {
 #endif
     if (!hwCodec) {
         LOG_WARNING << "Hardware decoder " << hwCodecName << " not found, falling back to software";
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
         return false;
     }
     
     LOG_INFO << "Found hardware decoder: " << hwCodecName;
+
+    // Check hardware config methods to determine how to initialize the decoder
+    // This applies to ALL hardware decoders (cuvid, vaapi, qsv, etc.)
+    // Following mpv's approach: check what methods the codec supports
+    // - METHOD_HW_DEVICE_CTX: needs hw_device_ctx set on codec context
+    // - METHOD_HW_FRAMES_CTX: needs hw_frames_ctx (not used here, but checked)
+    // - METHOD_INTERNAL: wrapper decoder (like cuvid) that manages hardware internally
+    bool needsHwDeviceCtx = false;
+    bool needsHwFramesCtx = false;
+    AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
+    
+    for (int n = 0; ; n++) {
+        const AVCodecHWConfig *cfg = avcodec_get_hw_config(hwCodec, n);
+        if (!cfg)
+            break;
+        
+        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) {
+            needsHwDeviceCtx = true;
+            if (hwPixFmt == AV_PIX_FMT_NONE) {
+                hwPixFmt = cfg->pix_fmt;
+            }
+        }
+        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX) {
+            needsHwFramesCtx = true;
+            if (hwPixFmt == AV_PIX_FMT_NONE) {
+                hwPixFmt = cfg->pix_fmt;
+            }
+        }
+        // AV_CODEC_HW_CONFIG_METHOD_INTERNAL means it's a wrapper decoder
+        // (like cuvid, some vaapi variants) that manages hardware internally
+        // and doesn't need hw_device_ctx set on the codec context
+        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_INTERNAL) {
+            needsHwDeviceCtx = false;
+            needsHwFramesCtx = false;
+            // Wrapper decoders handle pixel format internally
+            break;
+        }
+    }
+    
+    // If no hardware config found, fall back to our detection logic
+    if (hwPixFmt == AV_PIX_FMT_NONE) {
+        hwPixFmt = HardwareDecoder::getHardwarePixelFormat(hwDecoderType_, codecId);
+    }
+
+    // Get hardware device type
+    AVHWDeviceType hwDeviceType = HardwareDecoder::getFFmpegDeviceType(hwDecoderType_);
+    if (hwDeviceType == AV_HWDEVICE_TYPE_NONE) {
+        return false;
+    }
+
+    // Create hardware device context (needed for frame transfers even if not for codec)
+    int ret = av_hwdevice_ctx_create(&hwDeviceCtx_, hwDeviceType, nullptr, nullptr, 0);
+    if (ret < 0) {
+        hwDeviceCtx_ = nullptr;
+        return false;
+    }
 
     // Allocate codec context for hardware decoder
     codecCtx_ = avcodec_alloc_context3(hwCodec);
@@ -295,6 +338,17 @@ bool VideoFileInput::openHardwareCodec() {
     }
     codecCtxAllocated_ = true;  // Mark as allocated (must be freed)
 
+    // Set codec type and ID before copying parameters (following mpv's approach)
+    codecCtx_->codec_type = AVMEDIA_TYPE_VIDEO;
+    codecCtx_->codec_id = hwCodec->id;
+
+    // Set packet timebase from stream BEFORE copying parameters (required for cuvid and other hardware decoders)
+    // This prevents "Invalid pkt_timebase" warnings and ensures correct timestamp handling
+    AVStream* avStream = mediaReader_.getStream(videoStream_);
+    if (avStream) {
+        codecCtx_->pkt_timebase = avStream->time_base;
+    }
+
     // Copy codec parameters from stream
     if (avcodec_parameters_to_context(codecCtx_, codecParams) < 0) {
         avcodec_free_context(&codecCtx_);
@@ -304,42 +358,64 @@ bool VideoFileInput::openHardwareCodec() {
         return false;
     }
 
-    // Set hardware device context
-    codecCtx_->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
-    if (!codecCtx_->hw_device_ctx) {
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
-        return false;
-    }
+    // Set hardware acceleration flags (following mpv's approach)
+    codecCtx_->hwaccel_flags |= AV_HWACCEL_FLAG_IGNORE_LEVEL;
+    codecCtx_->hwaccel_flags |= AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH;
+#ifdef AV_HWACCEL_FLAG_UNSAFE_OUTPUT
+    // This flag primarily exists for nvdec which has a very limited output frame pool
+    // We copy frames anyway, so we don't need this extra implicit copy
+    codecCtx_->hwaccel_flags |= AV_HWACCEL_FLAG_UNSAFE_OUTPUT;
+#endif
 
-    // Get hardware pixel format
-    AVPixelFormat hwPixFmt = HardwareDecoder::getHardwarePixelFormat(hwDecoderType_, codecId);
-    if (hwPixFmt == AV_PIX_FMT_NONE) {
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
-        return false;
-    }
-
-    // Set hardware pixel format callback
-    codecCtx_->get_format = [](AVCodecContext* ctx, const AVPixelFormat* pix_fmts) -> AVPixelFormat {
-        const AVPixelFormat* p;
-        AVPixelFormat hwPixFmt = *reinterpret_cast<AVPixelFormat*>(ctx->opaque);
-        for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-            if (*p == hwPixFmt) {
-                return *p;
+    // Set hardware device context and pixel format callback based on codec requirements
+    // This applies uniformly to all decoder types (cuvid, vaapi, qsv, etc.)
+    // Wrapper decoders (with METHOD_INTERNAL) manage hardware internally
+    // and don't need hw_device_ctx set on the codec context
+    if (needsHwDeviceCtx || needsHwFramesCtx) {
+        // Set hardware device context
+        if (needsHwDeviceCtx) {
+            codecCtx_->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
+            if (!codecCtx_->hw_device_ctx) {
+                avcodec_free_context(&codecCtx_);
+                codecCtx_ = nullptr;
+                av_buffer_unref(&hwDeviceCtx_);
+                hwDeviceCtx_ = nullptr;
+                return false;
             }
         }
-        return AV_PIX_FMT_NONE;
-    };
-    codecCtx_->opaque = reinterpret_cast<void*>(static_cast<intptr_t>(hwPixFmt));
+        
+        // Set hardware pixel format callback if we have a valid pixel format
+        if (hwPixFmt == AV_PIX_FMT_NONE) {
+            avcodec_free_context(&codecCtx_);
+            codecCtx_ = nullptr;
+            av_buffer_unref(&hwDeviceCtx_);
+            hwDeviceCtx_ = nullptr;
+            return false;
+        }
+
+        // Set hardware pixel format callback
+        codecCtx_->get_format = [](AVCodecContext* ctx, const AVPixelFormat* pix_fmts) -> AVPixelFormat {
+            const AVPixelFormat* p;
+            AVPixelFormat hwPixFmt = *reinterpret_cast<AVPixelFormat*>(ctx->opaque);
+            for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+                if (*p == hwPixFmt) {
+                    return *p;
+                }
+            }
+            return AV_PIX_FMT_NONE;
+        };
+        codecCtx_->opaque = reinterpret_cast<void*>(static_cast<intptr_t>(hwPixFmt));
+    }
+    // Wrapper decoders (with METHOD_INTERNAL, like cuvid) handle hardware and pixel format
+    // selection internally, but we keep hwDeviceCtx_ for frame transfers
 
     // Open hardware codec
-    if (avcodec_open2(codecCtx_, hwCodec, nullptr) < 0) {
-        LOG_WARNING << "Failed to open hardware decoder " << hwCodecName << ", falling back to software";
+    ret = avcodec_open2(codecCtx_, hwCodec, nullptr);
+    if (ret < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
+        LOG_WARNING << "Failed to open hardware decoder " << hwCodecName 
+                    << ": " << errbuf << " (error code: " << ret << "), falling back to software";
         avcodec_free_context(&codecCtx_);
         codecCtx_ = nullptr;
         av_buffer_unref(&hwDeviceCtx_);
@@ -1247,21 +1323,51 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         return false;
     }
 
+    // Flush hardware decoder buffers after seeking (following mpv's approach)
+    // This ensures we start fresh after a seek
+    if (codecCtx_) {
+        avcodec_flush_buffers(codecCtx_);
+    }
+
     // Decode frame using hardware decoder
     AVPacket* packet = av_packet_alloc();
     if (!packet) {
         return false;
     }
 
-    int bailout = 20;
+    int bailout = 64; // Increased bailout for hardware decoders (like xjadeo uses 2 * seek_threshold)
     bool frameFinished = false;
 
     while (bailout > 0 && !frameFinished) {
+        // Try to receive a frame first (in case decoder has buffered frames)
+        int err = avcodec_receive_frame(codecCtx_, hwFrame_);
+        if (err == 0) {
+            frameFinished = true;
+            break;
+        } else if (err != AVERROR(EAGAIN)) {
+            // Error other than EAGAIN
+            --bailout;
+            if (err == AVERROR_EOF) {
+                // Decoder flushed, need to send more packets
+                continue;
+            } else {
+                // Other error, try to continue
+                continue;
+            }
+        }
+
+        // Need more input - read and send a packet
         av_packet_unref(packet);
-        int err = mediaReader_.readPacket(packet);
+        err = mediaReader_.readPacket(packet);
         if (err < 0) {
             if (err == AVERROR_EOF) {
-                --bailout;
+                // End of file - try to flush decoder
+                err = avcodec_send_packet(codecCtx_, nullptr); // nullptr flushes
+                if (err < 0 && err != AVERROR_EOF) {
+                    --bailout;
+                    continue;
+                }
+                // After flush, try to receive remaining frames
                 continue;
             } else {
                 av_packet_free(&packet);
@@ -1275,23 +1381,19 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
 
         // Send packet to hardware decoder
         err = avcodec_send_packet(codecCtx_, packet);
-
         if (err < 0) {
-            --bailout;
-            continue;
-        }
-
-        // Receive frame from hardware decoder
-        err = avcodec_receive_frame(codecCtx_, hwFrame_);
-        if (err == 0) {
-            frameFinished = true;
-        } else if (err == AVERROR(EAGAIN)) {
-            // Need more input
-            --bailout;
-            continue;
-        } else {
-            --bailout;
-            continue;
+            if (err == AVERROR(EAGAIN)) {
+                // Decoder input buffer full, try to receive a frame first
+                continue;
+            } else if (err == AVERROR_EOF) {
+                // Decoder already flushed
+                --bailout;
+                continue;
+            } else {
+                // Other error
+                --bailout;
+                continue;
+            }
         }
     }
 
@@ -1311,14 +1413,16 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
         return false;
     }
 
-    // Hardware frames need to be transferred to GPU texture
-    // The exact method depends on the hardware decoder type
-    
-    // For now, we'll need to download from hardware frame to CPU,
-    // then upload to GPU texture. In the future, we can optimize this
-    // to use zero-copy methods (e.g., CUDA interop, VAAPI surface export)
-    
-    // Allocate CPU frame for download
+    // Check if this is actually a hardware frame (has hardware format)
+    // Cuvid decoders can output frames in different formats - some may be CPU frames already
+    bool isHardwareFrame = (hwFrame->format == AV_PIX_FMT_CUDA || 
+                           hwFrame->format == AV_PIX_FMT_VAAPI ||
+                           hwFrame->format == AV_PIX_FMT_QSV ||
+                           hwFrame->format == AV_PIX_FMT_VIDEOTOOLBOX ||
+                           hwFrame->format == AV_PIX_FMT_DXVA2_VLD ||
+                           hwFrame->hw_frames_ctx != nullptr);
+
+    // Allocate CPU frame
     if (!frame_) {
         frame_ = av_frame_alloc();
         if (!frame_) {
@@ -1326,10 +1430,29 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
         }
     }
 
-    // Download from hardware frame to CPU frame
-    int ret = av_hwframe_transfer_data(frame_, hwFrame, 0);
-    if (ret < 0) {
-        return false;
+    // If it's not a hardware frame, copy it directly (cuvid might output CPU frames)
+    if (!isHardwareFrame) {
+        // Frame is already on CPU, copy it to our frame
+        if (av_frame_copy(frame_, hwFrame) < 0) {
+            return false;
+        }
+    } else {
+        // Hardware frames need to be transferred to GPU texture
+        // The exact method depends on the hardware decoder type
+        
+        // For now, we'll need to download from hardware frame to CPU,
+        // then upload to GPU texture. In the future, we can optimize this
+        // to use zero-copy methods (e.g., CUDA interop, VAAPI surface export)
+
+        // Download from hardware frame to CPU frame
+        // For cuvid frames, we need to ensure the device context is available
+        int ret = av_hwframe_transfer_data(frame_, hwFrame, 0);
+        if (ret < 0) {
+            char errbuf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
+            LOG_WARNING << "Failed to transfer hardware frame to CPU: " << errbuf << " (error code: " << ret << ")";
+            return false;
+        }
     }
 
     // Convert CPU frame to GPU texture
