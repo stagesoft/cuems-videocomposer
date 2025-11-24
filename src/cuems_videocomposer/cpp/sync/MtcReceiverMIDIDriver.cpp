@@ -134,13 +134,13 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     
     // Check if we have valid timecode by checking mtcHead (mtcreceiver sets this when timecode is received)
     // Note: curFrame can be 00:00:00:00 which is valid, so we check mtcHead instead
-    long int mtcHeadMs = MtcReceiver::mtcHead;
+    long int mtcHeadMs = MtcReceiver::mtcHead.load();
     if (mtcHeadMs == 0) {
         return -1;
     }
     
     // Check if timecode is running (for rolling state)
-    bool isRunning = MtcReceiver::isTimecodeRunning;
+    bool isRunning = MtcReceiver::isTimecodeRunning.load();
     
     // Debug: log timecode running state changes
     static bool lastRunningState = false;

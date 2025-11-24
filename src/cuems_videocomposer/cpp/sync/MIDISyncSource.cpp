@@ -122,7 +122,7 @@ int64_t MIDISyncSource::pollFrame(uint8_t* rolling) {
         MtcReceiverMIDIDriver* mtcDriver = dynamic_cast<MtcReceiverMIDIDriver*>(driver_.get());
         if (mtcDriver) {
             // mtcreceiver tracks rolling state via isTimecodeRunning
-            *rolling = (frame >= 0 && MtcReceiver::isTimecodeRunning) ? 1 : 0;
+            *rolling = (frame >= 0 && MtcReceiver::isTimecodeRunning.load()) ? 1 : 0;
         } else
 #endif
         {
