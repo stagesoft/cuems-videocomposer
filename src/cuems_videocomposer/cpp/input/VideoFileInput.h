@@ -31,6 +31,13 @@ public:
     VideoFileInput();
     virtual ~VideoFileInput();
 
+    enum class HardwareDecodePreference {
+        AUTO,
+        SOFTWARE_ONLY,
+        VAAPI,
+        CUDA
+    };
+
     // InputSource interface
     bool open(const std::string& source) override;
     void close() override;
@@ -58,6 +65,8 @@ public:
 
     void setNoIndex(bool noIndex) { noIndex_ = noIndex; }
     bool getNoIndex() const { return noIndex_; }
+
+    void setHardwareDecodePreference(HardwareDecodePreference preference) { hwPreference_ = preference; }
 
 private:
     struct FrameIndex {
@@ -101,6 +110,7 @@ private:
     HardwareDecoder::Type hwDecoderType_;  // Type of hardware decoder in use
     bool useHardwareDecoding_;        // Whether hardware decoding is enabled
     bool codecCtxAllocated_;          // Whether codecCtx_ was allocated separately (hardware) or is part of stream (software)
+    HardwareDecodePreference hwPreference_;
 
     // Frame indexing
     FrameIndex* frameIndex_;

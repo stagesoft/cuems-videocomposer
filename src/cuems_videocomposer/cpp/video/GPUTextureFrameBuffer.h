@@ -20,11 +20,27 @@ namespace videocomposer {
  * - Hardware-decoded frames (already on GPU)
  * 
  * Key feature: Zero-copy - frames stay on GPU, no CPU→GPU transfer needed
+ * 
+ * Copy semantics: Copying creates a non-owning reference to the same texture.
+ * Only the original owner (the instance that called allocate()) will delete
+ * the texture when destroyed. Copies are "views" that don't own the texture.
  */
 class GPUTextureFrameBuffer {
 public:
     GPUTextureFrameBuffer();
     ~GPUTextureFrameBuffer();
+    
+    // Copy constructor - creates non-owning copy (view)
+    GPUTextureFrameBuffer(const GPUTextureFrameBuffer& other);
+    
+    // Copy assignment - creates non-owning copy (view)
+    GPUTextureFrameBuffer& operator=(const GPUTextureFrameBuffer& other);
+    
+    // Move constructor - transfers ownership
+    GPUTextureFrameBuffer(GPUTextureFrameBuffer&& other) noexcept;
+    
+    // Move assignment - transfers ownership
+    GPUTextureFrameBuffer& operator=(GPUTextureFrameBuffer&& other) noexcept;
 
     // Allocate GPU texture for given format and dimensions
     bool allocate(const FrameInfo& info, GLenum textureFormat, bool isHAP = false);
@@ -63,6 +79,7 @@ private:
     GLenum textureFormat_;    // OpenGL texture format
     FrameInfo info_;          // Frame information
     bool isHAP_;              // True if this is a HAP texture (DXT1/DXT5)
+    bool ownsTexture_;        // True if this instance owns the texture (should delete on destruction)
 };
 
 } // namespace videocomposer

@@ -311,6 +311,7 @@ class CodecFormatTest:
             str(self.videocomposer_bin),
             "-v",  # Verbose
             "--osc", str(osc_port),  # Enable OSC for OSD control
+            "--hw-decode", "software",  # Force software decoding for testing
             str(video_path)
         ]
         

@@ -50,6 +50,7 @@ VideoFileInput::VideoFileInput()
     , hwDecoderType_(HardwareDecoder::Type::NONE)
     , useHardwareDecoding_(false)
     , codecCtxAllocated_(false)
+    , hwPreference_(HardwareDecodePreference::AUTO)
 {
     frameRateQ_ = {1, 1};
     frameInfo_ = {};
@@ -176,12 +177,16 @@ bool VideoFileInput::open(const std::string& source) {
         frameCount_ = frameInfo_.totalFrames; // Use calculated frame count
     }
 
-    // Update C globals for compatibility (used by display backends and SMPTEWrapper)
-    movie_width = width;
-    movie_height = height;
-    movie_aspect = frameInfo_.aspect;
-    ::framerate = framerate;
-    frames = frameInfo_.totalFrames;
+    // Update C globals for compatibility (used by legacy display backends)
+    // Only update if this is the first layer (globals are at default values)
+    // This prevents multi-layer scenarios from overwriting each other's values
+    if (movie_width == 640 && movie_height == 360) {
+        movie_width = width;
+        movie_height = height;
+        movie_aspect = frameInfo_.aspect;
+        ::framerate = framerate;
+        frames = frameInfo_.totalFrames;
+    }
 
     ready_ = true;
     currentFrame_ = -1;
@@ -195,12 +200,10 @@ void VideoFileInput::close() {
     currentFrame_ = -1;
     frameInfo_ = {};
     
-    // Reset C globals
-    movie_width = 640;
-    movie_height = 360;
-    movie_aspect = 640.0f / 360.0f;
-    ::framerate = 1.0;
-    frames = 1;
+    // NOTE: Don't reset C globals here. In multi-layer scenarios,
+    // resetting would break other layers that are still using the globals.
+    // The globals will be reset when the application exits or when
+    // the last layer is removed.
 }
 
 bool VideoFileInput::isReady() const {
@@ -224,19 +227,47 @@ bool VideoFileInput::openHardwareCodec() {
         return false;
     }
 
-    LOG_INFO << "Attempting to open hardware decoder for codec: " << codecName;
-
-    // Detect available hardware decoder
-    hwDecoderType_ = HardwareDecoder::detectAvailable();
-    if (hwDecoderType_ == HardwareDecoder::Type::NONE) {
-        // HardwareDecoder::isAvailableForCodec() will log the details, no need to duplicate
+    if (hwPreference_ == HardwareDecodePreference::SOFTWARE_ONLY) {
+        LOG_VERBOSE << "Hardware decoding disabled via preference, using software decoder";
         return false;
     }
 
-    // Check if hardware decoder is available for this codec
-    // Pass the already-detected type to avoid calling detectAvailable() again
-    // HardwareDecoder::isAvailableForCodec() already logs the result, no need to duplicate
+    LOG_INFO << "Attempting to open hardware decoder for codec: " << codecName;
+
+    bool forceSpecificDecoder = false;
+    HardwareDecoder::Type forcedType = HardwareDecoder::Type::NONE;
+    switch (hwPreference_) {
+        case HardwareDecodePreference::VAAPI:
+            forceSpecificDecoder = true;
+            forcedType = HardwareDecoder::Type::VAAPI;
+            break;
+        case HardwareDecodePreference::CUDA:
+            forceSpecificDecoder = true;
+            forcedType = HardwareDecoder::Type::CUDA;
+            break;
+        default:
+            break;
+    }
+
+    if (forceSpecificDecoder) {
+        hwDecoderType_ = forcedType;
+    } else {
+        hwDecoderType_ = HardwareDecoder::detectAvailable();
+    }
+
+    if (hwDecoderType_ == HardwareDecoder::Type::NONE) {
+        if (forceSpecificDecoder) {
+            LOG_WARNING << "Requested hardware decoder (" << HardwareDecoder::getName(forcedType)
+                        << ") not available on this system, falling back to software decoding";
+        }
+        return false;
+    }
+
     if (!HardwareDecoder::isAvailableForCodec(codecId, hwDecoderType_)) {
+        if (forceSpecificDecoder) {
+            LOG_WARNING << "Requested hardware decoder (" << HardwareDecoder::getName(forcedType)
+                        << ") is not available for codec " << codecName << ", falling back to software";
+        }
         return false;
     }
 

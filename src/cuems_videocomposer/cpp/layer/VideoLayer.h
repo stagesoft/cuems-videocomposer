@@ -10,6 +10,7 @@
 #include "../video/GPUTextureFrameBuffer.h"
 #include <memory>
 #include <cstdint>
+#include <mutex>
 
 namespace videocomposer {
 
@@ -34,9 +35,14 @@ public:
     InputSource* getInputSource() const;
     SyncSource* getSyncSource() const;
 
-    // Properties
+    // Properties (thread-safe access)
+    // Use lockProperties() when modifying multiple properties atomically
     LayerProperties& properties();
     const LayerProperties& properties() const;
+    
+    // Thread-safe property access for rendering
+    // Returns a copy of properties to avoid race conditions
+    LayerProperties getPropertiesCopy() const;
 
     // Playback control
     bool play();
@@ -100,6 +106,9 @@ private:
     // Backward compatibility: CPU frame buffer cache
     mutable FrameBuffer frameBufferCache_;
     mutable bool frameBufferCacheValid_;
+    
+    // Mutex for thread-safe property access
+    mutable std::mutex propertiesMutex_;
 };
 
 } // namespace videocomposer

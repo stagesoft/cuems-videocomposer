@@ -185,11 +185,18 @@ void VideoLayer::reverse() {
 }
 
 // Delegate property access to display
+// Note: These return references for backward compatibility with OSC handlers
+// For thread-safe rendering, use getPropertiesCopy()
 LayerProperties& VideoLayer::properties() {
     return display_.getProperties();
 }
 
 const LayerProperties& VideoLayer::properties() const {
+    return display_.getProperties();
+}
+
+LayerProperties VideoLayer::getPropertiesCopy() const {
+    std::lock_guard<std::mutex> lock(propertiesMutex_);
     return display_.getProperties();
 }
 

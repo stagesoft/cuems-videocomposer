@@ -3,6 +3,8 @@
 #include <sstream>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
 
 namespace videocomposer {
 
@@ -29,6 +31,7 @@ void ConfigurationManager::loadDefaults() {
     setBool("start_fullscreen", false);
     setBool("start_ontop", false);
     setBool("want_noindex", false); // Index frames by default for frame-accurate seeking
+    setString("hardware_decoder", "auto");
 }
 
 bool ConfigurationManager::loadFromFile(const std::string& filename) {
@@ -127,6 +130,13 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
             setBool("start_ontop", true);
         } else if (arg == "--noindex" || arg == "-n") {
             setBool("want_noindex", true);
+        } else if (arg == "--hw-decoder" || arg == "--hw-decode" || arg == "--hw" || arg == "--decode") {
+            if (i + 1 < argc) {
+                std::string value = argv[++i];
+                // store lowercase to simplify comparisons
+                std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+                setString("hardware_decoder", value);
+            }
         } else if (arg[0] != '-') {
             // Assume it's a movie file
             if (movieFile_.empty()) {
@@ -215,6 +225,7 @@ void ConfigurationManager::printUsage() const {
     printf("  -Q, --mq                enable message queue remote control\n");
     printf("  -s, --fullscreen        start in fullscreen mode\n");
     printf("  -a, --ontop             start window on top\n");
+    printf("  --hw-decode MODE      select hardware decoder: auto (default), software, vaapi, cuda\n");
     printf("\n");
     printf("MIDI Sync:\n");
     printf("  The application uses ALSA Sequencer for MIDI Time Code (MTC) synchronization.\n");

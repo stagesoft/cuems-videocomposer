@@ -61,22 +61,15 @@ bool GPUImageProcessor::canProcess(const LayerProperties& properties, bool isHAP
 }
 
 bool GPUImageProcessor::canSkip(const LayerProperties& properties, bool isHAPCodec) const {
-    // Check if any modifications are enabled
+    // Check if any GPU-side modifications are enabled
+    // NOTE: Scale and rotation are handled by OpenGL transforms, not texture processing
+    // Only crop and panorama require texture coordinate manipulation
     bool hasCrop = properties.crop.enabled;
     bool hasPanorama = properties.panoramaMode;
-    bool hasScale = (std::abs(properties.scaleX - 1.0f) > 0.001f || 
-                     std::abs(properties.scaleY - 1.0f) > 0.001f);
-    bool hasRotation = (std::abs(properties.rotation) > 0.001f);
 
-    // For HAP codecs, we can skip if only opacity/position changes
-    // (these can be handled in renderer via texture coordinates and blending)
-    if (isHAPCodec) {
-        // HAP: Skip if only opacity/position (no crop/panorama/scale/rotation)
-        return !hasCrop && !hasPanorama && !hasScale && !hasRotation;
-    }
-
-    // For other codecs, skip only if no modifications at all
-    return !hasCrop && !hasPanorama && !hasScale && !hasRotation;
+    // Skip GPU texture processing if no crop/panorama
+    // (scale/rotation/opacity are handled by OpenGL transforms and blending)
+    return !hasCrop && !hasPanorama;
 }
 
 void GPUImageProcessor::calculateTextureCoordinates(const LayerProperties& properties,

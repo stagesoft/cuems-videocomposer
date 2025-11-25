@@ -33,45 +33,27 @@ bool CPUImageProcessor::processCPU(const FrameBuffer& input, FrameBuffer& output
         return true;
     }
 
-    // Apply modifications in order: crop/panorama -> scale -> rotation
-    FrameBuffer temp1, temp2;
+    // Apply CPU-side modifications: crop/panorama only
+    // NOTE: Scale and rotation are handled by OpenGL transforms, not CPU processing
+    FrameBuffer temp1;
     const FrameBuffer* current = &input;
     FrameBuffer* next = &temp1;
 
-    // Step 1: Crop or Panorama
+    // Step 1: Crop or Panorama (CPU-side pixel manipulation)
     if (properties.panoramaMode) {
         if (!applyPanorama(*current, *next, properties, frameInfo)) {
             return false;
         }
         current = next;
-        next = (next == &temp1) ? &temp2 : &temp1;
     } else if (properties.crop.enabled) {
         if (!applyCrop(*current, *next, properties, frameInfo)) {
             return false;
         }
         current = next;
-        next = (next == &temp1) ? &temp2 : &temp1;
     }
 
-    // Step 2: Scale (if needed)
-    bool hasScale = (std::abs(properties.scaleX - 1.0f) > 0.001f || 
-                     std::abs(properties.scaleY - 1.0f) > 0.001f);
-    if (hasScale) {
-        if (!applyScale(*current, *next, properties, frameInfo)) {
-            return false;
-        }
-        current = next;
-        next = (next == &temp1) ? &temp2 : &temp1;
-    }
-
-    // Step 3: Rotation (if needed)
-    bool hasRotation = (std::abs(properties.rotation) > 0.001f);
-    if (hasRotation) {
-        if (!applyRotation(*current, *next, properties, frameInfo)) {
-            return false;
-        }
-        current = next;
-    }
+    // NOTE: Scale and rotation are NOT applied here - they are handled by OpenGL
+    // This avoids double-transformation (CPU + GPU) which causes garbled pixels
 
     // Copy final result to output
     if (current != &output) {
@@ -102,15 +84,14 @@ bool CPUImageProcessor::canProcess(const LayerProperties& properties, bool isHAP
 }
 
 bool CPUImageProcessor::canSkip(const LayerProperties& properties, bool isHAPCodec) const {
-    // Check if any modifications are enabled
+    // Check if any CPU-side modifications are enabled
+    // NOTE: Scale and rotation are handled by OpenGL transforms, not CPU processing
+    // Only crop and panorama require CPU-side pixel manipulation
     bool hasCrop = properties.crop.enabled;
     bool hasPanorama = properties.panoramaMode;
-    bool hasScale = (std::abs(properties.scaleX - 1.0f) > 0.001f || 
-                     std::abs(properties.scaleY - 1.0f) > 0.001f);
-    bool hasRotation = (std::abs(properties.rotation) > 0.001f);
 
-    // Skip if no modifications at all
-    return !hasCrop && !hasPanorama && !hasScale && !hasRotation;
+    // Skip CPU processing if no crop/panorama (scale/rotation handled by OpenGL)
+    return !hasCrop && !hasPanorama;
 }
 
 bool CPUImageProcessor::applyCrop(const FrameBuffer& input, FrameBuffer& output,

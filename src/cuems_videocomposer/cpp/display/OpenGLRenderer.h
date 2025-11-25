@@ -86,7 +86,9 @@ private:
                            float texX, float texY, float texWidth, float texHeight);
     void applyLayerTransform(const VideoLayer* layer);
     void applyLayerTransform(const VideoLayer* layer, float quad_x, float quad_y);
+    void applyLayerTransformFromProps(const LayerProperties& props, float quad_x, float quad_y);
     void applyBlendMode(const VideoLayer* layer);
+    void applyBlendModeFromProps(const LayerProperties& props);
     bool uploadFrameToTexture(const FrameBuffer& frame);
     bool bindGPUTexture(const GPUTextureFrameBuffer& gpuFrame);
     void calculateCropCoordinates(const VideoLayer* layer, float& texX, float& texY, 

@@ -45,19 +45,90 @@ GPUTextureFrameBuffer::GPUTextureFrameBuffer()
     : textureId_(0)
     , textureFormat_(0)
     , isHAP_(false)
+    , ownsTexture_(false)
 {
 }
 
 GPUTextureFrameBuffer::~GPUTextureFrameBuffer() {
-    release();
+    // Only release if we own the texture
+    if (ownsTexture_) {
+        release();
+    }
+}
+
+GPUTextureFrameBuffer::GPUTextureFrameBuffer(const GPUTextureFrameBuffer& other)
+    : textureId_(other.textureId_)
+    , textureFormat_(other.textureFormat_)
+    , info_(other.info_)
+    , isHAP_(other.isHAP_)
+    , ownsTexture_(false)  // Copy does NOT own the texture
+{
+}
+
+GPUTextureFrameBuffer& GPUTextureFrameBuffer::operator=(const GPUTextureFrameBuffer& other) {
+    if (this != &other) {
+        // Release our texture if we own it
+        if (ownsTexture_) {
+            release();
+        }
+        
+        // Copy the other's data (but don't take ownership)
+        textureId_ = other.textureId_;
+        textureFormat_ = other.textureFormat_;
+        info_ = other.info_;
+        isHAP_ = other.isHAP_;
+        ownsTexture_ = false;  // Copy does NOT own the texture
+    }
+    return *this;
+}
+
+GPUTextureFrameBuffer::GPUTextureFrameBuffer(GPUTextureFrameBuffer&& other) noexcept
+    : textureId_(other.textureId_)
+    , textureFormat_(other.textureFormat_)
+    , info_(other.info_)
+    , isHAP_(other.isHAP_)
+    , ownsTexture_(other.ownsTexture_)  // Take ownership from other
+{
+    // Clear other so it doesn't delete the texture
+    other.textureId_ = 0;
+    other.textureFormat_ = 0;
+    other.isHAP_ = false;
+    other.ownsTexture_ = false;
+}
+
+GPUTextureFrameBuffer& GPUTextureFrameBuffer::operator=(GPUTextureFrameBuffer&& other) noexcept {
+    if (this != &other) {
+        // Release our texture if we own it
+        if (ownsTexture_) {
+            release();
+        }
+        
+        // Take other's data and ownership
+        textureId_ = other.textureId_;
+        textureFormat_ = other.textureFormat_;
+        info_ = other.info_;
+        isHAP_ = other.isHAP_;
+        ownsTexture_ = other.ownsTexture_;
+        
+        // Clear other so it doesn't delete the texture
+        other.textureId_ = 0;
+        other.textureFormat_ = 0;
+        other.isHAP_ = false;
+        other.ownsTexture_ = false;
+    }
+    return *this;
 }
 
 bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat, bool isHAP) {
-    release();
+    // Release old texture if we own it
+    if (ownsTexture_) {
+        release();
+    }
     
     info_ = info;
     textureFormat_ = textureFormat;
     isHAP_ = isHAP;
+    ownsTexture_ = true;  // We will own the new texture
 
     LOG_VERBOSE << "GPUTextureFrameBuffer: Allocating texture (width=" << info.width 
                << ", height=" << info.height << ", format=0x" << std::hex << textureFormat 
@@ -121,12 +192,13 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
 }
 
 void GPUTextureFrameBuffer::release() {
-    if (textureId_ != 0) {
+    if (textureId_ != 0 && ownsTexture_) {
         glDeleteTextures(1, &textureId_);
-        textureId_ = 0;
     }
+    textureId_ = 0;
     textureFormat_ = 0;
     isHAP_ = false;
+    ownsTexture_ = false;
 }
 
 bool GPUTextureFrameBuffer::uploadCompressedData(const uint8_t* data, size_t size, int width, int height, GLenum format) {

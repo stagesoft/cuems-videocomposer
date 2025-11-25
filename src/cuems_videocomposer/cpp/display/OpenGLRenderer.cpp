@@ -281,9 +281,10 @@ void OpenGLRenderer::applyLayerTransform(const VideoLayer* layer) {
 
 void OpenGLRenderer::applyLayerTransform(const VideoLayer* layer, float quad_x, float quad_y) {
     if (!layer) return;
+    applyLayerTransformFromProps(layer->properties(), quad_x, quad_y);
+}
 
-    const auto& props = layer->properties();
-    
+void OpenGLRenderer::applyLayerTransformFromProps(const LayerProperties& props, float quad_x, float quad_y) {
     // Apply position (x, y) - convert from pixel coordinates to normalized coordinates
     // Viewport is -1 to 1, so we need to scale by viewport size
     if (viewportWidth_ > 0 && viewportHeight_ > 0) {
@@ -337,9 +338,10 @@ void OpenGLRenderer::applyLayerTransform(const VideoLayer* layer, float quad_x, 
 
 void OpenGLRenderer::applyBlendMode(const VideoLayer* layer) {
     if (!layer) return;
+    applyBlendModeFromProps(layer->properties());
+}
 
-    const auto& props = layer->properties();
-    
+void OpenGLRenderer::applyBlendModeFromProps(const LayerProperties& props) {
     switch (props.blendMode) {
         case LayerProperties::NORMAL:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -362,7 +364,8 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         return false;
     }
 
-    const auto& props = layer->properties();
+    // Get a thread-safe copy of properties to avoid race conditions with OSC updates
+    const LayerProperties props = layer->getPropertiesCopy();
     if (!props.visible) {
         return false;
     }
@@ -465,11 +468,11 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         // Save matrix state before applying transforms
         glPushMatrix();
         
-        // Apply layer transform (includes position, scale, rotation, and corner deformation)
-        applyLayerTransform(layer, quad_x, quad_y);
+        // Apply layer transform using the thread-safe props copy
+        applyLayerTransformFromProps(props, quad_x, quad_y);
 
-        // Apply blend mode
-        applyBlendMode(layer);
+        // Apply blend mode using the thread-safe props copy
+        applyBlendModeFromProps(props);
 
         // Set opacity
         glColor4f(1.0f, 1.0f, 1.0f, props.opacity);
@@ -480,9 +483,9 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         float w = 2.0f * quad_x;
         float h = 2.0f * quad_y;
 
-                // Calculate texture coordinates for cropping/panorama
+                // Calculate texture coordinates for cropping/panorama using thread-safe props copy
                 float texX = 0.0f, texY = 0.0f, texWidth = 1.0f, texHeight = 1.0f;
-                calculateCropCoordinates(layer, texX, texY, texWidth, texHeight);
+                calculateCropCoordinatesFromProps(props, frameInfo, texX, texY, texWidth, texHeight);
 
                 // Regular texture uses GL_TEXTURE_RECTANGLE_ARB (already bound above)
                 // HAP is now treated as regular RGBA, not compressed
@@ -501,6 +504,13 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 glDisable(GL_TEXTURE_RECTANGLE_ARB);
 
                 glPopMatrix();
+                
+                // Reset blend mode to default after rendering layer
+                // This prevents blend mode from one layer affecting the next
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                
+                // Reset color to white (in case opacity was modified)
+                glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
                 return true;
     } else {
@@ -670,6 +680,13 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
     // Disable texture
     glDisable(target);
     glPopMatrix();
+    
+    // Reset blend mode to default after rendering layer
+    // This prevents blend mode from one layer affecting the next
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    
+    // Reset color to white (in case opacity was modified)
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
     return true;
 }

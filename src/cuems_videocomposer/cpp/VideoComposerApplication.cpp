@@ -46,6 +46,8 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <algorithm>
+#include <cctype>
 
 // C MIDI bridge functions
 extern "C" {
@@ -542,10 +544,22 @@ std::unique_ptr<InputSource> VideoComposerApplication::createInputSourceFromFile
     // Create input source with codec-aware routing
     // Set no-index option before opening (to avoid reopening)
     bool noIndex = config_->getBool("want_noindex", false);
+    std::string hwPrefStr = config_->getString("hardware_decoder", "auto");
+    std::transform(hwPrefStr.begin(), hwPrefStr.end(), hwPrefStr.begin(), [](unsigned char c){ return std::tolower(c); });
+    
+    VideoFileInput::HardwareDecodePreference hwPref = VideoFileInput::HardwareDecodePreference::AUTO;
+    if (hwPrefStr == "software" || hwPrefStr == "cpu") {
+        hwPref = VideoFileInput::HardwareDecodePreference::SOFTWARE_ONLY;
+    } else if (hwPrefStr == "vaapi") {
+        hwPref = VideoFileInput::HardwareDecodePreference::VAAPI;
+    } else if (hwPrefStr == "cuda" || hwPrefStr == "nvdec") {
+        hwPref = VideoFileInput::HardwareDecodePreference::CUDA;
+    }
     
     // First, detect codec by opening with VideoFileInput
     auto tempInput = std::make_unique<VideoFileInput>();
     tempInput->setNoIndex(noIndex);  // Set before opening to avoid reopening
+    tempInput->setHardwareDecodePreference(hwPref);
     if (!tempInput->open(filepath)) {
         return nullptr;
     }
