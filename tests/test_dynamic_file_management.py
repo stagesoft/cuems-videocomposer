@@ -87,7 +87,6 @@ class DynamicFileManagementTest:
     
     def _monitor_system(self):
         """Monitor system in background thread - prints even if main thread hangs."""
-        print("DEBUG: Monitoring thread started")
         start_time = time.time()
         last_print = start_time
         
@@ -139,10 +138,12 @@ class DynamicFileManagementTest:
             if 'DISPLAY' not in env:
                 env['DISPLAY'] = ':0'
             
+            # Don't capture stdout/stderr to avoid pipe buffer blocking
+            # When verbose output fills the pipe buffer, videocomposer can hang
             self.videocomposer_process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=None,  # Let output go to terminal
+                stderr=None,  # Let errors go to terminal
                 text=True,
                 bufsize=1,
                 env=env
@@ -255,7 +256,6 @@ class DynamicFileManagementTest:
         """Progressively adjust image controls over time - continuous and smooth."""
         print(f"\n=== Progressive Image Adjustments ({duration} seconds) ===")
         print("Making continuous smooth adjustments to position, scale, rotation, and opacity...")
-        print("DEBUG: Monitoring for hangs - will print progress every 2 seconds...")
         
         start_time = time.time()
         interval = 0.2  # Adjust every 200ms for smoother animation (~5 updates per second)

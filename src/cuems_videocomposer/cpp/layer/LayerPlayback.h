@@ -98,6 +98,7 @@ private:
     bool wasRolling_;        // Previous rolling state for change detection
     int64_t lastLoggedFrame_; // Last logged frame for periodic logging
     int debugCounter_;       // Debug counter for periodic logging
+    bool loggedExceededDuration_; // True if we've logged "frame exceeded duration" message
     
     // Frame buffers (CPU and GPU)
     FrameBuffer cpuFrameBuffer_;

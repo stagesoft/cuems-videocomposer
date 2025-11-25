@@ -20,6 +20,7 @@ LayerPlayback::LayerPlayback()
     , wasRolling_(false)
     , lastLoggedFrame_(-1)
     , debugCounter_(0)
+    , loggedExceededDuration_(false)
     , frameOnGPU_(false)
 {
 }
@@ -187,13 +188,20 @@ void LayerPlayback::updateFromSyncSource() {
             
             if (totalFrames > 0) {
                 // Clamp to valid range instead of wrapping
+                // Only log once to avoid flooding output
                 if (adjustedFrame >= totalFrames) {
-                    LOG_VERBOSE << "Frame " << adjustedFrame << " exceeds video duration (" << totalFrames << "), clamping to " << (totalFrames - 1);
+                    if (!loggedExceededDuration_) {
+                        LOG_INFO << "Frame " << adjustedFrame << " exceeds video duration (" << totalFrames << "), clamping to " << (totalFrames - 1) << " (will not log again)";
+                        loggedExceededDuration_ = true;
+                    }
                     adjustedFrame = totalFrames - 1;
-                }
-                if (adjustedFrame < 0) {
+                } else if (adjustedFrame < 0) {
                     LOG_VERBOSE << "Frame " << adjustedFrame << " is negative, clamping to 0";
                     adjustedFrame = 0;
+                    loggedExceededDuration_ = false; // Reset since we're back in valid range
+                } else {
+                    // Frame is in valid range, reset the flag
+                    loggedExceededDuration_ = false;
                 }
             }
         }
