@@ -63,7 +63,6 @@ private:
     bool initializeConfiguration(int argc, char** argv);
     bool initializeDisplay();
     bool initializeRemoteControl();
-    bool initializeMIDI();
     bool initializeLayerManager();
     bool createInitialLayer();
     bool initializeGlobalSyncSource();

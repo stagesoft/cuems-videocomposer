@@ -353,7 +353,7 @@ add_definitions(-DCFG_WARN_ONLY)
 # add_definitions(-DDND)  # Drag and drop removed
 add_definitions(-DWINMENU)
 # add_definitions(-DXDLG)  # Menu removed
-add_definitions(-DXFIB)
+# add_definitions(-DXFIB)  # File browser removed (not used - files loaded via OSC)
 add_definitions(-DCOLOREQ)
 
 if(NOT ENABLE_CUEMS)
@@ -394,7 +394,7 @@ set(C_SOURCES
     src/cuems_videocomposer/display.c
     # src/cuems_videocomposer/display_x_dnd.c - Removed (drag and drop functionality removed)
     # src/cuems_videocomposer/display_x_dialog.c - Removed (menu functionality removed)
-    src/cuems_videocomposer/libsofd.c
+    # src/cuems_videocomposer/libsofd.c - Removed (file browser not used - files loaded via OSC)
     # src/cuems_videocomposer/display_mac.c - Removed (Linux-only project, macOS not supported)
     src/cuems_videocomposer/display_x11.c
     # src/cuems_videocomposer/display_sdl.c - Removed (SDL display not being migrated, Linux-only project)
@@ -447,7 +447,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
     src/cuems_videocomposer/cpp/utils/SMPTEWrapper.cpp
     src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
-    src/cuems_videocomposer/cpp/utils/MIDIBridge.cpp
+    # src/cuems_videocomposer/cpp/utils/MIDIBridge.cpp - Removed (using MIDISyncSource directly)
     # Note: Logger.h is header-only, no .cpp needed
 )
 

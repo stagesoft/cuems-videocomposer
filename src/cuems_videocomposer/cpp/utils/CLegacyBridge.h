@@ -4,37 +4,24 @@
 /**
  * CLegacyBridge - Bridge between C++ code and legacy C code
  * 
- * Provides access to C globals and functions that need to be shared
- * between the old C codebase and new C++ code during migration.
+ * Provides access to C globals that are still used by the legacy C display
+ * backend code (display.c, display_x11.c, display_glx.c).
  * 
- * This header should be included in C++ files that need to interact
- * with existing C code.
+ * NOTE: This is a minimal bridge for the remaining C display code.
+ * - Video file globals have been removed (C++ uses per-layer FrameInfo)
+ * - MIDI functions have been removed (C++ uses MIDISyncSource directly)
+ * - SMPTEWrapper.cpp still uses some globals for C compatibility
  */
 
 extern "C" {
-    // Video file information (from xjadeo.c)
-    extern int movie_width;
-    extern int movie_height;
-    extern float movie_aspect;
+    // Framerate (used by C display code for screensaver timing, and SMPTEWrapper)
     extern double framerate;
-    extern int64_t frames;
     extern int have_dropframes;
     
-    // Configuration flags
+    // Configuration flags (used by C display code for logging)
     extern int want_quiet;
     extern int want_verbose;
     extern int want_debug;
-    
-    // MIDI functions (DEPRECATED - use MIDISyncSource C++ implementation instead)
-    // These are kept for backward compatibility with legacy C code only
-    // The C++ MIDI implementation is complete and does not use these C functions
-    // All configuration is now handled through ConfigurationManager
-    // NOTE: C++ code should use MIDISyncSource class, not these functions
-    int midi_connected(void);
-    int64_t midi_poll_frame(void);
-    void midi_open(char* midiid);
-    void midi_close(void);
-    const char* midi_driver_name();
 }
 
 #endif // VIDEOCOMPOSER_CLEGACYBRIDGE_H

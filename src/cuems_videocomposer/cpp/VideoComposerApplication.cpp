@@ -49,13 +49,6 @@
 #include <algorithm>
 #include <cctype>
 
-// C MIDI bridge functions
-extern "C" {
-    void midi_open(char *midiid);
-    int midi_choose_driver(const char *driver);
-    int midi_connected(void);
-}
-
 namespace videocomposer {
 
 VideoComposerApplication::VideoComposerApplication()
@@ -122,11 +115,7 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
         // Don't fail initialization if remote control fails
     }
 
-    // Initialize MIDI sync source if ALSA Sequencer is default
-    // This ensures the MIDI port is opened and visible in aconnect
-    initializeMIDI();
-    
-    // Initialize global sync source (shared across all layers)
+    // Initialize global MIDI sync source (shared across all layers)
     initializeGlobalSyncSource();
 
     // Create initial layer if movie file provided
@@ -194,44 +183,6 @@ bool VideoComposerApplication::initializeRemoteControl() {
     }
     
     return true;
-}
-
-bool VideoComposerApplication::initializeMIDI() {
-    // Initialize MIDI sync source - prefer mtcreceiver (proven working, like cuems-audioplayer)
-    // The C MIDI bridge will handle the actual port opening
-    
-    // Check if MIDI is explicitly disabled
-    std::string midiPort = config_->getString("midi_port", "-1");
-    if (midiPort == "none" || midiPort == "off") {
-        return true; // MIDI disabled, but that's OK
-    }
-    
-    // Use C MIDI bridge to open MIDI port
-    // This ensures compatibility with C display backends
-    // (Functions declared at top of file)
-    
-    // Try mtcreceiver first (proven working implementation from cuems-audioplayer)
-    // midi_choose_driver() already has fallback logic to ALSA-Sequencer if mtcreceiver fails
-    // Returns 1 on success, 0 on failure
-    if (midi_choose_driver("mtcreceiver")) {
-        // Driver selected successfully (mtcreceiver or ALSA-Sequencer fallback)
-        // Open MIDI port (autodetect if port not specified)
-        std::vector<char> portBuf(midiPort.begin(), midiPort.end());
-        portBuf.push_back('\0');
-        midi_open(portBuf.data());
-        
-        // Check if connection succeeded
-        if (midi_connected()) {
-            LOG_INFO << "MIDI sync source initialized (mtcreceiver preferred)";
-            LOG_INFO << "MTC: Waiting for MIDI Time Code...";
-        } else {
-            LOG_WARNING << "MIDI sync source initialization failed (continuing without MIDI)";
-        }
-    } else {
-        LOG_WARNING << "No MIDI drivers available (mtcreceiver and ALSA Sequencer both unavailable)";
-    }
-    
-    return true; // Don't fail initialization if MIDI fails
 }
 
 bool VideoComposerApplication::initializeLayerManager() {
