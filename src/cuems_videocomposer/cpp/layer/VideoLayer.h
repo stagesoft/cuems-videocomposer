@@ -10,7 +10,6 @@
 #include "../video/GPUTextureFrameBuffer.h"
 #include <memory>
 #include <cstdint>
-#include <mutex>
 
 namespace videocomposer {
 
@@ -35,14 +34,9 @@ public:
     InputSource* getInputSource() const;
     SyncSource* getSyncSource() const;
 
-    // Properties (thread-safe access)
-    // Use lockProperties() when modifying multiple properties atomically
+    // Properties access
     LayerProperties& properties();
     const LayerProperties& properties() const;
-    
-    // Thread-safe property access for rendering
-    // Returns a copy of properties to avoid race conditions
-    LayerProperties getPropertiesCopy() const;
 
     // Playback control
     bool play();
@@ -67,9 +61,9 @@ public:
     // Returns CPU frame buffer (for now, until all callers are updated)
     const FrameBuffer& getFrameBuffer() const;
     
-    // Get prepared frame for rendering (new API - supports GPU textures)
+    // Get prepared frame for rendering (returns const pointers - zero-copy)
     // Returns true if frame is on GPU, false if on CPU
-    bool getPreparedFrame(FrameBuffer& cpuBuffer, GPUTextureFrameBuffer& gpuBuffer) const;
+    bool getPreparedFrame(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const;
     
     // Check if current frame is on GPU
     bool isFrameOnGPU() const;
@@ -106,9 +100,6 @@ private:
     // Backward compatibility: CPU frame buffer cache
     mutable FrameBuffer frameBufferCache_;
     mutable bool frameBufferCacheValid_;
-    
-    // Mutex for thread-safe property access
-    mutable std::mutex propertiesMutex_;
 };
 
 } // namespace videocomposer

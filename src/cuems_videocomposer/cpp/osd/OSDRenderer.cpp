@@ -171,7 +171,7 @@ void OSDRenderer::measureText(const std::string& text, int& width, int& height) 
 }
 
 int OSDRenderer::calculateFontSize(int videoHeight) const {
-    // Matches xjadeo formula: MIN(MAX(13, movie_height / 18), 56)
+    // Matches xjadeo formula: MIN(MAX(13, height / 18), 56)
     int size = videoHeight / 18;
     if (size < 13) size = 13;
     if (size > 56) size = 56;
@@ -472,7 +472,7 @@ int OSDRenderer::calculateXPosition(int xAlign, int textWidth, int windowWidth) 
 
 int OSDRenderer::calculateYPosition(int yPercent, int textHeight, int windowHeight) {
     // Match xjadeo's Y position calculation:
-    // yalign = (movie_height - fh) * yperc / 100.0;
+    // yalign = (height - fh) * yperc / 100.0;
     // where fh is font height, yperc is 0-100 (0=top, 100=bottom)
     // This positions text from top, accounting for font height
     int yalign = ((windowHeight - textHeight) * yPercent) / 100;

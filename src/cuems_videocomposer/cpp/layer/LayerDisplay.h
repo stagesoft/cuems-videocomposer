@@ -36,11 +36,11 @@ public:
     // Prepare frame for rendering
     // Takes frame from LayerPlayback (CPU or GPU) and applies modifications
     // Returns true if frame is ready for rendering
-    bool prepareFrame(const FrameBuffer& cpuFrame, const GPUTextureFrameBuffer& gpuFrame, bool isFrameOnGPU, bool isHAPCodec);
+    bool prepareFrame(const FrameBuffer* cpuFrame, const GPUTextureFrameBuffer* gpuFrame, bool isFrameOnGPU, bool isHAPCodec);
 
-    // Get prepared frame buffer (for rendering)
+    // Get prepared frame buffer (for rendering) - returns const pointers to avoid copies
     // Returns true if frame is on GPU, false if on CPU
-    bool getPreparedFrame(FrameBuffer& cpuBuffer, GPUTextureFrameBuffer& gpuBuffer) const;
+    bool getPreparedFrame(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const;
 
     // Check if current frame is on GPU
     bool isFrameOnGPU() const { return preparedFrameOnGPU_; }
@@ -56,11 +56,15 @@ private:
     LayerProperties properties_;
     FrameInfo frameInfo_;
     
-    // Prepared frame buffers
+    // Prepared frame buffers (used when modifications are applied)
     FrameBuffer preparedCpuBuffer_;
     GPUTextureFrameBuffer preparedGpuBuffer_;
     bool preparedFrameOnGPU_;
     bool frameReady_;
+    
+    // Source frame pointers (used for zero-copy when no modifications needed)
+    const FrameBuffer* sourceFrameCpu_;
+    const GPUTextureFrameBuffer* sourceFrameGpu_;
 
     // Image processors (GPU-first, CPU fallback)
     GPUImageProcessor gpuProcessor_;
@@ -70,7 +74,7 @@ private:
     bool applyModificationsGPU(const GPUTextureFrameBuffer& input, GPUTextureFrameBuffer& output);
     bool applyModificationsCPU(const FrameBuffer& input, FrameBuffer& output);
     
-    // Check if modifications can be skipped (e.g., HAP with no transforms)
+    // Check if modifications can be skipped (e.g., no crop/panorama)
     bool canSkipModifications(bool isHAPCodec) const;
 };
 

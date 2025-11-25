@@ -364,27 +364,27 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         return false;
     }
 
-    // Get a thread-safe copy of properties to avoid race conditions with OSC updates
-    const LayerProperties props = layer->getPropertiesCopy();
+    // Get properties reference (safe since everything runs in main thread)
+    const LayerProperties& props = layer->properties();
     if (!props.visible) {
         return false;
     }
 
             // Check if frame is on GPU (hardware-decoded)
-            FrameBuffer cpuBuffer;
-            GPUTextureFrameBuffer gpuBuffer;
+            const FrameBuffer* cpuBuffer = nullptr;
+            const GPUTextureFrameBuffer* gpuBuffer = nullptr;
             bool isOnGPU = layer->getPreparedFrame(cpuBuffer, gpuBuffer);
             
-            if (isOnGPU && gpuBuffer.isValid()) {
+            if (isOnGPU && gpuBuffer && gpuBuffer->isValid()) {
                 // Frame is on GPU - use GPU rendering path
                 const FrameInfo& frameInfo = layer->getFrameInfo();
-                return renderLayerFromGPU(gpuBuffer, props, frameInfo);
-            } else if (!isOnGPU && cpuBuffer.isValid()) {
+                return renderLayerFromGPU(*gpuBuffer, props, frameInfo);
+            } else if (!isOnGPU && cpuBuffer && cpuBuffer->isValid()) {
                 // Frame is on CPU - use cached texture per layer
                 // IMPORTANT: Each layer needs its own texture when using CPU frames
                 // We cache textures per layer to avoid expensive create/delete every frame
                 
-                const FrameInfo& info = cpuBuffer.info();
+                const FrameInfo& info = cpuBuffer->info();
                 int layerId = layer->getLayerId();
                 int layerTextureWidth = info.width;
                 int layerTextureHeight = info.height;
@@ -439,7 +439,7 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 glBindTexture(GL_TEXTURE_RECTANGLE_ARB, layerTextureId);
                 glTexSubImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, 0, 0,
                                 layerTextureWidth, layerTextureHeight,
-                                GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer.data());
+                                GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
 
         // Calculate quad size with letterboxing (matches original xjadeo)
         // Original uses _gl_quad_x and _gl_quad_y for letterboxing
@@ -504,13 +504,6 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 glDisable(GL_TEXTURE_RECTANGLE_ARB);
 
                 glPopMatrix();
-                
-                // Reset blend mode to default after rendering layer
-                // This prevents blend mode from one layer affecting the next
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                
-                // Reset color to white (in case opacity was modified)
-                glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
                 return true;
     } else {
@@ -680,13 +673,6 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
     // Disable texture
     glDisable(target);
     glPopMatrix();
-    
-    // Reset blend mode to default after rendering layer
-    // This prevents blend mode from one layer affecting the next
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    
-    // Reset color to white (in case opacity was modified)
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
     return true;
 }

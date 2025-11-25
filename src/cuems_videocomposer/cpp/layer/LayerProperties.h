@@ -33,7 +33,7 @@ struct LayerProperties {
     
     // Panorama mode (50% width crop with x-offset for panning)
     bool panoramaMode = false;  // Enable panorama mode (crops to 50% width)
-    int panOffset = 0;          // X-offset for panning in panorama mode (0 to movie_width)
+    int panOffset = 0;          // X-offset for panning in panorama mode (0 to video width)
     
     // Blend mode (simplified enum for now)
     enum BlendMode {

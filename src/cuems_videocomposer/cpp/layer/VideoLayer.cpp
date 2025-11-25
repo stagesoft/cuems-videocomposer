@@ -141,16 +141,16 @@ void VideoLayer::update() {
         }
     }
     
-    // Get frame from playback (CPU or GPU)
-    FrameBuffer cpuFrame;
-    GPUTextureFrameBuffer gpuFrame;
+    // Get frame from playback (CPU or GPU) - returns pointers, no copy
+    const FrameBuffer* cpuFrame = nullptr;
+    const GPUTextureFrameBuffer* gpuFrame = nullptr;
     bool isFrameOnGPU = playback_.getFrameBuffer(cpuFrame, gpuFrame);
     
-    // Prepare frame for display (apply modifications)
+    // Prepare frame for display (apply modifications if needed)
     bool isHAP = playback_.isHAPCodec();
     display_.setFrameInfo(playback_.getFrameInfo());
     bool prepared = display_.prepareFrame(cpuFrame, gpuFrame, isFrameOnGPU, isHAP);
-    if (!prepared && (cpuFrame.isValid() || gpuFrame.isValid())) {
+    if (!prepared && ((cpuFrame && cpuFrame->isValid()) || (gpuFrame && gpuFrame->isValid()))) {
         LOG_WARNING << "VideoLayer::update() - frame is valid but prepareFrame() returned false";
     }
     
@@ -185,18 +185,11 @@ void VideoLayer::reverse() {
 }
 
 // Delegate property access to display
-// Note: These return references for backward compatibility with OSC handlers
-// For thread-safe rendering, use getPropertiesCopy()
 LayerProperties& VideoLayer::properties() {
     return display_.getProperties();
 }
 
 const LayerProperties& VideoLayer::properties() const {
-    return display_.getProperties();
-}
-
-LayerProperties VideoLayer::getPropertiesCopy() const {
-    std::lock_guard<std::mutex> lock(propertiesMutex_);
     return display_.getProperties();
 }
 
@@ -253,13 +246,13 @@ SyncSource* VideoLayer::getSyncSource() const {
 const FrameBuffer& VideoLayer::getFrameBuffer() const {
     // Rebuild cache if needed
     if (!frameBufferCacheValid_) {
-        FrameBuffer cpuBuffer;
-        GPUTextureFrameBuffer gpuBuffer;
+        const FrameBuffer* cpuBuffer = nullptr;
+        const GPUTextureFrameBuffer* gpuBuffer = nullptr;
         bool isOnGPU = display_.getPreparedFrame(cpuBuffer, gpuBuffer);
         
-        if (!isOnGPU && cpuBuffer.isValid()) {
-            // Frame is on CPU - use it directly
-            frameBufferCache_ = cpuBuffer;
+        if (!isOnGPU && cpuBuffer && cpuBuffer->isValid()) {
+            // Frame is on CPU - copy it to cache (backward compat requires copy)
+            frameBufferCache_ = *cpuBuffer;
             frameBufferCacheValid_ = true;
         } else if (isOnGPU) {
             // Frame is on GPU - we can't return it as CPU buffer
@@ -276,7 +269,7 @@ const FrameBuffer& VideoLayer::getFrameBuffer() const {
     return frameBufferCache_;
 }
 
-bool VideoLayer::getPreparedFrame(FrameBuffer& cpuBuffer, GPUTextureFrameBuffer& gpuBuffer) const {
+bool VideoLayer::getPreparedFrame(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const {
     return display_.getPreparedFrame(cpuBuffer, gpuBuffer);
 }
 

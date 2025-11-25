@@ -46,9 +46,9 @@ public:
     // Polls sync source and loads frames as needed
     void update();
     
-    // Get frame buffer (CPU or GPU)
+    // Get frame buffer (CPU or GPU) - returns const references to avoid copies
     // Returns true if frame is on GPU, false if on CPU
-    bool getFrameBuffer(FrameBuffer& cpuBuffer, GPUTextureFrameBuffer& gpuBuffer);
+    bool getFrameBuffer(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const;
     
     // Check if current frame is on GPU
     bool isFrameOnGPU() const { return frameOnGPU_; }

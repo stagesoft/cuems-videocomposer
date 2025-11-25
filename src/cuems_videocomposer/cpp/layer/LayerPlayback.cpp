@@ -299,14 +299,16 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
     return false;
 }
 
-bool LayerPlayback::getFrameBuffer(FrameBuffer& cpuBuffer, GPUTextureFrameBuffer& gpuBuffer) {
+bool LayerPlayback::getFrameBuffer(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const {
     if (frameOnGPU_) {
-        // Frame is on GPU - return GPU buffer
-        gpuBuffer = gpuFrameBuffer_;
+        // Frame is on GPU - return pointer to GPU buffer
+        gpuBuffer = &gpuFrameBuffer_;
+        cpuBuffer = nullptr;
         return true; // true = on GPU
     } else {
-        // Frame is on CPU - return CPU buffer
-        cpuBuffer = cpuFrameBuffer_;
+        // Frame is on CPU - return pointer to CPU buffer
+        cpuBuffer = &cpuFrameBuffer_;
+        gpuBuffer = nullptr;
         return false; // false = on CPU
     }
 }

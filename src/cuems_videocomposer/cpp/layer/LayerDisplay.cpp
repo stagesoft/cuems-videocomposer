@@ -9,27 +9,31 @@ namespace videocomposer {
 LayerDisplay::LayerDisplay()
     : preparedFrameOnGPU_(false)
     , frameReady_(false)
+    , sourceFrameCpu_(nullptr)
+    , sourceFrameGpu_(nullptr)
 {
 }
 
 LayerDisplay::~LayerDisplay() {
 }
 
-bool LayerDisplay::prepareFrame(const FrameBuffer& cpuFrame, const GPUTextureFrameBuffer& gpuFrame, 
+bool LayerDisplay::prepareFrame(const FrameBuffer* cpuFrame, const GPUTextureFrameBuffer* gpuFrame, 
                                 bool isFrameOnGPU, bool isHAPCodec) {
     frameReady_ = false;
+    sourceFrameCpu_ = nullptr;
+    sourceFrameGpu_ = nullptr;
 
-    // Check if we can skip modifications (HAP with no transforms)
+    // Check if we can skip modifications (no crop/panorama)
     if (canSkipModifications(isHAPCodec)) {
-        // No modifications needed - use frame directly
-        if (isFrameOnGPU && gpuFrame.isValid()) {
-            preparedGpuBuffer_ = gpuFrame;
+        // No modifications needed - store pointer to source frame (zero-copy)
+        if (isFrameOnGPU && gpuFrame && gpuFrame->isValid()) {
+            sourceFrameGpu_ = gpuFrame;
             preparedFrameOnGPU_ = true;
             frameReady_ = true;
             return true;
-        } else if (!isFrameOnGPU && cpuFrame.isValid()) {
-            // For CPU frames, we still need to prepare (upload to GPU later)
-            preparedCpuBuffer_ = cpuFrame;
+        } else if (!isFrameOnGPU && cpuFrame && cpuFrame->isValid()) {
+            // For CPU frames without modifications, just point to source
+            sourceFrameCpu_ = cpuFrame;
             preparedFrameOnGPU_ = false;
             frameReady_ = true;
             return true;
@@ -37,28 +41,27 @@ bool LayerDisplay::prepareFrame(const FrameBuffer& cpuFrame, const GPUTextureFra
         return false;
     }
 
-    // Apply modifications
-    // For now, this is a simplified version
-    // Full GPU-first processing will be implemented in future phases
+    // Apply modifications (crop/panorama only - scale/rotation handled by OpenGL)
+    // This path requires actual pixel manipulation, so we need our own buffer
     
-    if (isFrameOnGPU && gpuFrame.isValid()) {
+    if (isFrameOnGPU && gpuFrame && gpuFrame->isValid()) {
         // Frame is on GPU - try GPU processing first
-        if (applyModificationsGPU(gpuFrame, preparedGpuBuffer_)) {
+        if (applyModificationsGPU(*gpuFrame, preparedGpuBuffer_)) {
+            sourceFrameGpu_ = nullptr;  // Using our processed buffer
             preparedFrameOnGPU_ = true;
             frameReady_ = true;
             return true;
         } else {
-            // GPU processing failed - fallback to CPU
-            // This would require downloading from GPU, which we avoid for now
-            // For now, just use the GPU frame as-is
-            preparedGpuBuffer_ = gpuFrame;
+            // GPU processing failed - just use source frame as-is
+            sourceFrameGpu_ = gpuFrame;
             preparedFrameOnGPU_ = true;
             frameReady_ = true;
             return true;
         }
-    } else if (!isFrameOnGPU && cpuFrame.isValid()) {
-        // Frame is on CPU - apply CPU processing
-        if (applyModificationsCPU(cpuFrame, preparedCpuBuffer_)) {
+    } else if (!isFrameOnGPU && cpuFrame && cpuFrame->isValid()) {
+        // Frame is on CPU - apply CPU processing (crop/panorama)
+        if (applyModificationsCPU(*cpuFrame, preparedCpuBuffer_)) {
+            sourceFrameCpu_ = nullptr;  // Using our processed buffer
             preparedFrameOnGPU_ = false;
             frameReady_ = true;
             return true;
@@ -69,16 +72,22 @@ bool LayerDisplay::prepareFrame(const FrameBuffer& cpuFrame, const GPUTextureFra
     return false;
 }
 
-bool LayerDisplay::getPreparedFrame(FrameBuffer& cpuBuffer, GPUTextureFrameBuffer& gpuBuffer) const {
+bool LayerDisplay::getPreparedFrame(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const {
     if (!frameReady_) {
+        cpuBuffer = nullptr;
+        gpuBuffer = nullptr;
         return false;
     }
 
     if (preparedFrameOnGPU_) {
-        gpuBuffer = preparedGpuBuffer_;
+        // Return pointer to GPU frame (either source or processed)
+        gpuBuffer = sourceFrameGpu_ ? sourceFrameGpu_ : &preparedGpuBuffer_;
+        cpuBuffer = nullptr;
         return true; // true = on GPU
     } else {
-        cpuBuffer = preparedCpuBuffer_;
+        // Return pointer to CPU frame (either source or processed)
+        cpuBuffer = sourceFrameCpu_ ? sourceFrameCpu_ : &preparedCpuBuffer_;
+        gpuBuffer = nullptr;
         return false; // false = on CPU
     }
 }
@@ -99,7 +108,7 @@ bool LayerDisplay::applyModificationsGPU(const GPUTextureFrameBuffer& input, GPU
 
 bool LayerDisplay::applyModificationsCPU(const FrameBuffer& input, FrameBuffer& output) {
     // Use CPUImageProcessor for CPU-side modifications (fallback)
-    // This handles crop, panorama, scale, rotation when GPU processing unavailable
+    // This handles crop, panorama when GPU processing unavailable
     
     if (!input.isValid()) {
         return false;
@@ -137,4 +146,3 @@ bool LayerDisplay::canSkipModifications(bool isHAPCodec) const {
 }
 
 } // namespace videocomposer
-

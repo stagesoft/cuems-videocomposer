@@ -177,17 +177,6 @@ bool VideoFileInput::open(const std::string& source) {
         frameCount_ = frameInfo_.totalFrames; // Use calculated frame count
     }
 
-    // Update C globals for compatibility (used by legacy display backends)
-    // Only update if this is the first layer (globals are at default values)
-    // This prevents multi-layer scenarios from overwriting each other's values
-    if (movie_width == 640 && movie_height == 360) {
-        movie_width = width;
-        movie_height = height;
-        movie_aspect = frameInfo_.aspect;
-        ::framerate = framerate;
-        frames = frameInfo_.totalFrames;
-    }
-
     ready_ = true;
     currentFrame_ = -1;
     return true;
