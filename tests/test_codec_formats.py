@@ -27,12 +27,13 @@ from typing import Dict, List, Optional, Tuple
 from mtc_helper import MTCHelper, MTC_AVAILABLE
 
 class CodecFormatTest:
-    def __init__(self, video_dir: Path, videocomposer_bin: Optional[Path] = None, use_mtc: bool = True, fps: float = 25.0):
+    def __init__(self, video_dir: Path, videocomposer_bin: Optional[Path] = None, use_mtc: bool = True, fps: float = 25.0, enable_loop: bool = False):
         self.video_dir = Path(video_dir)
         self.videocomposer_bin = videocomposer_bin or self._find_videocomposer()
         self.test_results: Dict[str, Dict] = {}
         self.use_mtc = use_mtc and MTC_AVAILABLE
         self.fps = fps
+        self.enable_loop = enable_loop
         self.mtc_helper = MTCHelper(fps=fps, port=0, portname="CodecTest") if self.use_mtc else None
         self.interrupted = False
         self.current_process = None
@@ -111,7 +112,7 @@ class CodecFormatTest:
         except Exception as e:
             return {"error": str(e)}
     
-    def test_video_file_interactive(self, video_path: Path, test_duration: int = 10) -> Dict:
+    def test_video_file_interactive(self, video_path: Path, test_duration: int = 20) -> Dict:
         """Test a single video file interactively - ask user if video is visible."""
         video_path = Path(video_path)
         if not video_path.exists():
@@ -168,7 +169,7 @@ class CodecFormatTest:
         
         return test_result
     
-    def test_video_file(self, video_path: Path, test_duration: int = 5) -> Dict:
+    def test_video_file(self, video_path: Path, test_duration: int = 20) -> Dict:
         """Test a single video file with videocomposer."""
         video_path = Path(video_path)
         if not video_path.exists():
@@ -304,6 +305,30 @@ class CodecFormatTest:
         except Exception as e:
             print(f"    Warning: Failed to send OSC string command: {e}")
     
+    def _send_osc_two_int_command(self, port: int, path: str, value1: int, value2: int):
+        """Send OSC command with two integer arguments."""
+        try:
+            # Path
+            path_bytes = path.encode('utf-8') + b'\0'
+            path_padded = path_bytes + b'\0' * ((4 - len(path_bytes) % 4) % 4)
+            
+            # Type tag (',ii' for two integers)
+            type_tag = b',ii\0'
+            type_tag_padded = type_tag + b'\0' * ((4 - len(type_tag) % 4) % 4)
+            
+            # Integer values (each 4 bytes, big-endian)
+            value1_bytes = value1.to_bytes(4, byteorder='big', signed=True)
+            value2_bytes = value2.to_bytes(4, byteorder='big', signed=True)
+            
+            # Combine message
+            osc_msg = path_padded + type_tag_padded + value1_bytes + value2_bytes
+            
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(osc_msg, ('127.0.0.1', port))
+            sock.close()
+        except Exception as e:
+            print(f"    Warning: Failed to send OSC two-int command: {e}")
+    
     def _run_videocomposer(self, video_path: Path, duration: int, verbose_output: bool = True, enable_osd: bool = False) -> Dict:
         """Run videocomposer with the video file."""
         osc_port = 7000  # Default OSC port
@@ -342,6 +367,14 @@ class CodecFormatTest:
                 time.sleep(0.5)  # Give it more time to process
                 # Also try the integer version
                 self._send_osc_command(osc_port, "/videocomposer/osd/timecode", 1)
+                time.sleep(0.3)
+            
+            # Enable looping if requested (default layer uses empty cue ID "")
+            if self.enable_loop:
+                print(f"  Enabling looping on default layer...")
+                # Enable infinite loop: /videocomposer/layer/{cueId}/loop with args (1, -1)
+                # Default layer uses empty string as cue ID
+                self._send_osc_two_int_command(osc_port, "/videocomposer/layer//loop", 1, -1)
                 time.sleep(0.3)
             
             # Collect output
@@ -487,7 +520,7 @@ class CodecFormatTest:
         # Remove duplicates and sort
         return sorted(set(videos))
     
-    def run_all_tests(self, test_hw: bool = True, test_sw: bool = True, duration: int = 5, one_by_one: bool = False) -> Dict:
+    def run_all_tests(self, test_hw: bool = True, test_sw: bool = True, duration: int = 20, one_by_one: bool = False) -> Dict:
         """Run tests on all available test videos."""
         videos = self.find_test_videos()
         
@@ -611,8 +644,8 @@ def main():
                        help="Test software codecs (VP9, MPEG-4)")
     parser.add_argument("--test-hap", action="store_true",
                        help="Test HAP codec specifically")
-    parser.add_argument("--duration", type=int, default=10,
-                       help="Test duration per video in seconds (default: 10, longer for interactive mode)")
+    parser.add_argument("--duration", type=int, default=20,
+                       help="Test duration per video in seconds (default: 20)")
     parser.add_argument("--video", type=str,
                        help="Test a specific video file")
     parser.add_argument("--no-mtc", action="store_true",
@@ -623,6 +656,8 @@ def main():
                        help="Interactive mode: test one video at a time and ask if video is visible")
     parser.add_argument("--one-by-one", action="store_true",
                        help="Test formats one by one with clear output for each")
+    parser.add_argument("--loop", action="store_true",
+                       help="Enable looping on layers (default: no loop, uses automatic wrapping)")
     
     args = parser.parse_args()
     
@@ -638,7 +673,7 @@ def main():
     # Print the directory being used
     print(f"Using video directory: {video_dir.resolve()}")
     
-    tester = CodecFormatTest(video_dir, videocomposer_bin, use_mtc=not args.no_mtc, fps=args.fps)
+    tester = CodecFormatTest(video_dir, videocomposer_bin, use_mtc=not args.no_mtc, fps=args.fps, enable_loop=args.loop)
     
     results = {}
     

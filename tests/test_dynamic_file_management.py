@@ -35,13 +35,14 @@ except ImportError:
 
 
 class DynamicFileManagementTest:
-    def __init__(self, videocomposer_bin, video_file1=None, video_file2=None, osc_port=7770, fps=25.0, mtc_port=0):
+    def __init__(self, videocomposer_bin, video_file1=None, video_file2=None, osc_port=7770, fps=25.0, mtc_port=0, enable_loop=False):
         self.videocomposer_bin = Path(videocomposer_bin)
         self.video_file1 = Path(video_file1) if video_file1 else None
         self.video_file2 = Path(video_file2) if video_file2 else None
         self.osc_port = osc_port
         self.fps = fps
         self.mtc_port = mtc_port
+        self.enable_loop = enable_loop
         self.videocomposer_process = None
         self.osc_client = None
         self.mtc_helper = None
@@ -500,6 +501,16 @@ class DynamicFileManagementTest:
         self.test_layer_controls(cue_id_2, layer_num=2)
         time.sleep(0.5)
         
+        # Step 5.5: Enable looping if requested
+        if self.enable_loop:
+            print("\n--- Step 5.5: Enable Looping on Both Layers ---")
+            # Enable infinite loop on both layers
+            self.send_osc(f"/videocomposer/layer/{cue_id_1}/loop", 1, -1)  # Enable, infinite
+            time.sleep(0.1)
+            self.send_osc(f"/videocomposer/layer/{cue_id_2}/loop", 1, -1)  # Enable, infinite
+            time.sleep(0.1)
+            print("Looping enabled on both layers")
+        
         # Step 6: Progressive image adjustments over 30 seconds
         print("\n--- Step 6: Progressive Image Adjustments (30 seconds) ---")
         print("Making continuous smooth adjustments to all image controls...")
@@ -512,6 +523,8 @@ class DynamicFileManagementTest:
         print(f"  - Layer 1 (top-left, smaller, rotated): {cue_id_1}")
         print(f"  - Layer 2 (bottom-right, larger, different blend): {cue_id_2}")
         print("  - Both layers following MTC timecode")
+        if self.enable_loop:
+            print("  - Looping enabled on both layers")
         print("  - Progressive adjustments completed (30 seconds)")
         print("\nPress Ctrl+C to stop.")
         
@@ -548,6 +561,8 @@ def main():
                        help="MTC framerate (default: 25.0)")
     parser.add_argument("--mtc-port", type=int, default=0,
                        help="ALSA MIDI port number for MTC (default: 0)")
+    parser.add_argument("--loop", action="store_true",
+                       help="Enable looping on layers (default: no loop)")
     
     args = parser.parse_args()
     
@@ -560,7 +575,8 @@ def main():
         video2,
         args.osc_port,
         args.fps,
-        args.mtc_port
+        args.mtc_port,
+        args.loop
     )
     
     try:

@@ -180,22 +180,20 @@ void LayerPlayback::updateFromSyncSource() {
         // LayerPlayback doesn't need to know about framerate conversion
         int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + timeOffset_;
         
-        // Always apply wraparound if frame exceeds video duration
-        // This allows video to loop when MTC timecode exceeds video length
+        // Clamp frame to valid range (no automatic wrapping - use loop instead)
         if (inputSource_) {
             FrameInfo info = inputSource_->getFrameInfo();
             int64_t totalFrames = info.totalFrames;
             
             if (totalFrames > 0) {
-                // Wrap around if frame is beyond duration
+                // Clamp to valid range instead of wrapping
                 if (adjustedFrame >= totalFrames) {
-                    LOG_VERBOSE << "Wrapping frame " << adjustedFrame << " (totalFrames=" << totalFrames << ")";
-                    adjustedFrame = adjustedFrame % totalFrames;
+                    LOG_VERBOSE << "Frame " << adjustedFrame << " exceeds video duration (" << totalFrames << "), clamping to " << (totalFrames - 1);
+                    adjustedFrame = totalFrames - 1;
                 }
-                // Wrap around if frame is negative
                 if (adjustedFrame < 0) {
-                    LOG_VERBOSE << "Wrapping negative frame " << adjustedFrame << " (totalFrames=" << totalFrames << ")";
-                    adjustedFrame = (adjustedFrame % totalFrames + totalFrames) % totalFrames;
+                    LOG_VERBOSE << "Frame " << adjustedFrame << " is negative, clamping to 0";
+                    adjustedFrame = 0;
                 }
             }
         }

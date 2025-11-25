@@ -91,7 +91,7 @@ private:
     int64_t lastSyncFrame_;
     int64_t timeOffset_;  // Time offset applied to sync frames
     double timeScale_;    // Time multiplier (default: 1.0)
-    bool wraparound_;     // Enable wrap-around/loop
+    bool wraparound_;     // Enable wrap-around/loop (seeks to 0 when playback ends)
     bool mtcFollow_;      // Enable/disable MTC following (default: true)
     
     // MTC sync state (per-layer, not static!)
