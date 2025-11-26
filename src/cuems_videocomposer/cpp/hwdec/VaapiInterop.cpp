@@ -427,11 +427,10 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     eglImageY_ = EGL_NO_IMAGE_KHR;
     eglImageUV_ = EGL_NO_IMAGE_KHR;
     
-    // CRITICAL: Frame reference management - SIMPLIFIED approach like mpv
-    // We keep only ONE AVFrame reference (currentFrame_) - the frame being rendered
-    // When importing frame N+1, we do NOT release frame N yet - GPU is still rendering it!
-    // Frame N will be released in bindTexturesToImages() AFTER new textures are bound
-    // This matches mpv's map()/unmap() pattern
+    // CRITICAL: MPV-style immediate release pattern  
+    // MPV does: map frame → render → unmap (release immediately)
+    // To match this, we keep ONLY the frame being rendered (currentFrame_)
+    // Old frame was already released in previous call to releaseCurrentFrame()
     
     // Allocate currentFrame_ on first use
     if (!currentFrame_) {
@@ -442,18 +441,18 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         }
     }
     
-    // Allocate previousFrame_ on first use (used only to swap frames)
-    if (!previousFrame_) {
-        previousFrame_ = av_frame_alloc();
-        if (!previousFrame_) {
-            LOG_ERROR << "VaapiInterop: Failed to allocate previousFrame_";
-            return false;
-        }
-    }
+    // Previous frame should have been released by now via releaseCurrentFrame()
+    // If not, release it now (safety check)
+    VASurfaceID incomingSurface = (VASurfaceID)(uintptr_t)vaapiFrame->data[3];
+    debugFrameCounter_++;
     
-    // Move current frame to previous slot (will be released after new textures bound)
     if (currentFrame_->buf[0]) {
-        av_frame_move_ref(previousFrame_, currentFrame_);
+        VASurfaceID currentSurface = (VASurfaceID)(uintptr_t)currentFrame_->data[3];
+        LOG_ERROR << "FRAME " << debugFrameCounter_ << ": currentFrame_ STILL HAS SURFACE " << currentSurface 
+                  << " (should have been released!) - releasing now";
+        av_frame_unref(currentFrame_);
+    } else {
+        LOG_INFO << "FRAME " << debugFrameCounter_ << ": currentFrame_ empty (good), importing surface " << incomingSurface;
     }
     
     // Get VAAPI device context from frame
@@ -661,6 +660,9 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
             return false;
         }
         
+        LOG_INFO << "FRAME " << debugFrameCounter_ << ": Created NEW textures Y=" << textureY_ 
+                 << " UV=" << textureUV_ << " (old: Y=" << oldTextureY << " UV=" << oldTextureUV << ")";
+        
         // IMPORTANT: Set texture parameters at creation time (like mpv does)
         // For glEGLImageTargetTexStorageEXT, textures become immutable after binding
         // so parameters must be set now, not after
@@ -685,8 +687,10 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     glBindTexture(GL_TEXTURE_2D, textureY_);
     if (useTexStorage_ && glEGLImageTargetTexStorageEXT_) {
         glEGLImageTargetTexStorageEXT_(GL_TEXTURE_2D, eglImageY_, nullptr);
+        LOG_INFO << "FRAME " << debugFrameCounter_ << ": Bound EGLimage Y " << eglImageY_ << " to texture " << textureY_ << " (TexStorage)";
     } else if (glEGLImageTargetTexture2DOES_) {
         glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageY_);
+        LOG_INFO << "FRAME " << debugFrameCounter_ << ": Bound EGLimage Y " << eglImageY_ << " to texture " << textureY_ << " (Texture2D)";
     } else {
         LOG_ERROR << "VaapiInterop: No EGL image target function available";
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -769,6 +773,8 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     
     // Close old DMA-BUF FDs if keepFDsOpen_ mode was used
     // (These are from the previous frame)
+    int closedYFd = openYFd_;
+    int closedUVFd = openUVFd_;
     if (openYFd_ >= 0) {
         close(openYFd_);
         openYFd_ = -1;
@@ -777,14 +783,15 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         close(openUVFd_);
         openUVFd_ = -1;
     }
+    if (closedYFd >= 0 || closedUVFd >= 0) {
+        LOG_INFO << "FRAME " << debugFrameCounter_ << " (bindTextures): Closed OLD FDs " 
+                 << closedYFd << "," << closedUVFd << " from previous frame";
+    }
     
     // CRITICAL: NOW release the old AVFrame (after new textures bound and old EGL images destroyed)
-    // This matches mpv's unmap() pattern - frame is released immediately after rendering completes
-    // The GPU has already submitted commands for the old frame (glFlush was called above)
-    // So it's safe to release the VAAPI surface back to the pool
-    if (previousFrame_ && previousFrame_->buf[0]) {
-        av_frame_unref(previousFrame_);
-    }
+    // Frame was already released in createEGLImages() - nothing to do here
+    // The VAAPI surface was returned to the pool immediately when we imported the new frame
+
     
     // Return NEW texture IDs
     texY = textureY_;
@@ -1031,6 +1038,31 @@ EGLImageKHR VaapiInterop::createEGLImageFromDmaBuf(
     }
     
     return image;
+}
+
+void VaapiInterop::releaseCurrentFrame() {
+    // MPV-style immediate release of VAAPI surface (but keep textures/EGL images for now)
+    // 
+    // CRITICAL INSIGHT: We CAN'T delete textures here because OpenGLRenderer still has their IDs!
+    // The renderer will use those texture IDs until the NEXT frame is imported.
+    // 
+    // But we CAN unref the AVFrame immediately - the EGL images hold dup'd DMA-BUF FDs,
+    // so they keep the surface data alive even after the AVFrame is unreffed!
+    // The surface itself might go back to the pool, but the DMABUF memory stays valid
+    // until we destroy the EGL images (which happens on next import)
+    
+    // Unref the AVFrame immediately - returns VAAPI surface to pool
+    if (currentFrame_ && currentFrame_->buf[0]) {
+        VASurfaceID releasingSurface = (VASurfaceID)(uintptr_t)currentFrame_->data[3];
+        av_frame_unref(currentFrame_);
+        LOG_INFO << "FRAME " << debugFrameCounter_ << ": Released surface " << releasingSurface 
+                 << " (FDs " << openYFd_ << "," << openUVFd_ << " still open, will close on next import)";
+    } else {
+        LOG_WARNING << "FRAME " << debugFrameCounter_ << ": releaseCurrentFrame called but currentFrame already empty!";
+    }
+    
+    // Textures, EGL images, and DMA-BUF FDs stay alive until next import
+    // (They're cleaned up in bindTexturesToImages() when creating new resources)
 }
 
 } // namespace videocomposer

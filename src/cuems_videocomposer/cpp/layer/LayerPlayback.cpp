@@ -214,14 +214,16 @@ void LayerPlayback::updateFromSyncSource() {
         // xjadeo doesn't check for full SYSEX frames - it just uses the frame number
         // and lets seek_frame() decide whether to seek based on frame relationships
         if (adjustedFrame != lastSyncFrame_) {
-                    if (loadFrame(adjustedFrame)) {
+            LOG_INFO << "LAYER: Frame changed from " << lastSyncFrame_ << " to " << adjustedFrame << " - calling loadFrame()";
+            if (loadFrame(adjustedFrame)) {
                 // Normal update - loadFrame() handles seek optimization internally
                 // (no seek for consecutive frames, seeks for backwards/non-consecutive)
                 currentFrame_ = adjustedFrame;
                 lastSyncFrame_ = adjustedFrame;
+                LOG_INFO << "LAYER: loadFrame(" << adjustedFrame << ") SUCCESS";
             } else {
                 // If load fails, try seeking first (helps with keyframe-based codecs)
-                LOG_WARNING << "Failed to load frame " << adjustedFrame << ", trying seek first";
+                LOG_WARNING << "LAYER: loadFrame(" << adjustedFrame << ") FAILED, trying seek first";
                 if (inputSource_ && inputSource_->seek(adjustedFrame)) {
                     if (loadFrame(adjustedFrame)) {
                         currentFrame_ = adjustedFrame;

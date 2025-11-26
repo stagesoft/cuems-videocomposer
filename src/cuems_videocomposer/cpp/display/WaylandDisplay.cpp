@@ -130,6 +130,10 @@ bool WaylandDisplay::openWindow() {
     windowOpen_ = true;
     
     LOG_INFO << "Wayland display opened: " << windowWidth_ << "x" << windowHeight_;
+    
+    // Render initial black frame to make window visible
+    render(nullptr, nullptr);
+    
     return true;
 }
 
@@ -157,11 +161,21 @@ bool WaylandDisplay::isWindowOpen() const {
 }
 
 void WaylandDisplay::render(LayerManager* layerManager, OSDManager* osdManager) {
-    if (!windowOpen_ || !layerManager) {
+    if (!windowOpen_) {
         return;
     }
 
     makeCurrent();
+
+    // If no layer manager, just clear to black and swap
+    if (!layerManager) {
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glFlush();
+        swapBuffers();
+        clearCurrent();
+        return;
+    }
 
     // Get all layers sorted by z-order
     auto layers = layerManager->getLayersSortedByZOrder();
@@ -393,19 +407,28 @@ bool WaylandDisplay::initWayland() {
     
     xdg_toplevel_add_listener(xdgToplevel_, &xdg_toplevel_listener, this);
     xdg_toplevel_set_title(xdgToplevel_, "cuems-videocomposer");
+    xdg_toplevel_set_app_id(xdgToplevel_, "cuems-videocomposer");
+    
+    // Set initial window size hints
+    xdg_toplevel_set_min_size(xdgToplevel_, 320, 240);
     
     // Commit the surface to trigger the first configure event
     wl_surface_commit(wlSurface_);
     
-    // Wait for configure event
-    while (!configured_ && wlDisplay_) {
+    // Wait for configure event (with timeout to avoid hanging)
+    int maxTries = 100;
+    while (!configured_ && wlDisplay_ && maxTries-- > 0) {
         if (wl_display_dispatch(wlDisplay_) == -1) {
             LOG_ERROR << "Wayland display dispatch failed while waiting for configure";
             return false;
         }
     }
     
-    LOG_INFO << "Wayland surface configured";
+    if (!configured_) {
+        LOG_WARNING << "Wayland surface not configured after waiting - continuing anyway";
+    } else {
+        LOG_INFO << "Wayland surface configured";
+    }
     
     return true;
 }

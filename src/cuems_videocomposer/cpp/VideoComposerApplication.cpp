@@ -427,6 +427,14 @@ void VideoComposerApplication::updateLayers() {
 void VideoComposerApplication::render() {
     if (displayBackend_ && layerManager_) {
         displayBackend_->render(layerManager_.get(), osdManager_.get());
+        
+#ifdef HAVE_VAAPI_INTEROP
+        // MPV-style immediate release: Release VAAPI surface right after rendering
+        // This returns the surface to the pool immediately, preventing pool exhaustion
+        if (vaapiInterop_) {
+            vaapiInterop_->releaseCurrentFrame();
+        }
+#endif
     }
 }
 

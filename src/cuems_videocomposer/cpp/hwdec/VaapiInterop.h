@@ -128,6 +128,13 @@ public:
     void releaseFrame();
     
     /**
+     * Release the current frame immediately after rendering (MPV pattern)
+     * This returns the VAAPI surface to the pool while keeping textures alive
+     * Should be called right after the frame is rendered
+     */
+    void releaseCurrentFrame();
+    
+    /**
      * Check if EGL images are ready for binding (created but not yet bound)
      */
     bool hasEGLImages() const { return eglImageY_ != EGL_NO_IMAGE_KHR && eglImageUV_ != EGL_NO_IMAGE_KHR; }

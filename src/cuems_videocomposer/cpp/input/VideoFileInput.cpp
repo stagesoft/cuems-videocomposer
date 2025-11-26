@@ -483,6 +483,13 @@ bool VideoFileInput::openHardwareCodec() {
     }
     // Wrapper decoders (with METHOD_INTERNAL, like cuvid) handle hardware and pixel format
     // selection internally, but we keep hwDeviceCtx_ for frame transfers
+    
+    // CRITICAL: Request extra surfaces for zero-copy rendering (like mpv does)
+    // The default pool size is determined by the decoder (usually ~17 for H.264)
+    // But with EGL image lifecycle delays (we keep textures/EGL images alive for 1 frame),
+    // we need extra surfaces to prevent pool exhaustion
+    // MPV uses hwdec_extra_frames=6, we use more to account for our architecture
+    codecCtx_->extra_hw_frames = 20;  // Request 20 extra surfaces
 
     // Open hardware codec
     ret = avcodec_open2(codecCtx_, hwCodec, nullptr);
@@ -1394,14 +1401,26 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     }
 
     // Seek to frame if needed
-    if (!seek(frameNumber)) {
-        return false;
-    }
-
-    // Flush hardware decoder buffers after seeking (following mpv's approach)
-    // This ensures we start fresh after a seek
-    if (codecCtx_) {
-        avcodec_flush_buffers(codecCtx_);
+    // Only seek if this frame is far from the last decoded position
+    // For consecutive frames, just decode forward
+    static int64_t lastDecodedFrame = -1;
+    bool needSeek = (frameNumber < lastDecodedFrame || frameNumber > lastDecodedFrame + 30);
+    
+    if (needSeek) {
+        LOG_INFO << "SEEK: Requesting frame " << frameNumber << " (last was " << lastDecodedFrame 
+                 << ") - performing seek+flush";
+        if (!seek(frameNumber)) {
+            return false;
+        }
+        
+        // Flush hardware decoder buffers ONLY after a real seek
+        // This ensures we start fresh after a backward seek or large jump
+        if (codecCtx_) {
+            avcodec_flush_buffers(codecCtx_);
+        }
+    } else {
+        LOG_INFO << "DECODE FORWARD: Frame " << frameNumber << " (last was " << lastDecodedFrame 
+                 << ") - no seek needed";
     }
 
     // Decode frame using hardware decoder
@@ -1413,18 +1432,58 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     // Hardware decoders (especially h264_cuvid) need multiple packets before producing output
     // due to B-frame reordering and internal buffering. mpv uses up to 32 packets during probing.
     // We use a packet count bailout, not an iteration bailout.
-    const int MAX_PACKETS = 64;  // Maximum packets to send before giving up
+    const int MAX_PACKETS = 128;  // Maximum packets to send before giving up
     int packetsSent = 0;
     int errorCount = 0;
     const int MAX_ERRORS = 10;
     bool frameFinished = false;
+    
+    // CRITICAL: Calculate target PTS for the frame we want
+    // We need to decode forward until we reach this PTS
+    AVRational timeBase = formatCtx_->streams[videoStream_]->time_base;
+    int64_t targetPTS = av_rescale_q(frameNumber, frameRateQ_, timeBase);
 
     while (packetsSent < MAX_PACKETS && errorCount < MAX_ERRORS && !frameFinished) {
         // Try to receive a frame first (in case decoder has buffered frames)
         int err = avcodec_receive_frame(codecCtx_, hwFrame_);
         if (err == 0) {
-            frameFinished = true;
-            break;
+            int64_t framePTS = hwFrame_->best_effort_timestamp != AV_NOPTS_VALUE 
+                               ? hwFrame_->best_effort_timestamp 
+                               : hwFrame_->pts;
+            
+            LOG_INFO << "DECODED: PTS=" << framePTS << " (target=" << targetPTS 
+                     << ", requested frame " << frameNumber << ")";
+            
+            // Check if this is the frame we want (within tolerance for floating point frame rates)
+            int64_t ptsDiff = framePTS - targetPTS;
+            int64_t ptsPerFrame = av_rescale_q(1, frameRateQ_, timeBase);
+            
+            LOG_INFO << "  -> ptsDiff=" << ptsDiff << ", ptsPerFrame=" << ptsPerFrame;
+            
+            if (ptsDiff >= 0 && ptsDiff < ptsPerFrame) {
+                // This is the correct frame (or close enough)
+                LOG_INFO << "  -> EXACT MATCH - using frame";
+                frameFinished = true;
+                break;
+            } else if (framePTS < targetPTS) {
+                // This frame is BEFORE the target - discard it and continue decoding
+                LOG_INFO << "  -> TOO EARLY (PTS < target) - DISCARDING and continuing";
+                av_frame_unref(hwFrame_);
+                // Continue to next frame
+            } else {
+                // framePTS > targetPTS + ptsPerFrame - we've gone too far!
+                // If we're WAY too far (more than 5 frames), something is wrong with the seek
+                // Just use this frame as best effort (better than showing nothing)
+                int64_t framesAhead = ptsDiff / ptsPerFrame;
+                if (framesAhead > 5) {
+                    LOG_ERROR << "  -> WAY TOO LATE (PTS > target+" << ptsPerFrame << ", " << framesAhead 
+                             << " frames ahead) - using as best effort, but seek may have failed";
+                } else {
+                    LOG_WARNING << "  -> TOO LATE (PTS > target+" << ptsPerFrame << ") - using anyway (B-frames?)";
+                }
+                frameFinished = true;
+                break;
+            }
         } else if (err == AVERROR(EAGAIN)) {
             // Decoder needs more input - this is normal, not an error
             // Continue to send more packets
@@ -1496,14 +1555,25 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
 
     av_packet_free(&packet);
 
+    // Update last decoded position for next call (use ACTUAL decoded PTS, not requested frame)
+    int64_t decodedFrameNum = av_rescale_q(
+        hwFrame_->best_effort_timestamp != AV_NOPTS_VALUE ? hwFrame_->best_effort_timestamp : hwFrame_->pts,
+        timeBase, frameRateQ_
+    );
+    lastDecodedFrame = decodedFrameNum;
+    LOG_INFO << "  -> Updated lastDecodedFrame to " << lastDecodedFrame;
+
     // Transfer hardware frame to GPU texture
-    // NOTE: We do NOT call av_frame_unref(hwFrame_) here because:
-    // 1. VaapiInterop creates EGL images that reference the VAAPI surface
-    // 2. EGL images are only destroyed on the NEXT frame (in releaseFrame())
-    // 3. If we unref too early, the surface gets recycled while EGL images still reference it
-    // 4. This corrupts the surface pool and causes decoding errors
-    // The hwFrame_ will be automatically unreferenced when we receive the next frame
-    return transferHardwareFrameToGPU(hwFrame_, textureBuffer);
+    // MPV-style: VaapiInterop will ref the frame, and we'll unref our copy immediately after transfer
+    bool success = transferHardwareFrameToGPU(hwFrame_, textureBuffer);
+    
+    // CRITICAL: Unref hwFrame_ immediately after transfer (MPV pattern)
+    // VaapiInterop has its own reference (currentFrame_) which it will release after rendering
+    // If we don't unref here, we hold 2 references to the surface (ours + VaapiInterop's)
+    // This exhausts the VAAPI surface pool and causes the 30-frame freeze!
+    av_frame_unref(hwFrame_);
+    
+    return success;
 }
 
 bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer) {
