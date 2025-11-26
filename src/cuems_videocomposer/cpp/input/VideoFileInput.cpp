@@ -634,10 +634,18 @@ static int64_t keyframeLookupHelper(LocalFrameIndex* frameIndex, int64_t fcnt,
     
     for (int64_t i = last; i >= 0; --i) {
         if (!frameIndex[i].key) continue;
-        if (frameIndex[i].pkt_pts == AV_NOPTS_VALUE || frameIndex[i].frame_pts == AV_NOPTS_VALUE) {
+        if (frameIndex[i].pkt_pts == AV_NOPTS_VALUE) {
             continue;
         }
-        if (frameIndex[i].frame_pts <= ts) {
+        
+        // For hardware decoding, frame_pts may not be set (Pass 2 doesn't verify keyframes)
+        // In that case, use timestamp instead
+        // Note: frame_pts can be -1 (uninitialized) or AV_NOPTS_VALUE (0x8000000000000000)
+        int64_t keyframePts = (frameIndex[i].frame_pts != AV_NOPTS_VALUE && frameIndex[i].frame_pts >= 0) 
+                              ? frameIndex[i].frame_pts 
+                              : frameIndex[i].timestamp;
+        
+        if (keyframePts <= ts) {
             return i;
         }
     }
@@ -917,12 +925,20 @@ bool VideoFileInput::indexFrames() {
         int64_t kfi = keyframeLookupHelper(reinterpret_cast<LocalFrameIndex*>(frameIndex_), frameCount_, searchLimit, frameIndex_[i].timestamp);
         
         if (kfi < 0) {
-            LOG_WARNING << "Cannot find keyframe for frame " << i << " timestamp " << frameIndex_[i].timestamp;
+            if (i < 5) {
+                LOG_INFO << "Frame " << i << " (ts=" << frameIndex_[i].timestamp 
+                         << ", frame_pts=" << frameIndex_[i].frame_pts << "): No keyframe found - seekpts=0";
+            }
             frameIndex_[i].seekpts = 0;
             frameIndex_[i].seekpos = 0;
         } else {
             frameIndex_[i].seekpts = frameIndex_[kfi].pkt_pts;
             frameIndex_[i].seekpos = frameIndex_[kfi].frame_pos;
+            if (i < 5) {
+                LOG_INFO << "Frame " << i << " (ts=" << frameIndex_[i].timestamp 
+                         << ", frame_pts=" << frameIndex_[i].frame_pts << "): Found keyframe " << kfi 
+                         << " (frame_pts=" << frameIndex_[kfi].frame_pts << ") -> seekpts=" << frameIndex_[i].seekpts;
+            }
         }
     }
     
@@ -975,6 +991,11 @@ bool VideoFileInput::seekToFrame(int64_t frameNumber) {
 
     const FrameIndex& idx = frameIndex_[frameNumber];
     int64_t timestamp = idx.timestamp;
+    
+    if (frameNumber < 5) {
+        LOG_INFO << "INDEX: Frame " << frameNumber << " -> seekpts=" << idx.seekpts 
+                 << ", timestamp=" << timestamp << ", key=" << (int)idx.key;
+    }
 
     if (timestamp < 0) {
         return false;
@@ -1404,13 +1425,49 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     // Only seek if this frame is far from the last decoded position
     // For consecutive frames, just decode forward
     static int64_t lastDecodedFrame = -1;
-    bool needSeek = (frameNumber < lastDecodedFrame || frameNumber > lastDecodedFrame + 30);
+    bool needSeek = (lastDecodedFrame < 0 ||  // Initial state - must seek
+                     frameNumber < lastDecodedFrame ||  // Backward seek
+                     frameNumber > lastDecodedFrame + 30);  // Large forward jump
     
     if (needSeek) {
         LOG_INFO << "SEEK: Requesting frame " << frameNumber << " (last was " << lastDecodedFrame 
                  << ") - performing seek+flush";
-        if (!seek(frameNumber)) {
-            return false;
+        
+        // SPECIAL CASE: Frames before first keyframe
+        // If the first keyframe is at frame 30, frames 0-29 exist before it as P/B frames
+        // The index seekpts for these frames points to the keyframe (wrong!)
+        // Instead, seek to beginning of file and decode forward
+        bool isBeforeFirstKeyframe = false;
+        if (frameIndex_ && frameCount_ > 0) {
+            // Find first keyframe
+            int64_t firstKeyframePTS = -1;
+            for (int64_t i = 0; i < frameCount_; i++) {
+                if (frameIndex_[i].key) {
+                    firstKeyframePTS = frameIndex_[i].pkt_pts;
+                    break;
+                }
+            }
+            
+            // Check if requested frame is before first keyframe
+            if (firstKeyframePTS > 0 && frameIndex_[frameNumber].pkt_pts < firstKeyframePTS) {
+                isBeforeFirstKeyframe = true;
+                LOG_INFO << "  Frame " << frameNumber << " is before first keyframe - seeking to file start";
+            }
+        }
+        
+        if (isBeforeFirstKeyframe) {
+            // Seek to beginning of file (timestamp 0)
+            if (!mediaReader_.seek(0, videoStream_, AVSEEK_FLAG_BACKWARD)) {
+                LOG_WARNING << "Failed to seek to beginning for frame " << frameNumber;
+                return false;
+            }
+        } else {
+            // Use indexed seek (if available) for frame-accurate positioning
+            // The seek() function uses frameIndex_ to find the exact packet position for this frame
+            if (!seek(frameNumber)) {
+                LOG_WARNING << "Failed to seek to frame " << frameNumber;
+                return false;
+            }
         }
         
         // Flush hardware decoder buffers ONLY after a real seek
