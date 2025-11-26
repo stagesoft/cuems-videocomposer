@@ -518,9 +518,6 @@ bool GPUTextureFrameBuffer::setExternalNV12Textures(GLuint texY, GLuint texUV, c
         release();
     }
     
-    GLuint oldY = textureIds_[0];
-    GLuint oldUV = textureIds_[1];
-    
     // Set up as non-owning reference to external textures
     textureIds_[0] = texY;
     textureIds_[1] = texUV;
@@ -531,9 +528,6 @@ bool GPUTextureFrameBuffer::setExternalNV12Textures(GLuint texY, GLuint texUV, c
     info_ = info;
     isHAP_ = false;
     ownsTexture_ = false;  // Don't own these textures - VaapiInterop owns them
-    
-    LOG_INFO << "GPUTextureFrameBuffer: Updated external textures from Y=" << oldY << ",UV=" << oldUV 
-             << " to Y=" << texY << ",UV=" << texUV;
     
     return true;
 }

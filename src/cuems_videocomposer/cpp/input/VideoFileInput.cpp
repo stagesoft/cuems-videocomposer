@@ -925,20 +925,11 @@ bool VideoFileInput::indexFrames() {
         int64_t kfi = keyframeLookupHelper(reinterpret_cast<LocalFrameIndex*>(frameIndex_), frameCount_, searchLimit, frameIndex_[i].timestamp);
         
         if (kfi < 0) {
-            if (i < 5) {
-                LOG_INFO << "Frame " << i << " (ts=" << frameIndex_[i].timestamp 
-                         << ", frame_pts=" << frameIndex_[i].frame_pts << "): No keyframe found - seekpts=0";
-            }
             frameIndex_[i].seekpts = 0;
             frameIndex_[i].seekpos = 0;
         } else {
             frameIndex_[i].seekpts = frameIndex_[kfi].pkt_pts;
             frameIndex_[i].seekpos = frameIndex_[kfi].frame_pos;
-            if (i < 5) {
-                LOG_INFO << "Frame " << i << " (ts=" << frameIndex_[i].timestamp 
-                         << ", frame_pts=" << frameIndex_[i].frame_pts << "): Found keyframe " << kfi 
-                         << " (frame_pts=" << frameIndex_[kfi].frame_pts << ") -> seekpts=" << frameIndex_[i].seekpts;
-            }
         }
     }
     
@@ -991,11 +982,6 @@ bool VideoFileInput::seekToFrame(int64_t frameNumber) {
 
     const FrameIndex& idx = frameIndex_[frameNumber];
     int64_t timestamp = idx.timestamp;
-    
-    if (frameNumber < 5) {
-        LOG_INFO << "INDEX: Frame " << frameNumber << " -> seekpts=" << idx.seekpts 
-                 << ", timestamp=" << timestamp << ", key=" << (int)idx.key;
-    }
 
     if (timestamp < 0) {
         return false;
@@ -1430,9 +1416,6 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
                      frameNumber > lastDecodedFrame + 30);  // Large forward jump
     
     if (needSeek) {
-        LOG_INFO << "SEEK: Requesting frame " << frameNumber << " (last was " << lastDecodedFrame 
-                 << ") - performing seek+flush";
-        
         // SPECIAL CASE: Frames before first keyframe
         // If the first keyframe is at frame 30, frames 0-29 exist before it as P/B frames
         // The index seekpts for these frames points to the keyframe (wrong!)
@@ -1451,7 +1434,6 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
             // Check if requested frame is before first keyframe
             if (firstKeyframePTS > 0 && frameIndex_[frameNumber].pkt_pts < firstKeyframePTS) {
                 isBeforeFirstKeyframe = true;
-                LOG_INFO << "  Frame " << frameNumber << " is before first keyframe - seeking to file start";
             }
         }
         
@@ -1475,9 +1457,6 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         if (codecCtx_) {
             avcodec_flush_buffers(codecCtx_);
         }
-    } else {
-        LOG_INFO << "DECODE FORWARD: Frame " << frameNumber << " (last was " << lastDecodedFrame 
-                 << ") - no seek needed";
     }
 
     // Decode frame using hardware decoder
@@ -1508,23 +1487,16 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
                                ? hwFrame_->best_effort_timestamp 
                                : hwFrame_->pts;
             
-            LOG_INFO << "DECODED: PTS=" << framePTS << " (target=" << targetPTS 
-                     << ", requested frame " << frameNumber << ")";
-            
             // Check if this is the frame we want (within tolerance for floating point frame rates)
             int64_t ptsDiff = framePTS - targetPTS;
             int64_t ptsPerFrame = av_rescale_q(1, frameRateQ_, timeBase);
             
-            LOG_INFO << "  -> ptsDiff=" << ptsDiff << ", ptsPerFrame=" << ptsPerFrame;
-            
             if (ptsDiff >= 0 && ptsDiff < ptsPerFrame) {
                 // This is the correct frame (or close enough)
-                LOG_INFO << "  -> EXACT MATCH - using frame";
                 frameFinished = true;
                 break;
             } else if (framePTS < targetPTS) {
                 // This frame is BEFORE the target - discard it and continue decoding
-                LOG_INFO << "  -> TOO EARLY (PTS < target) - DISCARDING and continuing";
                 av_frame_unref(hwFrame_);
                 // Continue to next frame
             } else {
@@ -1533,10 +1505,8 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
                 // Just use this frame as best effort (better than showing nothing)
                 int64_t framesAhead = ptsDiff / ptsPerFrame;
                 if (framesAhead > 5) {
-                    LOG_ERROR << "  -> WAY TOO LATE (PTS > target+" << ptsPerFrame << ", " << framesAhead 
-                             << " frames ahead) - using as best effort, but seek may have failed";
-                } else {
-                    LOG_WARNING << "  -> TOO LATE (PTS > target+" << ptsPerFrame << ") - using anyway (B-frames?)";
+                    LOG_ERROR << "Decoded frame PTS " << framePTS << " is " << framesAhead 
+                             << " frames ahead of target " << targetPTS << " - seek may have failed";
                 }
                 frameFinished = true;
                 break;
@@ -1618,7 +1588,6 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         timeBase, frameRateQ_
     );
     lastDecodedFrame = decodedFrameNum;
-    LOG_INFO << "  -> Updated lastDecodedFrame to " << lastDecodedFrame;
 
     // Transfer hardware frame to GPU texture
     // MPV-style: VaapiInterop will ref the frame, and we'll unref our copy immediately after transfer

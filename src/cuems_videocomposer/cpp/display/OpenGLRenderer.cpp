@@ -705,19 +705,6 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
             GLuint texY = gpuFrame.getTextureId(0);
             GLuint texUV = gpuFrame.getTextureId(1);
             
-            static GLuint lastTexY = 0, lastTexUV = 0;
-            static int renderCount = 0;
-            if (texY != lastTexY || texUV != lastTexUV) {
-                LOG_INFO << "RENDER: Texture IDs CHANGED - now rendering Y=" << texY << " UV=" << texUV 
-                         << " (was Y=" << lastTexY << " UV=" << lastTexUV << ")";
-                lastTexY = texY;
-                lastTexUV = texUV;
-                renderCount = 0;
-            } else if (renderCount < 3) {
-                LOG_WARNING << "RENDER: Still using OLD texture IDs Y=" << texY << " UV=" << texUV << " (frame not updating?)";
-                renderCount++;
-            }
-            
             // Bind Y plane to texture unit 0
             glActiveTexture(GL_TEXTURE0);
             glEnable(GL_TEXTURE_2D);
