@@ -721,13 +721,13 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
         } else {
             // RGBA/single-plane format (HAP, decompressed frames)
             shader = (properties.cornerDeform.enabled && 
-                     properties.cornerDeform.highQuality && 
-                     rgbaShaderHQ_) 
-                    ? rgbaShaderHQ_.get() 
-                    : rgbaShader_.get();
-            
-            shader->use();
-            shader->setUniform("uTexture", 0);  // Texture unit 0
+                                 properties.cornerDeform.highQuality && 
+                                 rgbaShaderHQ_) 
+                                ? rgbaShaderHQ_.get() 
+                                : rgbaShader_.get();
+        
+        shader->use();
+        shader->setUniform("uTexture", 0);  // Texture unit 0
         }
         
         shader->setUniform("uOpacity", properties.opacity);

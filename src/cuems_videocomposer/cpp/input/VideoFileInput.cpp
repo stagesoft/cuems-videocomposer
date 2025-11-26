@@ -1532,10 +1532,10 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
     // The shader will do YUV→RGB conversion on the GPU (much faster than CPU sws_scale)
     if (srcFormat == AV_PIX_FMT_NV12) {
         // Allocate NV12 multi-plane texture if needed
-        if (!textureBuffer.isValid() || 
+    if (!textureBuffer.isValid() || 
             textureBuffer.getPlaneType() != TexturePlaneType::YUV_NV12 ||
-            textureBuffer.info().width != frameInfo_.width || 
-            textureBuffer.info().height != frameInfo_.height) {
+        textureBuffer.info().width != frameInfo_.width || 
+        textureBuffer.info().height != frameInfo_.height) {
             if (!textureBuffer.allocateMultiPlane(frameInfo_, TexturePlaneType::YUV_NV12)) {
                 LOG_WARNING << "transferHardwareFrameToGPU: Failed to allocate NV12 texture";
                 return false;
