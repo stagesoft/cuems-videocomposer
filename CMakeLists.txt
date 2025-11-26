@@ -108,6 +108,57 @@ if(ENABLE_OPENGL)
             # GLU is deprecated and not used - only need OpenGL
             set(GL_LIBS "-lGL")
         endif()
+        
+        # GLEW for modern OpenGL extension loading (shaders, VBO/VAO)
+        # Try pkg-config first, fallback to manual library search
+        pkg_check_modules(GLEW glew)
+        if(GLEW_FOUND)
+            add_definitions(-DHAVE_GLEW)
+            list(APPEND GL_LIBS ${GLEW_LIBRARIES})
+            include_directories(${GLEW_INCLUDE_DIRS})
+            message(STATUS "Found GLEW via pkg-config")
+        else()
+            # Fallback: try to find GLEW library directly
+            find_library(GLEW_LIBRARY NAMES GLEW glew32 glew glew32s PATH_SUFFIXES lib64 lib)
+            find_path(GLEW_INCLUDE_DIR GL/glew.h PATH_SUFFIXES include)
+            
+            if(GLEW_LIBRARY)
+                add_definitions(-DHAVE_GLEW)
+                list(APPEND GL_LIBS ${GLEW_LIBRARY})
+                if(GLEW_INCLUDE_DIR)
+                    include_directories(${GLEW_INCLUDE_DIR})
+                endif()
+                message(STATUS "Found GLEW library: ${GLEW_LIBRARY}")
+            else()
+                message(WARNING "GLEW not found - shader support will be limited. Install libglew-dev for full functionality.")
+            endif()
+        endif()
+        
+        # EGL for VAAPI zero-copy interop (Linux only)
+        if(PLATFORM_LINUX)
+            pkg_check_modules(EGL egl)
+            pkg_check_modules(VAAPI libva libva-drm)
+            pkg_check_modules(DRM libdrm)
+            
+            if(EGL_FOUND AND VAAPI_FOUND AND DRM_FOUND)
+                add_definitions(-DHAVE_EGL)
+                add_definitions(-DHAVE_VAAPI_INTEROP)
+                include_directories(${EGL_INCLUDE_DIRS} ${VAAPI_INCLUDE_DIRS} ${DRM_INCLUDE_DIRS})
+                list(APPEND GL_LIBS ${EGL_LIBRARIES} ${VAAPI_LIBRARIES} ${DRM_LIBRARIES})
+                message(STATUS "VAAPI zero-copy interop enabled (EGL + VAAPI + DRM)")
+            else()
+                if(NOT EGL_FOUND)
+                    message(STATUS "EGL not found - install libegl-dev for VAAPI zero-copy")
+                endif()
+                if(NOT VAAPI_FOUND)
+                    message(STATUS "VAAPI not found - install libva-dev libva-drm-dev for VAAPI zero-copy")
+                endif()
+                if(NOT DRM_FOUND)
+                    message(STATUS "DRM not found - install libdrm-dev for VAAPI zero-copy")
+                endif()
+                message(STATUS "VAAPI zero-copy interop disabled (missing dependencies)")
+            endif()
+        endif()
     endif()
 endif()
 
@@ -438,6 +489,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/display/CPUImageProcessor.cpp
     src/cuems_videocomposer/cpp/display/OpenGLDisplay.cpp
     src/cuems_videocomposer/cpp/display/OpenGLRenderer.cpp
+    src/cuems_videocomposer/cpp/display/ShaderProgram.cpp
     src/cuems_videocomposer/cpp/display/DisplayManager.cpp
     src/cuems_videocomposer/cpp/display/XineramaHelper.cpp
     src/cuems_videocomposer/cpp/remote/OSCRemoteControl.cpp
@@ -450,6 +502,13 @@ set(CPP_SOURCES
     # src/cuems_videocomposer/cpp/utils/MIDIBridge.cpp - Removed (using MIDISyncSource directly)
     # Note: Logger.h is header-only, no .cpp needed
 )
+
+# Add VAAPI interop source if available
+if(VAAPI_FOUND AND EGL_FOUND AND DRM_FOUND)
+    list(APPEND CPP_SOURCES
+        src/cuems_videocomposer/cpp/hwdec/VaapiInterop.cpp
+    )
+endif()
 
 # Add cuemslogger library (required by mtcreceiver)
 add_subdirectory(src/cuemslogger)
@@ -514,6 +573,13 @@ if(BUILD_TESTS)
         )
     endif()
     
+    # Add VAAPI interop if available
+    if(VAAPI_FOUND AND EGL_FOUND AND DRM_FOUND)
+        list(APPEND TEST_CPP_SOURCES
+            src/cuems_videocomposer/cpp/hwdec/VaapiInterop.cpp
+        )
+    endif()
+    
     add_executable(cuems_videocomposer_test ${TEST_SOURCES} ${TEST_CPP_SOURCES} src/cuems_videocomposer/common.c)
     target_include_directories(cuems_videocomposer_test PRIVATE
         src/cuems_videocomposer
@@ -533,6 +599,11 @@ if(BUILD_TESTS)
         find_library(GL_LIBRARY GL)
         if(GL_LIBRARY)
             target_link_libraries(cuems_videocomposer_test ${GL_LIBRARY})
+        endif()
+        
+        # Link VAAPI/EGL/DRM if available
+        if(VAAPI_FOUND AND EGL_FOUND AND DRM_FOUND)
+            target_link_libraries(cuems_videocomposer_test ${EGL_LIBRARIES} ${VAAPI_LIBRARIES} ${DRM_LIBRARIES})
         endif()
     endif()
     

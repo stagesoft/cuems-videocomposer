@@ -38,6 +38,10 @@
 #include "display/OpenGLDisplay.h"
 #include "display/DisplayManager.h"
 #include "remote/OSCRemoteControl.h"
+
+#ifdef HAVE_VAAPI_INTEROP
+#include "hwdec/VaapiInterop.h"
+#endif
 #include "osd/OSDManager.h"
 #include "utils/Logger.h"
 #include "utils/SMPTEUtils.h"
@@ -166,6 +170,23 @@ bool VideoComposerApplication::initializeDisplay() {
         std::cerr << "Failed to create display window" << std::endl;
         return false;
     }
+
+#ifdef HAVE_VAAPI_INTEROP
+    // Initialize VAAPI zero-copy interop (if available)
+    // Need to make OpenGL context current for texture generation
+    OpenGLDisplay* glDisplay = dynamic_cast<OpenGLDisplay*>(displayBackend_.get());
+    if (glDisplay && glDisplay->hasVaapiSupport()) {
+        glDisplay->makeCurrent();  // Need GL context for texture generation
+        vaapiInterop_ = std::make_unique<VaapiInterop>();
+        if (vaapiInterop_->init(glDisplay)) {
+            LOG_INFO << "VaapiInterop initialized - VAAPI zero-copy enabled for video playback";
+        } else {
+            LOG_WARNING << "VaapiInterop initialization failed - falling back to CPU copy";
+            vaapiInterop_.reset();
+        }
+        glDisplay->clearCurrent();
+    }
+#endif
 
     return true;
 }
@@ -511,6 +532,14 @@ std::unique_ptr<InputSource> VideoComposerApplication::createInputSourceFromFile
     auto tempInput = std::make_unique<VideoFileInput>();
     tempInput->setNoIndex(noIndex);  // Set before opening to avoid reopening
     tempInput->setHardwareDecodePreference(hwPref);
+    
+#ifdef HAVE_VAAPI_INTEROP
+    // Set VAAPI interop for zero-copy hardware decoding
+    if (vaapiInterop_) {
+        tempInput->setVaapiInterop(vaapiInterop_.get());
+    }
+#endif
+    
     if (!tempInput->open(filepath)) {
         return nullptr;
     }

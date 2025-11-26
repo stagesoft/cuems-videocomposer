@@ -14,6 +14,17 @@
 #include <X11/Xatom.h>
 #include <X11/keysym.h>
 #define USE_GLX 1
+
+#ifdef HAVE_EGL
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <cstring>  // for strstr
+
+// EGL extension constants
+#ifndef EGL_LINUX_DMA_BUF_EXT
+#define EGL_LINUX_DMA_BUF_EXT 0x3270
+#endif
+#endif
 #elif defined(PLATFORM_WINDOWS)
 #include <windows.h>
 #include <GL/gl.h>
@@ -33,6 +44,16 @@ OpenGLDisplay::OpenGLDisplay()
     , window_(0)
     , context_(nullptr)
     , screen_(0)
+#ifdef HAVE_EGL
+    , eglDisplay_(EGL_NO_DISPLAY)
+    , eglContext_(EGL_NO_CONTEXT)
+    , eglSurface_(EGL_NO_SURFACE)
+    , eglConfig_(nullptr)
+    , vaapiSupported_(false)
+    , eglCreateImageKHR_(nullptr)
+    , eglDestroyImageKHR_(nullptr)
+    , glEGLImageTargetTexture2DOES_(nullptr)
+#endif
 #elif defined(PLATFORM_WINDOWS)
     , hdc_(nullptr)
     , hwnd_(nullptr)
@@ -64,6 +85,15 @@ bool OpenGLDisplay::openWindow() {
         LOG_ERROR << "Failed to initialize GLX";
         return false;
     }
+    
+#ifdef HAVE_EGL
+    // Initialize EGL for VAAPI zero-copy interop (non-fatal if it fails)
+    if (!initEGL()) {
+        LOG_WARNING << "EGL initialization failed - VAAPI zero-copy disabled";
+        // Continue without VAAPI support - we'll fall back to CPU copy
+    }
+#endif
+
 #elif defined(USE_WGL)
     if (!initWGL()) {
         return false;
@@ -111,6 +141,9 @@ void OpenGLDisplay::closeWindow() {
     clearCurrent();
 
 #if defined(USE_GLX)
+#ifdef HAVE_EGL
+    cleanupEGL();
+#endif
     cleanupGLX();
 #elif defined(USE_WGL)
     cleanupWGL();
@@ -361,6 +394,123 @@ void OpenGLDisplay::cleanupGLX() {
         display_ = nullptr;
     }
 }
+
+#ifdef HAVE_EGL
+bool OpenGLDisplay::initEGL() {
+    if (!display_) {
+        LOG_ERROR << "Cannot initialize EGL: X11 display not available";
+        return false;
+    }
+    
+    // Get EGL display from X11 display
+    eglDisplay_ = eglGetDisplay((EGLNativeDisplayType)display_);
+    if (eglDisplay_ == EGL_NO_DISPLAY) {
+        LOG_WARNING << "eglGetDisplay failed";
+        return false;
+    }
+    
+    // Initialize EGL
+    EGLint major, minor;
+    if (!eglInitialize(eglDisplay_, &major, &minor)) {
+        LOG_WARNING << "eglInitialize failed";
+        eglDisplay_ = EGL_NO_DISPLAY;
+        return false;
+    }
+    
+    LOG_INFO << "EGL initialized: version " << major << "." << minor;
+    
+    // Query and check required extensions
+    if (!queryEGLExtensions()) {
+        LOG_WARNING << "Required EGL extensions not available";
+        eglTerminate(eglDisplay_);
+        eglDisplay_ = EGL_NO_DISPLAY;
+        return false;
+    }
+    
+    // Bind OpenGL API (we're using OpenGL, not OpenGL ES)
+    if (!eglBindAPI(EGL_OPENGL_API)) {
+        LOG_WARNING << "eglBindAPI(EGL_OPENGL_API) failed";
+        eglTerminate(eglDisplay_);
+        eglDisplay_ = EGL_NO_DISPLAY;
+        return false;
+    }
+    
+    // Note: We don't create an EGL context here because we're using GLX for rendering.
+    // EGL is only used for VAAPI DMA-BUF import via eglCreateImageKHR.
+    // The EGL display and extension functions are what we need for VAAPI interop.
+    
+    vaapiSupported_ = true;
+    LOG_INFO << "VAAPI zero-copy interop enabled";
+    
+    return true;
+}
+
+void OpenGLDisplay::cleanupEGL() {
+    if (eglDisplay_ != EGL_NO_DISPLAY) {
+        eglTerminate(eglDisplay_);
+        eglDisplay_ = EGL_NO_DISPLAY;
+    }
+    
+    eglContext_ = EGL_NO_CONTEXT;
+    eglSurface_ = EGL_NO_SURFACE;
+    eglConfig_ = nullptr;
+    vaapiSupported_ = false;
+    
+    eglCreateImageKHR_ = nullptr;
+    eglDestroyImageKHR_ = nullptr;
+    glEGLImageTargetTexture2DOES_ = nullptr;
+}
+
+bool OpenGLDisplay::queryEGLExtensions() {
+    const char* extensions = eglQueryString(eglDisplay_, EGL_EXTENSIONS);
+    if (!extensions) {
+        LOG_WARNING << "eglQueryString(EGL_EXTENSIONS) failed";
+        return false;
+    }
+    
+    LOG_VERBOSE << "EGL extensions: " << extensions;
+    
+    // Check for required extensions for VAAPI zero-copy
+    bool hasDmaBufImport = (strstr(extensions, "EGL_EXT_image_dma_buf_import") != nullptr);
+    bool hasImageBase = (strstr(extensions, "EGL_KHR_image_base") != nullptr);
+    
+    if (!hasDmaBufImport) {
+        LOG_WARNING << "EGL_EXT_image_dma_buf_import not supported";
+        return false;
+    }
+    
+    if (!hasImageBase) {
+        LOG_WARNING << "EGL_KHR_image_base not supported";
+        return false;
+    }
+    
+    LOG_INFO << "EGL extensions available: EGL_EXT_image_dma_buf_import, EGL_KHR_image_base";
+    
+    // Get extension function pointers
+    eglCreateImageKHR_ = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+    eglDestroyImageKHR_ = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
+    glEGLImageTargetTexture2DOES_ = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    
+    if (!eglCreateImageKHR_) {
+        LOG_WARNING << "eglCreateImageKHR not available";
+        return false;
+    }
+    
+    if (!eglDestroyImageKHR_) {
+        LOG_WARNING << "eglDestroyImageKHR not available";
+        return false;
+    }
+    
+    if (!glEGLImageTargetTexture2DOES_) {
+        LOG_WARNING << "glEGLImageTargetTexture2DOES not available";
+        return false;
+    }
+    
+    LOG_INFO << "EGL extension functions loaded successfully";
+    
+    return true;
+}
+#endif // HAVE_EGL
 
 void OpenGLDisplay::handleEventsGLX() {
     if (!display_) return;

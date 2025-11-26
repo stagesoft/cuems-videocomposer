@@ -11,6 +11,20 @@ struct _XDisplay;
 typedef struct _XDisplay Display;
 typedef unsigned long Window;
 typedef struct __GLXcontextRec *GLXContext;
+
+// EGL forward declarations (for VAAPI zero-copy)
+#ifdef HAVE_EGL
+typedef void* EGLDisplay;
+typedef void* EGLContext;
+typedef void* EGLSurface;
+typedef void* EGLConfig;
+typedef void* EGLImageKHR;
+// Function pointer types for EGL extensions
+typedef EGLImageKHR (*PFNEGLCREATEIMAGEKHRPROC)(EGLDisplay, EGLContext, unsigned int, void*, const int*);
+typedef unsigned int (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay, EGLImageKHR);
+typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(unsigned int, void*);
+#endif
+
 #elif defined(PLATFORM_WINDOWS)
 struct HDC__;
 typedef struct HDC__* HDC;
@@ -61,12 +75,31 @@ public:
     void makeCurrent();
     void clearCurrent();
 
+#ifdef HAVE_EGL
+    // EGL context access (for VAAPI zero-copy interop)
+    EGLDisplay getEGLDisplay() const { return eglDisplay_; }
+    bool hasVaapiSupport() const { return vaapiSupported_; }
+    
+    // EGL extension function pointers (for VaapiInterop)
+    PFNEGLCREATEIMAGEKHRPROC getEglCreateImageKHR() const { return eglCreateImageKHR_; }
+    PFNEGLDESTROYIMAGEKHRPROC getEglDestroyImageKHR() const { return eglDestroyImageKHR_; }
+    PFNGLEGLIMAGETARGETTEXTURE2DOESPROC getGlEGLImageTargetTexture2DOES() const { return glEGLImageTargetTexture2DOES_; }
+#endif
+
 private:
     // Platform-specific initialization
 #if defined(USE_GLX) || (!defined(PLATFORM_WINDOWS) && !defined(PLATFORM_OSX))
     bool initGLX();
     void cleanupGLX();
     void handleEventsGLX();
+    
+#ifdef HAVE_EGL
+    // EGL initialization for VAAPI zero-copy interop
+    bool initEGL();
+    void cleanupEGL();
+    bool queryEGLExtensions();
+#endif
+
 #elif defined(PLATFORM_WINDOWS)
     bool initWGL();
     void cleanupWGL();
@@ -96,6 +129,21 @@ private:
     Window window_;
     GLXContext context_;
     int screen_;
+    
+#ifdef HAVE_EGL
+    // EGL context for VAAPI zero-copy interop
+    EGLDisplay eglDisplay_;
+    EGLContext eglContext_;
+    EGLSurface eglSurface_;
+    EGLConfig eglConfig_;
+    bool vaapiSupported_;
+    
+    // EGL extension function pointers
+    PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR_;
+    PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR_;
+    PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES_;
+#endif
+
 #elif defined(PLATFORM_WINDOWS)
     HDC hdc_;
     HWND hwnd_;

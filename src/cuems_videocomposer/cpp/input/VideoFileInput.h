@@ -19,6 +19,11 @@ extern "C" {
 
 namespace videocomposer {
 
+// Forward declaration for VAAPI zero-copy interop
+#ifdef HAVE_VAAPI_INTEROP
+class VaapiInterop;
+#endif
+
 /**
  * VideoFileInput - FFmpeg-based video file input source
  * 
@@ -68,6 +73,19 @@ public:
 
     void setHardwareDecodePreference(HardwareDecodePreference preference) { hwPreference_ = preference; }
 
+#ifdef HAVE_VAAPI_INTEROP
+    /**
+     * Set VAAPI interop for zero-copy hardware decoding
+     * @param interop VaapiInterop instance from OpenGLDisplay
+     */
+    void setVaapiInterop(VaapiInterop* interop) { vaapiInterop_ = interop; }
+    
+    /**
+     * Check if zero-copy VAAPI decoding is available
+     */
+    bool hasVaapiZeroCopy() const;
+#endif
+
 private:
     struct FrameIndex {
         int64_t pkt_pts;
@@ -102,6 +120,7 @@ private:
     SwsContext* swsCtx_;
     int swsCtxWidth_;
     int swsCtxHeight_;
+    AVPixelFormat swsCtxFormat_;   // Track source format for sws context recreation
     int videoStream_;
 
     // Hardware decoding
@@ -111,6 +130,10 @@ private:
     bool useHardwareDecoding_;        // Whether hardware decoding is enabled
     bool codecCtxAllocated_;          // Whether codecCtx_ was allocated separately (hardware) or is part of stream (software)
     HardwareDecodePreference hwPreference_;
+    
+#ifdef HAVE_VAAPI_INTEROP
+    VaapiInterop* vaapiInterop_;      // VAAPI zero-copy interop (not owned)
+#endif
 
     // Frame indexing
     FrameIndex* frameIndex_;

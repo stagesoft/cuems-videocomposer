@@ -115,6 +115,9 @@ private:
     bool handleLayerXScale(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerYScale(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerRotation(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerCornerDeform(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerCornerDeformEnable(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerCornerDeformHQ(VideoLayer* layer, const std::vector<std::string>& args);
     
     // Corner deformation handlers
     bool handleLayerCorners(VideoLayer* layer, const std::vector<std::string>& args);

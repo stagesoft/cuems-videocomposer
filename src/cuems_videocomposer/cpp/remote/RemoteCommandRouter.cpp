@@ -161,6 +161,15 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerLayerCommand("rotation", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerRotation(layer, args);
     });
+    registerLayerCommand("corner_deform", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerCornerDeform(layer, args);
+    });
+    registerLayerCommand("corner_deform_enable", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerCornerDeformEnable(layer, args);
+    });
+    registerLayerCommand("corner_deform_hq", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerCornerDeformHQ(layer, args);
+    });
     registerLayerCommand("corners", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerCorners(layer, args);
     });
@@ -1060,6 +1069,38 @@ bool RemoteCommandRouter::handleLayerRotation(VideoLayer* layer, const std::vect
     }
     
     layer->properties().rotation = std::atof(args[0].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerCornerDeform(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.size() < 8) {
+        return false;
+    }
+    
+    auto& props = layer->properties();
+    // Corner deform expects 8 float values: 4 corners * (x_offset, y_offset)
+    // Format: corner0_x, corner0_y, corner1_x, corner1_y, corner2_x, corner2_y, corner3_x, corner3_y
+    for (int i = 0; i < 8; i++) {
+        props.cornerDeform.corners[i] = std::atof(args[i].c_str());
+    }
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerCornerDeformEnable(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    layer->properties().cornerDeform.enabled = (std::atoi(args[0].c_str()) != 0);
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerCornerDeformHQ(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    layer->properties().cornerDeform.highQuality = (std::atoi(args[0].c_str()) != 0);
     return true;
 }
 

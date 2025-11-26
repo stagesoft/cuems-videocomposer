@@ -13,11 +13,21 @@ typedef unsigned int GLenum;
 namespace videocomposer {
 
 /**
+ * Texture plane type for multi-plane formats
+ */
+enum class TexturePlaneType {
+    SINGLE,      // Single-plane RGB/RGBA
+    YUV_NV12,    // 2 planes: Y (R8) + UV (RG8)
+    YUV_420P     // 3 planes: Y (R8) + U (R8) + V (R8)
+};
+
+/**
  * GPUTextureFrameBuffer - Frame buffer that stores frames as GPU textures
  * 
  * This class is used for:
  * - HAP codec frames (DXT1/DXT5 compressed textures)
  * - Hardware-decoded frames (already on GPU)
+ * - Multi-plane YUV textures (NV12, YUV420P) for zero-copy hardware decoding
  * 
  * Key feature: Zero-copy - frames stay on GPU, no CPU→GPU transfer needed
  * 
@@ -48,8 +58,17 @@ public:
     // Release GPU texture
     void release();
 
-    // Get OpenGL texture ID
-    GLuint getTextureId() const { return textureId_; }
+    // Get OpenGL texture ID (single-plane or plane 0)
+    GLuint getTextureId() const { return textureIds_[0]; }
+    
+    // Get texture ID for specific plane (for multi-plane formats)
+    GLuint getTextureId(int plane) const;
+    
+    // Get number of texture planes
+    int getNumPlanes() const { return numPlanes_; }
+    
+    // Get plane type
+    TexturePlaneType getPlaneType() const { return planeType_; }
 
     // Get texture format (GL_COMPRESSED_RGB_S3TC_DXT1_EXT, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, etc.)
     GLenum getTextureFormat() const { return textureFormat_; }
@@ -58,13 +77,13 @@ public:
     bool isHAPTexture() const { return isHAP_; }
 
     // Check if this is a GPU texture (vs CPU buffer)
-    bool isGPUTexture() const { return textureId_ != 0; }
+    bool isGPUTexture() const { return textureIds_[0] != 0; }
 
     // Get frame info
     const FrameInfo& info() const { return info_; }
 
     // Check if buffer is valid
-    bool isValid() const { return textureId_ != 0; }
+    bool isValid() const { return textureIds_[0] != 0; }
 
     // Upload compressed texture data (for HAP)
     // data: compressed texture data (DXT1/DXT5)
@@ -73,13 +92,33 @@ public:
 
     // Upload uncompressed texture data (for hardware decoded frames)
     bool uploadUncompressedData(const uint8_t* data, size_t size, int width, int height, GLenum format, int stride = 0);
+    
+    // Allocate multi-plane YUV texture (for zero-copy VAAPI/CUDA)
+    // NV12: 2 planes (Y plane R8, UV plane RG8)
+    // YUV420P: 3 planes (Y, U, V all R8)
+    bool allocateMultiPlane(const FrameInfo& info, TexturePlaneType planeType);
+    
+    // Upload multi-plane YUV data
+    // For NV12: yData (full res), uvData (half res)
+    // For YUV420P: yData (full res), uData (quarter res), vData (quarter res)
+    bool uploadMultiPlaneData(const uint8_t* yData, const uint8_t* uData, const uint8_t* vData,
+                             int yStride, int uStride, int vStride);
+    
+    // Set external NV12 textures (for VAAPI zero-copy)
+    // This does NOT take ownership of the textures - caller must keep them alive
+    // Used when VaapiInterop provides texture IDs directly from DMA-BUF import
+    bool setExternalNV12Textures(GLuint texY, GLuint texUV, const FrameInfo& info);
 
 private:
-    GLuint textureId_;        // OpenGL texture ID
-    GLenum textureFormat_;    // OpenGL texture format
-    FrameInfo info_;          // Frame information
-    bool isHAP_;              // True if this is a HAP texture (DXT1/DXT5)
-    bool ownsTexture_;        // True if this instance owns the texture (should delete on destruction)
+    static constexpr int MAX_PLANES = 3;  // Maximum 3 planes (YUV420P)
+    
+    GLuint textureIds_[MAX_PLANES];  // OpenGL texture IDs (one per plane)
+    int numPlanes_;                  // Number of texture planes (1, 2, or 3)
+    TexturePlaneType planeType_;     // Plane type (single, NV12, YUV420P)
+    GLenum textureFormat_;           // OpenGL texture format
+    FrameInfo info_;                 // Frame information
+    bool isHAP_;                     // True if this is a HAP texture (DXT1/DXT5)
+    bool ownsTexture_;               // True if this instance owns the texture (should delete on destruction)
 };
 
 } // namespace videocomposer

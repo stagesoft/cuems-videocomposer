@@ -42,7 +42,9 @@ static bool checkGLError(const char* operation) {
 }
 
 GPUTextureFrameBuffer::GPUTextureFrameBuffer()
-    : textureId_(0)
+    : textureIds_{0, 0, 0}
+    , numPlanes_(1)
+    , planeType_(TexturePlaneType::SINGLE)
     , textureFormat_(0)
     , isHAP_(false)
     , ownsTexture_(false)
@@ -57,7 +59,9 @@ GPUTextureFrameBuffer::~GPUTextureFrameBuffer() {
 }
 
 GPUTextureFrameBuffer::GPUTextureFrameBuffer(const GPUTextureFrameBuffer& other)
-    : textureId_(other.textureId_)
+    : textureIds_{other.textureIds_[0], other.textureIds_[1], other.textureIds_[2]}
+    , numPlanes_(other.numPlanes_)
+    , planeType_(other.planeType_)
     , textureFormat_(other.textureFormat_)
     , info_(other.info_)
     , isHAP_(other.isHAP_)
@@ -73,7 +77,11 @@ GPUTextureFrameBuffer& GPUTextureFrameBuffer::operator=(const GPUTextureFrameBuf
         }
         
         // Copy the other's data (but don't take ownership)
-        textureId_ = other.textureId_;
+        textureIds_[0] = other.textureIds_[0];
+        textureIds_[1] = other.textureIds_[1];
+        textureIds_[2] = other.textureIds_[2];
+        numPlanes_ = other.numPlanes_;
+        planeType_ = other.planeType_;
         textureFormat_ = other.textureFormat_;
         info_ = other.info_;
         isHAP_ = other.isHAP_;
@@ -83,14 +91,20 @@ GPUTextureFrameBuffer& GPUTextureFrameBuffer::operator=(const GPUTextureFrameBuf
 }
 
 GPUTextureFrameBuffer::GPUTextureFrameBuffer(GPUTextureFrameBuffer&& other) noexcept
-    : textureId_(other.textureId_)
+    : textureIds_{other.textureIds_[0], other.textureIds_[1], other.textureIds_[2]}
+    , numPlanes_(other.numPlanes_)
+    , planeType_(other.planeType_)
     , textureFormat_(other.textureFormat_)
     , info_(other.info_)
     , isHAP_(other.isHAP_)
     , ownsTexture_(other.ownsTexture_)  // Take ownership from other
 {
     // Clear other so it doesn't delete the texture
-    other.textureId_ = 0;
+    other.textureIds_[0] = 0;
+    other.textureIds_[1] = 0;
+    other.textureIds_[2] = 0;
+    other.numPlanes_ = 1;
+    other.planeType_ = TexturePlaneType::SINGLE;
     other.textureFormat_ = 0;
     other.isHAP_ = false;
     other.ownsTexture_ = false;
@@ -104,14 +118,22 @@ GPUTextureFrameBuffer& GPUTextureFrameBuffer::operator=(GPUTextureFrameBuffer&& 
         }
         
         // Take other's data and ownership
-        textureId_ = other.textureId_;
+        textureIds_[0] = other.textureIds_[0];
+        textureIds_[1] = other.textureIds_[1];
+        textureIds_[2] = other.textureIds_[2];
+        numPlanes_ = other.numPlanes_;
+        planeType_ = other.planeType_;
         textureFormat_ = other.textureFormat_;
         info_ = other.info_;
         isHAP_ = other.isHAP_;
         ownsTexture_ = other.ownsTexture_;
         
         // Clear other so it doesn't delete the texture
-        other.textureId_ = 0;
+        other.textureIds_[0] = 0;
+        other.textureIds_[1] = 0;
+        other.textureIds_[2] = 0;
+        other.numPlanes_ = 1;
+        other.planeType_ = TexturePlaneType::SINGLE;
         other.textureFormat_ = 0;
         other.isHAP_ = false;
         other.ownsTexture_ = false;
@@ -134,13 +156,17 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
                << ", height=" << info.height << ", format=0x" << std::hex << textureFormat 
                << std::dec << ", isHAP=" << isHAP << ")";
 
+    // Single-plane allocation
+    numPlanes_ = 1;
+    planeType_ = TexturePlaneType::SINGLE;
+    
     // Generate OpenGL texture
     // Check if OpenGL context is available
     GLenum error = glGetError(); // Clear any previous errors
-    glGenTextures(1, &textureId_);
+    glGenTextures(1, &textureIds_[0]);
     error = glGetError();
-    if (textureId_ == 0 || error != GL_NO_ERROR) {
-        if (error == GL_NO_ERROR && textureId_ == 0) {
+    if (textureIds_[0] == 0 || error != GL_NO_ERROR) {
+        if (error == GL_NO_ERROR && textureIds_[0] == 0) {
             LOG_WARNING << "GPUTextureFrameBuffer: glGenTextures returned 0 (no OpenGL context?)";
         } else {
             checkGLError("glGenTextures");
@@ -148,11 +174,11 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
         return false;
     }
 
-    glBindTexture(GL_TEXTURE_2D, textureId_);
+    glBindTexture(GL_TEXTURE_2D, textureIds_[0]);
     if (!checkGLError("glBindTexture")) {
         LOG_WARNING << "GPUTextureFrameBuffer: glBindTexture failed";
-        glDeleteTextures(1, &textureId_);
-        textureId_ = 0;
+        glDeleteTextures(1, &textureIds_[0]);
+        textureIds_[0] = 0;
         return false;
     }
     
@@ -164,8 +190,8 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
     if (!checkGLError("glTexParameteri")) {
         LOG_WARNING << "GPUTextureFrameBuffer: glTexParameteri failed";
         glBindTexture(GL_TEXTURE_2D, 0);
-        glDeleteTextures(1, &textureId_);
-        textureId_ = 0;
+        glDeleteTextures(1, &textureIds_[0]);
+        textureIds_[0] = 0;
         return false;
     }
 
@@ -180,8 +206,8 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
                      GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         if (!checkGLError("glTexImage2D")) {
             glBindTexture(GL_TEXTURE_2D, 0);
-            glDeleteTextures(1, &textureId_);
-            textureId_ = 0;
+            glDeleteTextures(1, &textureIds_[0]);
+            textureIds_[0] = 0;
             return false;
         }
     }
@@ -192,21 +218,38 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
 }
 
 void GPUTextureFrameBuffer::release() {
-    if (textureId_ != 0 && ownsTexture_) {
-        glDeleteTextures(1, &textureId_);
+    if (ownsTexture_) {
+        // Delete all allocated planes
+        for (int i = 0; i < numPlanes_; i++) {
+            if (textureIds_[i] != 0) {
+                glDeleteTextures(1, &textureIds_[i]);
+                textureIds_[i] = 0;
+            }
+        }
     }
-    textureId_ = 0;
+    textureIds_[0] = 0;
+    textureIds_[1] = 0;
+    textureIds_[2] = 0;
+    numPlanes_ = 1;
+    planeType_ = TexturePlaneType::SINGLE;
     textureFormat_ = 0;
     isHAP_ = false;
     ownsTexture_ = false;
 }
 
+GLuint GPUTextureFrameBuffer::getTextureId(int plane) const {
+    if (plane >= 0 && plane < numPlanes_) {
+        return textureIds_[plane];
+    }
+    return 0;
+}
+
 bool GPUTextureFrameBuffer::uploadCompressedData(const uint8_t* data, size_t size, int width, int height, GLenum format) {
-    if (textureId_ == 0 || data == nullptr || size == 0) {
+    if (textureIds_[0] == 0 || data == nullptr || size == 0) {
         return false;
     }
 
-    glBindTexture(GL_TEXTURE_2D, textureId_);
+    glBindTexture(GL_TEXTURE_2D, textureIds_[0]);
     if (!checkGLError("glBindTexture(upload)")) {
         return false;
     }
@@ -226,11 +269,11 @@ bool GPUTextureFrameBuffer::uploadCompressedData(const uint8_t* data, size_t siz
 }
 
 bool GPUTextureFrameBuffer::uploadUncompressedData(const uint8_t* data, size_t size, int width, int height, GLenum format, int stride) {
-    if (textureId_ == 0 || data == nullptr || size == 0) {
+    if (textureIds_[0] == 0 || data == nullptr || size == 0) {
         return false;
     }
 
-    glBindTexture(GL_TEXTURE_2D, textureId_);
+    glBindTexture(GL_TEXTURE_2D, textureIds_[0]);
     if (!checkGLError("glBindTexture(upload)")) {
         return false;
     }
@@ -265,6 +308,230 @@ bool GPUTextureFrameBuffer::uploadUncompressedData(const uint8_t* data, size_t s
 
     glBindTexture(GL_TEXTURE_2D, 0);
     checkGLError("glBindTexture(unbind)");
+    return true;
+}
+
+bool GPUTextureFrameBuffer::allocateMultiPlane(const FrameInfo& info, TexturePlaneType planeType) {
+    // Release old texture if we own it
+    if (ownsTexture_) {
+        release();
+    }
+    
+    info_ = info;
+    planeType_ = planeType;
+    isHAP_ = false;
+    ownsTexture_ = true;
+    
+    // Determine number of planes
+    switch (planeType) {
+        case TexturePlaneType::SINGLE:
+            numPlanes_ = 1;
+            break;
+        case TexturePlaneType::YUV_NV12:
+            numPlanes_ = 2;
+            break;
+        case TexturePlaneType::YUV_420P:
+            numPlanes_ = 3;
+            break;
+        default:
+            LOG_ERROR << "GPUTextureFrameBuffer: Unknown plane type";
+            return false;
+    }
+    
+    LOG_VERBOSE << "GPUTextureFrameBuffer: Allocating multi-plane texture (width=" << info.width 
+               << ", height=" << info.height << ", planes=" << numPlanes_ << ")";
+    
+    // Generate textures for all planes
+    glGenTextures(numPlanes_, textureIds_);
+    if (!checkGLError("glGenTextures(multi-plane)")) {
+        return false;
+    }
+    
+    // Setup each plane
+    for (int i = 0; i < numPlanes_; i++) {
+        if (textureIds_[i] == 0) {
+            LOG_ERROR << "GPUTextureFrameBuffer: glGenTextures returned 0 for plane " << i;
+            release();
+            return false;
+        }
+        
+        // Bind texture
+        glBindTexture(GL_TEXTURE_2D, textureIds_[i]);
+        if (!checkGLError("glBindTexture(multi-plane)")) {
+            release();
+            return false;
+        }
+        
+        // Set texture parameters
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        
+        // Determine plane dimensions and format
+        int planeWidth = info.width;
+        int planeHeight = info.height;
+        GLenum internalFormat = GL_R8;
+        GLenum format = GL_RED;
+        
+        if (planeType == TexturePlaneType::YUV_NV12) {
+            if (i == 0) {
+                // Y plane: full resolution, R8
+                internalFormat = GL_R8;
+                format = GL_RED;
+            } else {
+                // UV plane: half resolution, RG8
+                planeWidth = info.width / 2;
+                planeHeight = info.height / 2;
+                internalFormat = GL_RG8;
+                format = GL_RG;
+            }
+        } else if (planeType == TexturePlaneType::YUV_420P) {
+            if (i == 0) {
+                // Y plane: full resolution, R8
+                internalFormat = GL_R8;
+                format = GL_RED;
+            } else {
+                // U/V planes: quarter resolution, R8
+                planeWidth = info.width / 2;
+                planeHeight = info.height / 2;
+                internalFormat = GL_R8;
+                format = GL_RED;
+            }
+        }
+        
+        // Allocate texture storage
+        glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, planeWidth, planeHeight, 
+                    0, format, GL_UNSIGNED_BYTE, nullptr);
+        if (!checkGLError("glTexImage2D(multi-plane)")) {
+            release();
+            return false;
+        }
+    }
+    
+    glBindTexture(GL_TEXTURE_2D, 0);
+    
+    LOG_VERBOSE << "GPUTextureFrameBuffer: Multi-plane texture allocated successfully";
+    return true;
+}
+
+bool GPUTextureFrameBuffer::uploadMultiPlaneData(const uint8_t* yData, const uint8_t* uData, const uint8_t* vData,
+                                                 int yStride, int uStride, int vStride) {
+    if (textureIds_[0] == 0) {
+        LOG_ERROR << "GPUTextureFrameBuffer: No texture allocated for multi-plane upload";
+        return false;
+    }
+    
+    if (planeType_ == TexturePlaneType::YUV_NV12) {
+        // NV12: 2 planes (Y, UV)
+        if (!yData || !uData) {
+            LOG_ERROR << "GPUTextureFrameBuffer: Invalid data pointers for NV12";
+            return false;
+        }
+        
+        // Upload Y plane
+        glBindTexture(GL_TEXTURE_2D, textureIds_[0]);
+        if (yStride != info_.width) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, yStride);
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, info_.width, info_.height,
+                       GL_RED, GL_UNSIGNED_BYTE, yData);
+        if (yStride != info_.width) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        }
+        
+        // Upload UV plane
+        glBindTexture(GL_TEXTURE_2D, textureIds_[1]);
+        int uvWidth = info_.width / 2;
+        int uvHeight = info_.height / 2;
+        if (uStride != uvWidth * 2) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, uStride / 2);
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight,
+                       GL_RG, GL_UNSIGNED_BYTE, uData);
+        if (uStride != uvWidth * 2) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        }
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return checkGLError("uploadMultiPlaneData(NV12)");
+        
+    } else if (planeType_ == TexturePlaneType::YUV_420P) {
+        // YUV420P: 3 planes (Y, U, V)
+        if (!yData || !uData || !vData) {
+            LOG_ERROR << "GPUTextureFrameBuffer: Invalid data pointers for YUV420P";
+            return false;
+        }
+        
+        int uvWidth = info_.width / 2;
+        int uvHeight = info_.height / 2;
+        
+        // Upload Y plane
+        glBindTexture(GL_TEXTURE_2D, textureIds_[0]);
+        if (yStride != info_.width) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, yStride);
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, info_.width, info_.height,
+                       GL_RED, GL_UNSIGNED_BYTE, yData);
+        if (yStride != info_.width) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        }
+        
+        // Upload U plane
+        glBindTexture(GL_TEXTURE_2D, textureIds_[1]);
+        if (uStride != uvWidth) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, uStride);
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight,
+                       GL_RED, GL_UNSIGNED_BYTE, uData);
+        if (uStride != uvWidth) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        }
+        
+        // Upload V plane
+        glBindTexture(GL_TEXTURE_2D, textureIds_[2]);
+        if (vStride != uvWidth) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, vStride);
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight,
+                       GL_RED, GL_UNSIGNED_BYTE, vData);
+        if (vStride != uvWidth) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        }
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return checkGLError("uploadMultiPlaneData(YUV420P)");
+    }
+    
+    LOG_ERROR << "GPUTextureFrameBuffer: Invalid plane type for multi-plane upload";
+    return false;
+}
+
+bool GPUTextureFrameBuffer::setExternalNV12Textures(GLuint texY, GLuint texUV, const FrameInfo& info) {
+    if (texY == 0 || texUV == 0) {
+        LOG_ERROR << "GPUTextureFrameBuffer: Invalid external texture IDs";
+        return false;
+    }
+    
+    // Release any existing owned textures
+    if (ownsTexture_) {
+        release();
+    }
+    
+    // Set up as non-owning reference to external textures
+    textureIds_[0] = texY;
+    textureIds_[1] = texUV;
+    textureIds_[2] = 0;
+    numPlanes_ = 2;
+    planeType_ = TexturePlaneType::YUV_NV12;
+    textureFormat_ = GL_RG;  // NV12 UV plane format
+    info_ = info;
+    isHAP_ = false;
+    ownsTexture_ = false;  // Don't own these textures - VaapiInterop owns them
+    
+    LOG_VERBOSE << "GPUTextureFrameBuffer: Set external NV12 textures (Y=" << texY 
+               << ", UV=" << texUV << ", " << info.width << "x" << info.height << ")";
+    
     return true;
 }
 

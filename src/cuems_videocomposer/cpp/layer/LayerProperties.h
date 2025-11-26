@@ -48,6 +48,7 @@ struct LayerProperties {
     struct {
         float corners[8];  // [corner1x, corner1y, corner2x, corner2y, corner3x, corner3y, corner4x, corner4y]
         bool enabled = false;
+        bool highQuality = false;  // Enable anisotropic filtering for extreme warps
     } cornerDeform;
     
     // Auto-unload: automatically unload file when playback ends

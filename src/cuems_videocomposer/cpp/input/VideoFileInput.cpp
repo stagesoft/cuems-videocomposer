@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <vector>
 
+#ifdef HAVE_VAAPI_INTEROP
+#include "../hwdec/VaapiInterop.h"
+#endif
+
 // OpenGL includes
 #ifdef __APPLE__
 #include <OpenGL/gl.h>
@@ -34,6 +38,7 @@ VideoFileInput::VideoFileInput()
     , swsCtx_(nullptr)
     , swsCtxWidth_(0)
     , swsCtxHeight_(0)
+    , swsCtxFormat_(AV_PIX_FMT_NONE)
     , videoStream_(-1)
     , frameIndex_(nullptr)
     , frameCount_(0)
@@ -51,6 +56,9 @@ VideoFileInput::VideoFileInput()
     , useHardwareDecoding_(false)
     , codecCtxAllocated_(false)
     , hwPreference_(HardwareDecodePreference::AUTO)
+#ifdef HAVE_VAAPI_INTEROP
+    , vaapiInterop_(nullptr)
+#endif
 {
     frameRateQ_ = {1, 1};
     frameInfo_ = {};
@@ -1355,25 +1363,34 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         return false;
     }
 
-    int bailout = 64; // Increased bailout for hardware decoders (like xjadeo uses 2 * seek_threshold)
+    // Hardware decoders (especially h264_cuvid) need multiple packets before producing output
+    // due to B-frame reordering and internal buffering. mpv uses up to 32 packets during probing.
+    // We use a packet count bailout, not an iteration bailout.
+    const int MAX_PACKETS = 64;  // Maximum packets to send before giving up
+    int packetsSent = 0;
+    int errorCount = 0;
+    const int MAX_ERRORS = 10;
     bool frameFinished = false;
 
-    while (bailout > 0 && !frameFinished) {
+    while (packetsSent < MAX_PACKETS && errorCount < MAX_ERRORS && !frameFinished) {
         // Try to receive a frame first (in case decoder has buffered frames)
         int err = avcodec_receive_frame(codecCtx_, hwFrame_);
         if (err == 0) {
             frameFinished = true;
             break;
-        } else if (err != AVERROR(EAGAIN)) {
-            // Error other than EAGAIN
-            --bailout;
-            if (err == AVERROR_EOF) {
-                // Decoder flushed, need to send more packets
-                continue;
-            } else {
-                // Other error, try to continue
-                continue;
-            }
+        } else if (err == AVERROR(EAGAIN)) {
+            // Decoder needs more input - this is normal, not an error
+            // Continue to send more packets
+        } else if (err == AVERROR_EOF) {
+            // Decoder flushed, no more frames
+            break;
+        } else {
+            // Actual error
+            ++errorCount;
+            char errbuf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(err, errbuf, AV_ERROR_MAX_STRING_SIZE);
+            LOG_VERBOSE << "Hardware decoder receive error: " << errbuf;
+            continue;
         }
 
         // Need more input - read and send a packet
@@ -1383,38 +1400,46 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
             if (err == AVERROR_EOF) {
                 // End of file - try to flush decoder
                 err = avcodec_send_packet(codecCtx_, nullptr); // nullptr flushes
-                if (err < 0 && err != AVERROR_EOF) {
-                    --bailout;
-                    continue;
+                if (err < 0 && err != AVERROR_EOF && err != AVERROR(EAGAIN)) {
+                    ++errorCount;
                 }
                 // After flush, try to receive remaining frames
                 continue;
             } else {
+                // Read error
                 av_packet_free(&packet);
                 return false;
             }
         }
 
+        // Skip non-video packets
         if (packet->stream_index != videoStream_) {
             continue;
         }
 
         // Send packet to hardware decoder
         err = avcodec_send_packet(codecCtx_, packet);
-        if (err < 0) {
-            if (err == AVERROR(EAGAIN)) {
-                // Decoder input buffer full, try to receive a frame first
-                continue;
-            } else if (err == AVERROR_EOF) {
-                // Decoder already flushed
-                --bailout;
-                continue;
-            } else {
-                // Other error
-                --bailout;
-                continue;
-            }
+        if (err == 0) {
+            // Successfully sent packet
+            ++packetsSent;
+        } else if (err == AVERROR(EAGAIN)) {
+            // Decoder input buffer full - this shouldn't happen if we're receiving frames properly
+            // Try to receive a frame and retry
+            continue;
+        } else if (err == AVERROR_EOF) {
+            // Decoder already flushed
+            break;
+        } else {
+            // Send error
+            ++errorCount;
+            char errbuf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(err, errbuf, AV_ERROR_MAX_STRING_SIZE);
+            LOG_VERBOSE << "Hardware decoder send error: " << errbuf;
         }
+    }
+    
+    if (!frameFinished) {
+        LOG_VERBOSE << "Hardware decode: no frame after " << packetsSent << " packets";
     }
 
     if (!frameFinished) {
@@ -1433,6 +1458,31 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
         return false;
     }
 
+#ifdef HAVE_VAAPI_INTEROP
+    // VAAPI ZERO-COPY PATH: If frame is VAAPI format and we have interop, use it!
+    // This avoids ALL CPU transfers - frame stays on GPU the entire time
+    if (hwFrame->format == AV_PIX_FMT_VAAPI && vaapiInterop_ && vaapiInterop_->isAvailable()) {
+        GLuint texY = 0, texUV = 0;
+        int width = 0, height = 0;
+        
+        if (vaapiInterop_->importFrame(hwFrame, texY, texUV, width, height)) {
+            // Set up the texture buffer with the imported textures
+            // The VaapiInterop owns the textures, so we need to reference them
+            if (!textureBuffer.setExternalNV12Textures(texY, texUV, frameInfo_)) {
+                LOG_WARNING << "transferHardwareFrameToGPU: Failed to set external NV12 textures";
+                vaapiInterop_->releaseFrame();
+                // Fall through to CPU path
+            } else {
+                LOG_VERBOSE << "transferHardwareFrameToGPU: VAAPI zero-copy import successful "
+                           << width << "x" << height;
+                return true;
+            }
+        } else {
+            LOG_VERBOSE << "transferHardwareFrameToGPU: VAAPI zero-copy failed, falling back to CPU path";
+        }
+    }
+#endif
+
     // Check if this is actually a hardware frame (has hardware format)
     // Cuvid decoders can output frames in different formats - some may be CPU frames already
     bool isHardwareFrame = (hwFrame->format == AV_PIX_FMT_CUDA || 
@@ -1450,63 +1500,133 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
         }
     }
 
-    // If it's not a hardware frame, copy it directly (cuvid might output CPU frames)
-    if (!isHardwareFrame) {
-        // Frame is already on CPU, copy it to our frame
-        if (av_frame_copy(frame_, hwFrame) < 0) {
-            return false;
-        }
-    } else {
-        // Hardware frames need to be transferred to GPU texture
-        // The exact method depends on the hardware decoder type
+    // Determine which frame to use for conversion
+    AVFrame* sourceFrame = hwFrame;  // Use hwFrame directly if it's already on CPU
+    
+    if (isHardwareFrame) {
+        // Hardware frames need to be transferred from GPU to CPU first
         
-        // For now, we'll need to download from hardware frame to CPU,
-        // then upload to GPU texture. In the future, we can optimize this
-        // to use zero-copy methods (e.g., CUDA interop, VAAPI surface export)
-
+        // Allocate CPU frame if needed
+        if (!frame_) {
+            frame_ = av_frame_alloc();
+            if (!frame_) {
+                return false;
+            }
+        }
+        
         // Download from hardware frame to CPU frame
-        // For cuvid frames, we need to ensure the device context is available
         int ret = av_hwframe_transfer_data(frame_, hwFrame, 0);
         if (ret < 0) {
             char errbuf[AV_ERROR_MAX_STRING_SIZE];
             av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
-            LOG_WARNING << "Failed to transfer hardware frame to CPU: " << errbuf << " (error code: " << ret << ")";
+            LOG_WARNING << "Failed to transfer hardware frame to CPU: " << errbuf;
             return false;
         }
+        sourceFrame = frame_;
+    }
+    // else: h264_cuvid outputs directly to CPU memory (e.g., NV12) - use hwFrame directly
+
+    AVPixelFormat srcFormat = static_cast<AVPixelFormat>(sourceFrame->format);
+    
+    // OPTIMIZATION: If source is NV12, upload directly without sws_scale conversion
+    // The shader will do YUV→RGB conversion on the GPU (much faster than CPU sws_scale)
+    if (srcFormat == AV_PIX_FMT_NV12) {
+        // Allocate NV12 multi-plane texture if needed
+        if (!textureBuffer.isValid() || 
+            textureBuffer.getPlaneType() != TexturePlaneType::YUV_NV12 ||
+            textureBuffer.info().width != frameInfo_.width || 
+            textureBuffer.info().height != frameInfo_.height) {
+            if (!textureBuffer.allocateMultiPlane(frameInfo_, TexturePlaneType::YUV_NV12)) {
+                LOG_WARNING << "transferHardwareFrameToGPU: Failed to allocate NV12 texture";
+                return false;
+            }
+            LOG_INFO << "transferHardwareFrameToGPU: Allocated NV12 multi-plane texture "
+                    << frameInfo_.width << "x" << frameInfo_.height;
+        }
+        
+        // Upload Y and UV planes directly
+        // NV12: data[0] = Y plane, data[1] = interleaved UV plane
+        if (!textureBuffer.uploadMultiPlaneData(
+                sourceFrame->data[0],  // Y plane
+                sourceFrame->data[1],  // UV plane (interleaved)
+                nullptr,               // No V plane for NV12
+                sourceFrame->linesize[0],  // Y stride
+                sourceFrame->linesize[1],  // UV stride
+                0)) {                      // No V stride
+            LOG_WARNING << "transferHardwareFrameToGPU: Failed to upload NV12 data";
+            return false;
+        }
+        
+        LOG_VERBOSE << "transferHardwareFrameToGPU: Uploaded NV12 directly (no sws_scale)";
+        return true;
+    }
+    
+    // OPTIMIZATION: If source is YUV420P, upload directly without sws_scale conversion
+    if (srcFormat == AV_PIX_FMT_YUV420P) {
+        // Allocate YUV420P multi-plane texture if needed
+        if (!textureBuffer.isValid() || 
+            textureBuffer.getPlaneType() != TexturePlaneType::YUV_420P ||
+            textureBuffer.info().width != frameInfo_.width || 
+            textureBuffer.info().height != frameInfo_.height) {
+            if (!textureBuffer.allocateMultiPlane(frameInfo_, TexturePlaneType::YUV_420P)) {
+                LOG_WARNING << "transferHardwareFrameToGPU: Failed to allocate YUV420P texture";
+                return false;
+            }
+            LOG_INFO << "transferHardwareFrameToGPU: Allocated YUV420P multi-plane texture "
+                    << frameInfo_.width << "x" << frameInfo_.height;
+        }
+        
+        // Upload Y, U, V planes directly
+        if (!textureBuffer.uploadMultiPlaneData(
+                sourceFrame->data[0],  // Y plane
+                sourceFrame->data[1],  // U plane
+                sourceFrame->data[2],  // V plane
+                sourceFrame->linesize[0],  // Y stride
+                sourceFrame->linesize[1],  // U stride
+                sourceFrame->linesize[2])) { // V stride
+            LOG_WARNING << "transferHardwareFrameToGPU: Failed to upload YUV420P data";
+            return false;
+        }
+        
+        LOG_VERBOSE << "transferHardwareFrameToGPU: Uploaded YUV420P directly (no sws_scale)";
+        return true;
     }
 
-    // Convert CPU frame to GPU texture
-    // For now, we'll use the existing CPU path and upload to GPU
-    // TODO: Implement zero-copy hardware frame to GPU texture transfer
+    // FALLBACK: For other formats, use sws_scale to convert to RGBA
+    // This is slower but ensures compatibility with all pixel formats
     
-    // Allocate texture buffer if needed
+    // Allocate RGBA texture buffer if needed
     if (!textureBuffer.isValid() || 
+        textureBuffer.getPlaneType() != TexturePlaneType::SINGLE ||
         textureBuffer.info().width != frameInfo_.width || 
         textureBuffer.info().height != frameInfo_.height) {
-        GLenum textureFormat = GL_RGBA; // Uncompressed texture
+        GLenum textureFormat = GL_RGBA;
         if (!textureBuffer.allocate(frameInfo_, textureFormat, false)) {
             return false;
         }
     }
 
-    // Convert frame format to RGBA and upload to GPU
     // Initialize sws context if needed
-    if (!swsCtx_ || swsCtxWidth_ != frameInfo_.width || swsCtxHeight_ != frameInfo_.height) {
+    if (!swsCtx_ || swsCtxWidth_ != sourceFrame->width || swsCtxHeight_ != sourceFrame->height ||
+        swsCtxFormat_ != srcFormat) {
         if (swsCtx_) {
             sws_freeContext(swsCtx_);
             swsCtx_ = nullptr;
         }
         
         swsCtx_ = sws_getContext(
-            frame_->width, frame_->height, static_cast<AVPixelFormat>(frame_->format),
+            sourceFrame->width, sourceFrame->height, srcFormat,
             frameInfo_.width, frameInfo_.height, AV_PIX_FMT_RGBA,
             SWS_BICUBIC, nullptr, nullptr, nullptr
         );
         if (!swsCtx_) {
             return false;
         }
-        swsCtxWidth_ = frameInfo_.width;
-        swsCtxHeight_ = frameInfo_.height;
+        swsCtxWidth_ = sourceFrame->width;
+        swsCtxHeight_ = sourceFrame->height;
+        swsCtxFormat_ = srcFormat;
+        LOG_WARNING << "transferHardwareFrameToGPU: Using sws_scale fallback for format " 
+                   << av_get_pix_fmt_name(srcFormat) << " (slower path)";
     }
 
     // Allocate temporary CPU buffer for RGBA data
@@ -1520,16 +1640,21 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
     
     // Scale and convert to RGBA
     int result = sws_scale(swsCtx_,
-              (const uint8_t* const*)frame_->data, frame_->linesize,
-              0, frame_->height,
+              (const uint8_t* const*)sourceFrame->data, sourceFrame->linesize,
+              0, sourceFrame->height,
               dstData, dstLinesize);
     
     if (result <= 0) {
+        LOG_WARNING << "transferHardwareFrameToGPU: sws_scale failed, result=" << result;
         return false;
     }
+    
+    // Debug: Check first few pixels to verify conversion worked
+    LOG_VERBOSE << "transferHardwareFrameToGPU: sws_scale converted " << result << " lines, "
+               << "first pixel RGBA: " << (int)rgbaBuffer[0] << "," << (int)rgbaBuffer[1] << ","
+               << (int)rgbaBuffer[2] << "," << (int)rgbaBuffer[3];
 
     // Upload RGBA data to GPU texture
-    // Note: uploadUncompressedData expects stride in bytes, which we already have
     if (!textureBuffer.uploadUncompressedData(rgbaBuffer.data(), rgbaSize,
                                              frameInfo_.width, frameInfo_.height,
                                              GL_RGBA)) {
@@ -1538,6 +1663,13 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
 
     return true;
 }
+
+#ifdef HAVE_VAAPI_INTEROP
+bool VideoFileInput::hasVaapiZeroCopy() const {
+    return vaapiInterop_ != nullptr && vaapiInterop_->isAvailable() &&
+           hwDecoderType_ == HardwareDecoder::Type::VAAPI;
+}
+#endif
 
 void VideoFileInput::cleanup() {
     // Free frame index
@@ -1554,6 +1686,7 @@ void VideoFileInput::cleanup() {
     }
     swsCtxWidth_ = 0;
     swsCtxHeight_ = 0;
+    swsCtxFormat_ = AV_PIX_FMT_NONE;
 
     // Free hardware frames (must use av_frame_free for frames allocated with av_frame_alloc)
     if (hwFrame_) {

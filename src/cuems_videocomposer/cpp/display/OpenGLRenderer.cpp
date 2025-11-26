@@ -4,6 +4,8 @@
 #include "../utils/Logger.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/InputSource.h"
+#include "VideoShaders.h"
+#include <GL/glew.h>  // Must be included before GL/gl.h
 extern "C" {
 #ifndef HAVE_GL
 #define HAVE_GL
@@ -47,6 +49,13 @@ OpenGLRenderer::OpenGLRenderer()
     , viewportHeight_(0)
     , letterbox_(true)
     , initialized_(false)
+    , quadVAO_(0)
+    , quadVBO_(0)
+    , rgbaShader_(nullptr)
+    , rgbaShaderHQ_(nullptr)
+    , nv12Shader_(nullptr)
+    , yuv420pShader_(nullptr)
+    , useShaders_(false)
     , texturesToDelete_()
 {
 }
@@ -58,6 +67,22 @@ OpenGLRenderer::~OpenGLRenderer() {
 bool OpenGLRenderer::init() {
     if (initialized_) {
         return true;
+    }
+    
+    // Initialize GLEW for modern OpenGL extension loading
+    // Note: OpenGL context must already exist (created by OpenGLDisplay)
+    GLenum glewErr = glewInit();
+    if (glewErr != GLEW_OK) {
+        LOG_ERROR << "GLEW initialization failed: " << glewGetErrorString(glewErr);
+        return false;
+    }
+    
+    LOG_INFO << "OpenGL version: " << glGetString(GL_VERSION);
+    LOG_INFO << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION);
+
+    // Check for required OpenGL versions/extensions
+    if (!GLEW_VERSION_3_3) {
+        LOG_WARNING << "OpenGL 3.3 not available, some features may not work";
     }
 
     // Initialize OpenGL state (matches original xjadeo)
@@ -71,6 +96,26 @@ bool OpenGLRenderer::init() {
     glGenTextures(1, &textureId_);
     if (textureId_ == 0) {
         return false;
+    }
+    
+    // Initialize VBO/VAO for shader-based rendering
+    if (!initQuadVBO()) {
+        LOG_ERROR << "Failed to initialize quad VBO";
+        return false;
+    }
+    
+    // Initialize shaders (optional - gracefully fall back to fixed-function if fails)
+    if (GLEW_VERSION_3_3) {
+        if (initShaders()) {
+            useShaders_ = true;
+            LOG_INFO << "Shader-based rendering enabled";
+        } else {
+            LOG_WARNING << "Failed to initialize shaders, using fixed-function pipeline";
+            useShaders_ = false;
+        }
+    } else {
+        LOG_INFO << "OpenGL 3.3 not available, using fixed-function pipeline";
+        useShaders_ = false;
     }
 
     initialized_ = true;
@@ -90,6 +135,12 @@ void OpenGLRenderer::cleanup() {
         }
     }
     layerTextureCache_.clear();
+    
+    // Cleanup VBO/VAO
+    cleanupQuadVBO();
+    
+    // Cleanup shaders
+    cleanupShaders();
     
     initialized_ = false;
 }
@@ -135,7 +186,7 @@ bool OpenGLRenderer::uploadFrameToTexture(const FrameBuffer& frame) {
     }
 
     // Upload frame data (matches original xjadeo: BGRA format)
-    glEnable(GL_TEXTURE_2D);
+    // Note: GL_TEXTURE_RECTANGLE_ARB doesn't need glEnable, just bind
     glBindTexture(GL_TEXTURE_RECTANGLE_ARB, textureId_);
     
     // Use BGRA format (matches original xjadeo)
@@ -167,6 +218,14 @@ bool OpenGLRenderer::bindGPUTexture(const GPUTextureFrameBuffer& gpuFrame) {
     // GPUTextureFrameBuffer always allocates textures as GL_TEXTURE_2D
     GLenum target = GL_TEXTURE_2D;
     
+    // CRITICAL: Disable GL_TEXTURE_RECTANGLE_ARB before enabling GL_TEXTURE_2D
+    // Having both enabled simultaneously causes rendering issues
+    glDisable(GL_TEXTURE_RECTANGLE_ARB);
+    
+    // CRITICAL: Ensure we're using texture unit 0 for shader-based rendering
+    // Without this, the texture may be bound to the wrong unit
+    glActiveTexture(GL_TEXTURE0);
+    
     glEnable(target);
     glBindTexture(target, textureId);
     
@@ -175,6 +234,11 @@ bool OpenGLRenderer::bindGPUTexture(const GPUTextureFrameBuffer& gpuFrame) {
     glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    
+    // Set texture environment mode
+    // GL_REPLACE: Use texture color directly (ignores vertex color, preserves texture alpha)
+    // This is appropriate for video textures where we want the exact texture colors
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     
     // Update texture dimensions for rendering
     const FrameInfo& info = gpuFrame.info();
@@ -375,6 +439,10 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
             const GPUTextureFrameBuffer* gpuBuffer = nullptr;
             bool isOnGPU = layer->getPreparedFrame(cpuBuffer, gpuBuffer);
             
+            LOG_VERBOSE << "renderLayer: isOnGPU=" << isOnGPU 
+                       << " gpuBuffer=" << (gpuBuffer ? "valid" : "null")
+                       << " cpuBuffer=" << (cpuBuffer ? "valid" : "null");
+            
             if (isOnGPU && gpuBuffer && gpuBuffer->isValid()) {
                 // Frame is on GPU - use GPU rendering path
                 const FrameInfo& frameInfo = layer->getFrameInfo();
@@ -548,6 +616,7 @@ void OpenGLRenderer::cleanupDeferredTextures() {
 
 bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, const LayerProperties& properties, const FrameInfo& frameInfo) {
     if (!gpuFrame.isValid()) {
+        LOG_VERBOSE << "renderLayerFromGPU: gpuFrame is invalid";
         return false;
     }
 
@@ -555,8 +624,15 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
         return false;
     }
 
+    // Debug: Log texture info
+    LOG_VERBOSE << "renderLayerFromGPU: planeType=" << static_cast<int>(gpuFrame.getPlaneType())
+               << " texId=" << gpuFrame.getTextureId()
+               << " numPlanes=" << gpuFrame.getNumPlanes()
+               << " useShaders=" << useShaders_;
+
     // Bind GPU texture (HAP or hardware-decoded)
     if (!bindGPUTexture(gpuFrame)) {
+        LOG_WARNING << "renderLayerFromGPU: bindGPUTexture failed";
         return false;
     }
 
@@ -576,7 +652,150 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
             quad_y = asp_dst / asp_src;
         }
     }
+    
+    // Use shader-based rendering if available (supports corner deformation)
+    if (useShaders_ && rgbaShader_) {
+        // Apply blend mode
+        switch (properties.blendMode) {
+            case LayerProperties::NORMAL:
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                break;
+            case LayerProperties::MULTIPLY:
+                glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                break;
+            case LayerProperties::SCREEN:
+                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
+                break;
+            case LayerProperties::OVERLAY:
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                break;
+        }
+        
+        // Select shader based on texture format and quality setting
+        ShaderProgram* shader = nullptr;
+        TexturePlaneType planeType = gpuFrame.getPlaneType();
+        
+        if (planeType == TexturePlaneType::YUV_NV12 && nv12Shader_) {
+            // NV12 format (VAAPI, CUDA)
+            shader = nv12Shader_.get();
+            
+            // Bind Y plane to texture unit 0
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, gpuFrame.getTextureId(0));
+            
+            // Bind UV plane to texture unit 1
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, gpuFrame.getTextureId(1));
+            
+            // Reset to texture unit 0
+            glActiveTexture(GL_TEXTURE0);
+            
+            shader->use();
+            shader->setUniform("uTexY", 0);   // Texture unit 0
+            shader->setUniform("uTexUV", 1);  // Texture unit 1
+            
+        } else if (planeType == TexturePlaneType::YUV_420P && yuv420pShader_) {
+            // YUV420P format (software decoded, some hardware decoders)
+            shader = yuv420pShader_.get();
+            
+            // Bind Y plane to texture unit 0
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, gpuFrame.getTextureId(0));
+            
+            // Bind U plane to texture unit 1
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, gpuFrame.getTextureId(1));
+            
+            // Bind V plane to texture unit 2
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, gpuFrame.getTextureId(2));
+            
+            // Reset to texture unit 0
+            glActiveTexture(GL_TEXTURE0);
+            
+            shader->use();
+            shader->setUniform("uTexY", 0);   // Texture unit 0
+            shader->setUniform("uTexU", 1);   // Texture unit 1
+            shader->setUniform("uTexV", 2);   // Texture unit 2
+            
+        } else {
+            // RGBA/single-plane format (HAP, decompressed frames)
+            shader = (properties.cornerDeform.enabled && 
+                     properties.cornerDeform.highQuality && 
+                     rgbaShaderHQ_) 
+                    ? rgbaShaderHQ_.get() 
+                    : rgbaShader_.get();
+            
+            shader->use();
+            shader->setUniform("uTexture", 0);  // Texture unit 0
+        }
+        
+        shader->setUniform("uOpacity", properties.opacity);
+        
+        // Handle corner deformation (homography warping) - works with all shader types
+        if (properties.cornerDeform.enabled) {
+            // Calculate source corners (base quad before warping)
+            Point src[4];
+            src[0].x = -quad_x;
+            src[0].y = -quad_y;
+            src[1].x = quad_x;
+            src[1].y = -quad_y;
+            src[2].x = quad_x;
+            src[2].y = quad_y;
+            src[3].x = -quad_x;
+            src[3].y = quad_y;
+            
+            // Calculate destination corners (with deformation offsets)
+            Point dst[4];
+            dst[0].x = src[0].x + properties.cornerDeform.corners[0];
+            dst[0].y = src[0].y + properties.cornerDeform.corners[1];
+            dst[1].x = src[1].x + properties.cornerDeform.corners[2];
+            dst[1].y = src[1].y + properties.cornerDeform.corners[3];
+            dst[2].x = src[2].x + properties.cornerDeform.corners[4];
+            dst[2].y = src[2].y + properties.cornerDeform.corners[5];
+            dst[3].x = src[3].x + properties.cornerDeform.corners[6];
+            dst[3].y = src[3].y + properties.cornerDeform.corners[7];
+            
+            // Compute homography matrix
+            GLfloat homography[16];
+            findHomography(src, dst, homography);
+            
+            shader->setUniform("uUseHomography", 1);
+            shader->setUniformMatrix4fv("uHomography", homography);
+            
+            // Set anisotropy level for high-quality RGBA shader
+            if (properties.cornerDeform.highQuality && 
+                planeType == TexturePlaneType::SINGLE && 
+                rgbaShaderHQ_ && shader == rgbaShaderHQ_.get()) {
+                shader->setUniform("uAnisotropy", 4.0f);
+            }
+        } else {
+            shader->setUniform("uUseHomography", 0);
+        }
+        
+        // Compute MVP matrix (position, scale, rotation - homography applied separately in shader)
+        float mvp[16];
+        computeMVPMatrix(mvp, 0.0f, 0.0f, quad_x, quad_y, properties);
+        shader->setUniformMatrix4fv("uMVP", mvp);
+        
+        // Calculate texture coordinates for cropping/panorama
+        float texX = 0.0f, texY = 0.0f, texWidth = 1.0f, texHeight = 1.0f;
+        calculateCropCoordinatesFromProps(properties, frameInfo, texX, texY, texWidth, texHeight);
+        
+        // TODO: Implement texture coordinate transformation for crop/panorama in shader
+        // For now, we'll render without crop (will be implemented in Phase 2)
+        
+        // Bind VAO and draw
+        glBindVertexArray(quadVAO_);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        glBindVertexArray(0);
+        
+        shader->unbind();
+        
+        return true;
+    }
 
+    // Fallback: Fixed-function pipeline (only if shaders unavailable)
     // Apply layer transform
     glPushMatrix();
     
@@ -779,6 +998,185 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
     
     // Re-enable GL_TEXTURE_RECTANGLE_ARB for video layers (they need it for next frame)
     glEnable(GL_TEXTURE_RECTANGLE_ARB);
+}
+
+bool OpenGLRenderer::initQuadVBO() {
+    // Create a unit quad for rendering
+    // Positions: [-1, -1] to [1, 1] (will be transformed by MVP matrix)
+    // TexCoords: [0, 0] to [1, 1] (normalized texture coordinates)
+    struct Vertex {
+        float x, y;        // Position
+        float u, v;        // Texture coordinate
+    };
+    
+    // Quad vertices (two triangles forming a quad)
+    // Order: bottom-left, bottom-right, top-right, top-left
+    Vertex vertices[] = {
+        {-1.0f, -1.0f,  0.0f, 1.0f},  // Bottom-left
+        { 1.0f, -1.0f,  1.0f, 1.0f},  // Bottom-right
+        { 1.0f,  1.0f,  1.0f, 0.0f},  // Top-right
+        {-1.0f,  1.0f,  0.0f, 0.0f}   // Top-left
+    };
+    
+    // Generate VAO and VBO
+    glGenVertexArrays(1, &quadVAO_);
+    glGenBuffers(1, &quadVBO_);
+    
+    if (quadVAO_ == 0 || quadVBO_ == 0) {
+        LOG_ERROR << "Failed to generate VAO/VBO";
+        cleanupQuadVBO();
+        return false;
+    }
+    
+    // Bind VAO
+    glBindVertexArray(quadVAO_);
+    
+    // Bind and fill VBO
+    glBindBuffer(GL_ARRAY_BUFFER, quadVBO_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    
+    // Set up vertex attributes
+    // Position attribute (location = 0)
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+    
+    // TexCoord attribute (location = 1)
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(2 * sizeof(float)));
+    
+    // Unbind
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    
+    LOG_VERBOSE << "Quad VBO/VAO initialized (VAO: " << quadVAO_ << ", VBO: " << quadVBO_ << ")";
+    return true;
+}
+
+void OpenGLRenderer::cleanupQuadVBO() {
+    if (quadVBO_ != 0) {
+        glDeleteBuffers(1, &quadVBO_);
+        quadVBO_ = 0;
+    }
+    if (quadVAO_ != 0) {
+        glDeleteVertexArrays(1, &quadVAO_);
+        quadVAO_ = 0;
+    }
+}
+
+bool OpenGLRenderer::initShaders() {
+    // Create RGBA shader (for CPU frames, HAP)
+    rgbaShader_ = std::make_unique<ShaderProgram>();
+    if (!rgbaShader_->createFromSource(VideoShaders::VERTEX_SHADER, VideoShaders::FRAGMENT_RGBA)) {
+        LOG_ERROR << "Failed to create RGBA shader";
+        cleanupShaders();
+        return false;
+    }
+    
+    // Create high-quality RGBA shader (for extreme corner warping)
+    rgbaShaderHQ_ = std::make_unique<ShaderProgram>();
+    if (!rgbaShaderHQ_->createFromSource(VideoShaders::VERTEX_SHADER, VideoShaders::FRAGMENT_RGBA_HQ)) {
+        LOG_WARNING << "Failed to create HQ RGBA shader, will use standard quality for warping";
+        rgbaShaderHQ_.reset();
+    }
+    
+    // Create NV12 shader (for VAAPI/CUDA)
+    nv12Shader_ = std::make_unique<ShaderProgram>();
+    if (!nv12Shader_->createFromSource(VideoShaders::VERTEX_SHADER, VideoShaders::FRAGMENT_NV12)) {
+        LOG_ERROR << "Failed to create NV12 shader";
+        cleanupShaders();
+        return false;
+    }
+    
+    // Create YUV420P shader (fallback)
+    yuv420pShader_ = std::make_unique<ShaderProgram>();
+    if (!yuv420pShader_->createFromSource(VideoShaders::VERTEX_SHADER, VideoShaders::FRAGMENT_YUV420P)) {
+        LOG_ERROR << "Failed to create YUV420P shader";
+        cleanupShaders();
+        return false;
+    }
+    
+    LOG_VERBOSE << "All video shaders compiled successfully";
+    return true;
+}
+
+void OpenGLRenderer::cleanupShaders() {
+    rgbaShader_.reset();
+    rgbaShaderHQ_.reset();
+    nv12Shader_.reset();
+    yuv420pShader_.reset();
+}
+
+void OpenGLRenderer::computeMVPMatrix(float* mvp, float x, float y, float width, float height,
+                                     const LayerProperties& props) {
+    // Initialize as identity matrix
+    for (int i = 0; i < 16; i++) {
+        mvp[i] = 0.0f;
+    }
+    mvp[0] = mvp[5] = mvp[10] = mvp[15] = 1.0f;
+    
+    // Apply position and scale (model matrix)
+    // Normalized device coordinates: x, y in [-1, 1]
+    float scaleX = width * props.scaleX;
+    float scaleY = height * props.scaleY;
+    
+    // Position: center the quad at (x, y)
+    float posX = x;
+    float posY = y;
+    
+    // Build MVP as: Translation * Rotation * Scale
+    // For simplicity, we'll build a combined matrix
+    
+    // Scale
+    mvp[0] = scaleX;   // Scale X
+    mvp[5] = scaleY;   // Scale Y
+    
+    // Rotation (around Z axis)
+    if (props.rotation != 0.0f) {
+        float rad = props.rotation * M_PI / 180.0f;
+        float cosR = std::cos(rad);
+        float sinR = std::sin(rad);
+        
+        // Combine scale and rotation
+        float m00 = scaleX * cosR;
+        float m01 = scaleX * (-sinR);
+        float m10 = scaleY * sinR;
+        float m11 = scaleY * cosR;
+        
+        mvp[0] = m00;
+        mvp[1] = m10;
+        mvp[4] = m01;
+        mvp[5] = m11;
+    }
+    
+    // Translation
+    mvp[12] = posX;
+    mvp[13] = posY;
+}
+
+void OpenGLRenderer::renderQuadWithShader(ShaderProgram* shader, float x, float y, 
+                                         float width, float height, const LayerProperties& props) {
+    if (!shader || !shader->isValid()) {
+        return;
+    }
+    
+    // Use shader
+    shader->use();
+    
+    // Compute MVP matrix
+    float mvp[16];
+    computeMVPMatrix(mvp, x, y, width, height, props);
+    
+    // Set uniforms
+    shader->setUniformMatrix4fv("uMVP", mvp);
+    shader->setUniform("uOpacity", props.opacity);
+    
+    // Bind VAO and draw
+    glBindVertexArray(quadVAO_);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glBindVertexArray(0);
+    
+    // Unbind shader
+    shader->unbind();
 }
 
 } // namespace videocomposer

@@ -4,9 +4,11 @@
 #include "../video/FrameBuffer.h"
 #include "../video/GPUTextureFrameBuffer.h"
 #include "../layer/VideoLayer.h"
+#include "ShaderProgram.h"
 #include <vector>
 #include <map>
 #include <cstdint>
+#include <memory>
 
 // Forward declaration for OpenGL types
 typedef unsigned int GLuint;
@@ -68,6 +70,17 @@ private:
     bool letterbox_;
     bool initialized_;
     
+    // Shader-based rendering (VBO/VAO)
+    GLuint quadVAO_;                // Vertex Array Object for quad
+    GLuint quadVBO_;                // Vertex Buffer Object for quad
+    
+    // Shader programs
+    std::unique_ptr<ShaderProgram> rgbaShader_;      // For CPU frames, HAP
+    std::unique_ptr<ShaderProgram> rgbaShaderHQ_;    // High-quality variant for extreme warps
+    std::unique_ptr<ShaderProgram> nv12Shader_;      // For VAAPI/CUDA NV12
+    std::unique_ptr<ShaderProgram> yuv420pShader_;   // For YUV420P fallback
+    bool useShaders_;               // Enable shader rendering (vs fixed-function)
+    
     // Deferred texture deletion (textures to delete after swapBuffers)
     std::vector<GLuint> texturesToDelete_;
     
@@ -95,6 +108,18 @@ private:
                                   float& texWidth, float& texHeight);
     void calculateCropCoordinatesFromProps(const LayerProperties& props, const FrameInfo& frameInfo,
                                            float& texX, float& texY, float& texWidth, float& texHeight);
+    
+    // VBO/VAO helpers
+    bool initQuadVBO();
+    void cleanupQuadVBO();
+    
+    // Shader helpers
+    bool initShaders();
+    void cleanupShaders();
+    void computeMVPMatrix(float* mvp, float x, float y, float width, float height,
+                         const LayerProperties& props);
+    void renderQuadWithShader(ShaderProgram* shader, float x, float y, 
+                             float width, float height, const LayerProperties& props);
 };
 
 } // namespace videocomposer
