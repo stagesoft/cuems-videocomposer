@@ -25,6 +25,11 @@
 #define EGL_LINUX_DMA_BUF_EXT 0x3270
 #endif
 #endif
+
+#ifdef HAVE_VAAPI_INTEROP
+#include <va/va.h>
+#include <va/va_x11.h>
+#endif
 #elif defined(PLATFORM_WINDOWS)
 #include <windows.h>
 #include <GL/gl.h>
@@ -54,6 +59,9 @@ OpenGLDisplay::OpenGLDisplay()
     , eglDestroyImageKHR_(nullptr)
     , glEGLImageTargetTexture2DOES_(nullptr)
 #endif
+#ifdef HAVE_VAAPI_INTEROP
+    , vaDisplay_(nullptr)
+#endif
 #elif defined(PLATFORM_WINDOWS)
     , hdc_(nullptr)
     , hwnd_(nullptr)
@@ -81,16 +89,23 @@ bool OpenGLDisplay::openWindow() {
     }
 
 #if defined(USE_GLX)
+#ifdef HAVE_EGL
+    // Pure EGL initialization for VAAPI zero-copy support
+    // This replaces GLX with EGL for context management
+    if (!initEGL()) {
+        LOG_ERROR << "Failed to initialize EGL";
+        // Fall back to GLX if EGL fails
+        LOG_WARNING << "Falling back to GLX (VAAPI zero-copy disabled)";
+        if (!initGLX()) {
+            LOG_ERROR << "Failed to initialize GLX";
+            return false;
+        }
+    }
+#else
+    // No EGL support - use GLX directly
     if (!initGLX()) {
         LOG_ERROR << "Failed to initialize GLX";
         return false;
-    }
-    
-#ifdef HAVE_EGL
-    // Initialize EGL for VAAPI zero-copy interop (non-fatal if it fails)
-    if (!initEGL()) {
-        LOG_WARNING << "EGL initialization failed - VAAPI zero-copy disabled";
-        // Continue without VAAPI support - we'll fall back to CPU copy
     }
 #endif
 
@@ -142,9 +157,16 @@ void OpenGLDisplay::closeWindow() {
 
 #if defined(USE_GLX)
 #ifdef HAVE_EGL
-    cleanupEGL();
-#endif
+    // If EGL was initialized (pure EGL mode), use EGL cleanup which handles everything
+    if (eglDisplay_ != EGL_NO_DISPLAY) {
+        cleanupEGL();
+    } else {
+        // Otherwise use GLX cleanup (fallback mode)
+        cleanupGLX();
+    }
+#else
     cleanupGLX();
+#endif
 #elif defined(USE_WGL)
     cleanupWGL();
 #elif defined(USE_CGL)
@@ -397,68 +419,257 @@ void OpenGLDisplay::cleanupGLX() {
 
 #ifdef HAVE_EGL
 bool OpenGLDisplay::initEGL() {
+    // Pure EGL initialization - creates X11 window, EGL context, and surface
+    // This enables VAAPI zero-copy by using EGL for all OpenGL operations
+    
+    // Step 1: Open X11 display
+    display_ = XOpenDisplay(nullptr);
     if (!display_) {
-        LOG_ERROR << "Cannot initialize EGL: X11 display not available";
+        LOG_ERROR << "Cannot open X display";
         return false;
     }
+    screen_ = DefaultScreen(display_);
     
-    // Get EGL display from X11 display
+    // Step 2: Get EGL display from X11 display
     eglDisplay_ = eglGetDisplay((EGLNativeDisplayType)display_);
     if (eglDisplay_ == EGL_NO_DISPLAY) {
-        LOG_WARNING << "eglGetDisplay failed";
+        LOG_ERROR << "eglGetDisplay failed";
+        XCloseDisplay(display_);
+        display_ = nullptr;
         return false;
     }
     
-    // Initialize EGL
+    // Step 3: Initialize EGL
     EGLint major, minor;
     if (!eglInitialize(eglDisplay_, &major, &minor)) {
-        LOG_WARNING << "eglInitialize failed";
+        LOG_ERROR << "eglInitialize failed";
         eglDisplay_ = EGL_NO_DISPLAY;
+        XCloseDisplay(display_);
+        display_ = nullptr;
         return false;
     }
-    
     LOG_INFO << "EGL initialized: version " << major << "." << minor;
     
-    // Query and check required extensions
-    if (!queryEGLExtensions()) {
-        LOG_WARNING << "Required EGL extensions not available";
-        eglTerminate(eglDisplay_);
-        eglDisplay_ = EGL_NO_DISPLAY;
-        return false;
-    }
-    
-    // Bind OpenGL API (we're using OpenGL, not OpenGL ES)
+    // Step 4: Bind OpenGL API (not OpenGL ES)
     if (!eglBindAPI(EGL_OPENGL_API)) {
-        LOG_WARNING << "eglBindAPI(EGL_OPENGL_API) failed";
+        LOG_ERROR << "eglBindAPI(EGL_OPENGL_API) failed";
         eglTerminate(eglDisplay_);
         eglDisplay_ = EGL_NO_DISPLAY;
+        XCloseDisplay(display_);
+        display_ = nullptr;
         return false;
     }
     
-    // Note: We don't create an EGL context here because we're using GLX for rendering.
-    // EGL is only used for VAAPI DMA-BUF import via eglCreateImageKHR.
-    // The EGL display and extension functions are what we need for VAAPI interop.
+    // Step 5: Choose EGL config
+    EGLint configAttribs[] = {
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 0,
+        EGL_STENCIL_SIZE, 0,
+        EGL_NONE
+    };
     
+    EGLint numConfigs;
+    if (!eglChooseConfig(eglDisplay_, configAttribs, &eglConfig_, 1, &numConfigs) || numConfigs == 0) {
+        LOG_ERROR << "eglChooseConfig failed";
+        eglTerminate(eglDisplay_);
+        eglDisplay_ = EGL_NO_DISPLAY;
+        XCloseDisplay(display_);
+        display_ = nullptr;
+        return false;
+    }
+    
+    // Step 6: Get X11 visual ID from EGL config
+    EGLint visualId;
+    if (!eglGetConfigAttrib(eglDisplay_, eglConfig_, EGL_NATIVE_VISUAL_ID, &visualId)) {
+        LOG_ERROR << "eglGetConfigAttrib(EGL_NATIVE_VISUAL_ID) failed";
+        eglTerminate(eglDisplay_);
+        eglDisplay_ = EGL_NO_DISPLAY;
+        XCloseDisplay(display_);
+        display_ = nullptr;
+        return false;
+    }
+    
+    // Step 7: Get XVisualInfo from visual ID
+    XVisualInfo viTemplate;
+    viTemplate.visualid = visualId;
+    int numVisuals;
+    XVisualInfo* vi = XGetVisualInfo(display_, VisualIDMask, &viTemplate, &numVisuals);
+    if (!vi) {
+        LOG_ERROR << "XGetVisualInfo failed for visual ID " << visualId;
+        eglTerminate(eglDisplay_);
+        eglDisplay_ = EGL_NO_DISPLAY;
+        XCloseDisplay(display_);
+        display_ = nullptr;
+        return false;
+    }
+    
+    // Step 8: Create X11 window with EGL-compatible visual
+    Window root = RootWindow(display_, screen_);
+    Colormap cmap = XCreateColormap(display_, root, vi->visual, AllocNone);
+    
+    XSetWindowAttributes attr;
+    attr.colormap = cmap;
+    attr.border_pixel = 0;
+    attr.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
+                      ButtonReleaseMask | StructureNotifyMask;
+    
+    window_ = XCreateWindow(display_, root,
+                           windowX_, windowY_, windowWidth_, windowHeight_,
+                           0, vi->depth, InputOutput, vi->visual,
+                           CWBorderPixel | CWColormap | CWEventMask, &attr);
+    XFree(vi);
+    
+    if (!window_) {
+        LOG_ERROR << "XCreateWindow failed";
+        eglTerminate(eglDisplay_);
+        eglDisplay_ = EGL_NO_DISPLAY;
+        XCloseDisplay(display_);
+        display_ = nullptr;
+        return false;
+    }
+    
+    XStoreName(display_, window_, "cuems-videocomposer");
+    Atom wmDelete = XInternAtom(display_, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(display_, window_, &wmDelete, 1);
+    
+    // Step 9: Create EGL context
+    // Use Compatibility Profile to support legacy fixed-function pipeline (glBegin/glEnd)
+    // which is still used by some rendering paths (software decode, HAP)
+    EGLint contextAttribs[] = {
+        EGL_CONTEXT_MAJOR_VERSION, 3,
+        EGL_CONTEXT_MINOR_VERSION, 3,
+        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
+        EGL_NONE
+    };
+    
+    eglContext_ = eglCreateContext(eglDisplay_, eglConfig_, EGL_NO_CONTEXT, contextAttribs);
+    if (eglContext_ == EGL_NO_CONTEXT) {
+        // Try without core profile (fallback for older drivers)
+        LOG_WARNING << "EGL core profile context failed, trying compatibility";
+        EGLint fallbackAttribs[] = { EGL_NONE };
+        eglContext_ = eglCreateContext(eglDisplay_, eglConfig_, EGL_NO_CONTEXT, fallbackAttribs);
+    }
+    
+    if (eglContext_ == EGL_NO_CONTEXT) {
+        LOG_ERROR << "eglCreateContext failed: 0x" << std::hex << eglGetError() << std::dec;
+        XDestroyWindow(display_, window_);
+        window_ = 0;
+        eglTerminate(eglDisplay_);
+        eglDisplay_ = EGL_NO_DISPLAY;
+        XCloseDisplay(display_);
+        display_ = nullptr;
+        return false;
+    }
+    
+    // Step 10: Create EGL window surface
+    eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_, window_, nullptr);
+    if (eglSurface_ == EGL_NO_SURFACE) {
+        LOG_ERROR << "eglCreateWindowSurface failed: 0x" << std::hex << eglGetError() << std::dec;
+        eglDestroyContext(eglDisplay_, eglContext_);
+        eglContext_ = EGL_NO_CONTEXT;
+        XDestroyWindow(display_, window_);
+        window_ = 0;
+        eglTerminate(eglDisplay_);
+        eglDisplay_ = EGL_NO_DISPLAY;
+        XCloseDisplay(display_);
+        display_ = nullptr;
+        return false;
+    }
+    
+    // Step 11: Map the window
+    XMapRaised(display_, window_);
+    XSync(display_, False);
+    XRaiseWindow(display_, window_);
+    XFlush(display_);
+    
+    // Step 12: Query EGL extensions for VAAPI zero-copy
+    if (!queryEGLExtensions()) {
+        LOG_WARNING << "Required EGL extensions not available - VAAPI zero-copy disabled";
+        // Don't fail - we can still render, just without VAAPI zero-copy
+    }
+    
+#ifdef HAVE_VAAPI_INTEROP
+    // Step 13: Create VAAPI display from X11 display
+    // This MUST be shared between the FFmpeg decoder and VaapiInterop for zero-copy
+    vaDisplay_ = vaGetDisplay(display_);
+    if (vaDisplay_) {
+        int majorVer, minorVer;
+        VAStatus status = vaInitialize(vaDisplay_, &majorVer, &minorVer);
+        if (status == VA_STATUS_SUCCESS) {
+            LOG_INFO << "VAAPI display initialized: version " << majorVer << "." << minorVer;
+            vaapiSupported_ = true;
+        } else {
+            LOG_WARNING << "vaInitialize failed: " << vaErrorStr(status);
+            vaDisplay_ = nullptr;
+        }
+    } else {
+        LOG_WARNING << "vaGetDisplay failed - VAAPI zero-copy disabled";
+    }
+#endif
+    
+    // Log the EGL config details
+    EGLint redSize, greenSize, blueSize, alphaSize, bufferSize;
+    eglGetConfigAttrib(eglDisplay_, eglConfig_, EGL_RED_SIZE, &redSize);
+    eglGetConfigAttrib(eglDisplay_, eglConfig_, EGL_GREEN_SIZE, &greenSize);
+    eglGetConfigAttrib(eglDisplay_, eglConfig_, EGL_BLUE_SIZE, &blueSize);
+    eglGetConfigAttrib(eglDisplay_, eglConfig_, EGL_ALPHA_SIZE, &alphaSize);
+    eglGetConfigAttrib(eglDisplay_, eglConfig_, EGL_BUFFER_SIZE, &bufferSize);
+    LOG_INFO << "EGL config: R=" << redSize << " G=" << greenSize << " B=" << blueSize 
+             << " A=" << alphaSize << " buffer=" << bufferSize;
+    
+    LOG_INFO << "Pure EGL initialization complete - VAAPI zero-copy enabled";
     vaapiSupported_ = true;
-    LOG_INFO << "VAAPI zero-copy interop enabled";
     
     return true;
 }
 
 void OpenGLDisplay::cleanupEGL() {
+#ifdef HAVE_VAAPI_INTEROP
+    if (vaDisplay_) {
+        vaTerminate(vaDisplay_);
+        vaDisplay_ = nullptr;
+    }
+#endif
+    
+    // Destroy EGL context and surface
     if (eglDisplay_ != EGL_NO_DISPLAY) {
+        eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        
+        if (eglContext_ != EGL_NO_CONTEXT) {
+            eglDestroyContext(eglDisplay_, eglContext_);
+            eglContext_ = EGL_NO_CONTEXT;
+        }
+        
+        if (eglSurface_ != EGL_NO_SURFACE) {
+            eglDestroySurface(eglDisplay_, eglSurface_);
+            eglSurface_ = EGL_NO_SURFACE;
+        }
+        
         eglTerminate(eglDisplay_);
         eglDisplay_ = EGL_NO_DISPLAY;
     }
     
-    eglContext_ = EGL_NO_CONTEXT;
-    eglSurface_ = EGL_NO_SURFACE;
     eglConfig_ = nullptr;
     vaapiSupported_ = false;
     
     eglCreateImageKHR_ = nullptr;
     eglDestroyImageKHR_ = nullptr;
     glEGLImageTargetTexture2DOES_ = nullptr;
+    
+    // Clean up X11 resources (created by initEGL in pure EGL mode)
+    if (window_) {
+        XDestroyWindow(display_, window_);
+        window_ = 0;
+    }
+    if (display_) {
+        XCloseDisplay(display_);
+        display_ = nullptr;
+    }
 }
 
 bool OpenGLDisplay::queryEGLExtensions() {
@@ -547,6 +758,16 @@ void OpenGLDisplay::handleEventsGLX() {
 
 void OpenGLDisplay::makeCurrent() {
 #if defined(USE_GLX)
+#ifdef HAVE_EGL
+    // Pure EGL path - preferred for VAAPI zero-copy
+    if (eglDisplay_ != EGL_NO_DISPLAY && eglContext_ != EGL_NO_CONTEXT && eglSurface_ != EGL_NO_SURFACE) {
+        if (!eglMakeCurrent(eglDisplay_, eglSurface_, eglSurface_, eglContext_)) {
+            LOG_ERROR << "eglMakeCurrent failed: 0x" << std::hex << eglGetError() << std::dec;
+        }
+        return;
+    }
+#endif
+    // Fallback to GLX (only if EGL not initialized)
     if (display_ && window_ && context_) {
         glXMakeCurrent(display_, window_, context_);
     }
@@ -561,6 +782,14 @@ void OpenGLDisplay::makeCurrent() {
 
 void OpenGLDisplay::clearCurrent() {
 #if defined(USE_GLX)
+#ifdef HAVE_EGL
+    // Pure EGL path
+    if (eglDisplay_ != EGL_NO_DISPLAY && eglContext_ != EGL_NO_CONTEXT) {
+        eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        return;
+    }
+#endif
+    // Fallback to GLX
     if (display_) {
         glXMakeCurrent(display_, None, nullptr);
     }
@@ -573,6 +802,14 @@ void OpenGLDisplay::clearCurrent() {
 
 void OpenGLDisplay::swapBuffers() {
 #if defined(USE_GLX)
+#ifdef HAVE_EGL
+    // Pure EGL path
+    if (eglDisplay_ != EGL_NO_DISPLAY && eglSurface_ != EGL_NO_SURFACE) {
+        eglSwapBuffers(eglDisplay_, eglSurface_);
+        return;
+    }
+#endif
+    // Fallback to GLX
     if (display_ && window_) {
         glXSwapBuffers(display_, window_);
     }

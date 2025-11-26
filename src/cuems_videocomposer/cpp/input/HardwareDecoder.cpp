@@ -22,8 +22,8 @@ HardwareDecoder::Type HardwareDecoder::detectAvailable() {
     }
     
     // Try to detect available hardware decoders
-    // Check in order of preference: CUDA > QSV > VAAPI > VideoToolbox > DXVA2
-    // QSV is checked before VAAPI for Intel GPUs (QSV is Intel-specific and often more efficient)
+    // Check in order of preference: CUDA > VAAPI > QSV > VideoToolbox > DXVA2
+    // VAAPI is preferred over QSV because we have VaapiInterop for zero-copy GPU texture uploads
     
     AVBufferRef* hwDeviceCtx = nullptr;
     
@@ -49,29 +49,7 @@ HardwareDecoder::Type HardwareDecoder::detectAvailable() {
     }
     #endif
     
-    // Check QSV (Intel Quick Sync Video - Linux/Windows)
-    #if defined(__linux__) || defined(_WIN32)
-    hwDeviceCtx = nullptr;
-    ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_QSV, nullptr, nullptr, 0);
-    if (ret >= 0 && hwDeviceCtx != nullptr) {
-        LOG_INFO << "Hardware decoder detected: QSV (Intel Quick Sync Video)";
-        av_buffer_unref(&hwDeviceCtx);
-        cached_hw_type = Type::QSV;
-        hw_type_detected = true;
-        return Type::QSV;
-    }
-    if (ret < 0) {
-        char errbuf[AV_ERROR_MAX_STRING_SIZE];
-        av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
-        LOG_VERBOSE << "QSV hardware decoder not available: " << errbuf << " (error code: " << ret << ")";
-    }
-    if (hwDeviceCtx) {
-        av_buffer_unref(&hwDeviceCtx);
-        hwDeviceCtx = nullptr;
-    }
-    #endif
-    
-    // Check VAAPI (Linux, Intel/AMD)
+    // Check VAAPI (Linux, Intel/AMD) - preferred for zero-copy with VaapiInterop
     #ifdef __linux__
     hwDeviceCtx = nullptr;
     ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0);
@@ -86,6 +64,28 @@ HardwareDecoder::Type HardwareDecoder::detectAvailable() {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
         LOG_VERBOSE << "VAAPI hardware decoder not available: " << errbuf << " (error code: " << ret << ")";
+    }
+    if (hwDeviceCtx) {
+        av_buffer_unref(&hwDeviceCtx);
+        hwDeviceCtx = nullptr;
+    }
+    #endif
+    
+    // Check QSV (Intel Quick Sync Video - Linux/Windows) - fallback if VAAPI not available
+    #if defined(__linux__) || defined(_WIN32)
+    hwDeviceCtx = nullptr;
+    ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_QSV, nullptr, nullptr, 0);
+    if (ret >= 0 && hwDeviceCtx != nullptr) {
+        LOG_INFO << "Hardware decoder detected: QSV (Intel Quick Sync Video)";
+        av_buffer_unref(&hwDeviceCtx);
+        cached_hw_type = Type::QSV;
+        hw_type_detected = true;
+        return Type::QSV;
+    }
+    if (ret < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
+        LOG_VERBOSE << "QSV hardware decoder not available: " << errbuf << " (error code: " << ret << ")";
     }
     if (hwDeviceCtx) {
         av_buffer_unref(&hwDeviceCtx);
@@ -208,27 +208,63 @@ bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId, Type hwType) {
         return false;
     }
     
-    // Try to find hardware decoder for this codec
-    // FFmpeg hardware decoders are typically named like "h264_vaapi", "h264_qsv", "hevc_cuda", etc.
-    // This uses avcodec_find_decoder_by_name() which dynamically queries FFmpeg at runtime,
-    // so it will automatically discover new hardware decoders when FFmpeg is updated.
-    std::string codecName = avcodec_get_name(codecId);
-    std::string hwCodecName;
+    // Check hardware decoder availability
+    // NOTE: Different hardware decoders work differently:
+    // - QSV/CUVID: Have dedicated wrapper decoders (h264_qsv, h264_cuvid)
+    // - VAAPI: Uses standard decoder with hw_device_ctx attached (hwaccel mechanism)
+    // - VideoToolbox: Uses standard decoder with hw_device_ctx (like VAAPI)
     
+    std::string codecName = avcodec_get_name(codecId);
+    
+    // For VAAPI and VideoToolbox, check if the standard decoder supports hwaccel
+    // by verifying the hw_device_ctx method is available
+    if (hwType == Type::VAAPI || hwType == Type::VIDEOTOOLBOX) {
+        // Find the standard software decoder
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
+        const AVCodec* decoder = avcodec_find_decoder(codecId);
+#else
+        AVCodec* decoder = avcodec_find_decoder(codecId);
+#endif
+        if (!decoder) {
+            LOG_VERBOSE << "No decoder found for codec: " << codecName;
+            return false;
+        }
+        
+        // Check if this decoder supports hardware acceleration via hw_device_ctx
+        // by looking for the appropriate pixel format in its hw_configs
+        AVHWDeviceType targetDeviceType = getFFmpegDeviceType(hwType);
+        bool supportsHwaccel = false;
+        
+        for (int i = 0; ; i++) {
+            const AVCodecHWConfig* config = avcodec_get_hw_config(decoder, i);
+            if (!config) break;
+            
+            if (config->device_type == targetDeviceType &&
+                (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+                supportsHwaccel = true;
+                break;
+            }
+        }
+        
+        if (supportsHwaccel) {
+            LOG_VERBOSE << "Hardware acceleration available for codec: " << codecName 
+                        << " using " << getName(hwType) << " (hwaccel method)";
+        } else {
+            LOG_INFO << "Hardware acceleration not available for codec: " << codecName 
+                     << " via " << getName(hwType) << " (will use software decoding)";
+        }
+        return supportsHwaccel;
+    }
+    
+    // For QSV, CUVID, DXVA2: check for dedicated wrapper decoders
+    std::string hwCodecName;
     switch (hwType) {
         case Type::QSV:
             hwCodecName = codecName + "_qsv";
             break;
-        case Type::VAAPI:
-            hwCodecName = codecName + "_vaapi";
-            break;
         case Type::CUDA:
             // FFmpeg uses "cuvid" suffix for NVIDIA CUDA decoders (e.g., h264_cuvid, hevc_cuvid)
             hwCodecName = codecName + "_cuvid";
-            break;
-        case Type::VIDEOTOOLBOX:
-            // VideoToolbox uses the same codec name
-            hwCodecName = codecName;
             break;
         case Type::DXVA2:
             hwCodecName = codecName + "_dxva2";
@@ -238,8 +274,6 @@ bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId, Type hwType) {
     }
     
     // Dynamically query FFmpeg for the hardware decoder
-    // This will automatically discover new decoders when FFmpeg is updated
-    // FFmpeg 4.0+ (58.x) changed return type to const AVCodec*
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
     const AVCodec* hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
 #else
@@ -251,14 +285,9 @@ bool HardwareDecoder::isAvailableForCodec(AVCodecID codecId, Type hwType) {
         LOG_VERBOSE << "Hardware decoder available for codec: " << codecName 
                     << " using " << getName(hwType);
     } else {
-        // Only log at INFO level if hardware decoder type was detected but codec not supported
-        // This avoids duplicate messages when no hardware decoder is available at all
         if (hwType != Type::NONE) {
-            LOG_INFO << "Hardware decoder not available for codec: " << codecName 
+            LOG_INFO << "Hardware decoder " << hwCodecName << " not available for codec: " << codecName 
                      << " (will use software decoding)";
-        } else {
-            LOG_VERBOSE << "Hardware decoder NOT available for codec: " << codecName 
-                        << " (will use software decoding)";
         }
     }
     

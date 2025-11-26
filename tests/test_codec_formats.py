@@ -27,13 +27,14 @@ from typing import Dict, List, Optional, Tuple
 from mtc_helper import MTCHelper, MTC_AVAILABLE
 
 class CodecFormatTest:
-    def __init__(self, video_dir: Path, videocomposer_bin: Optional[Path] = None, use_mtc: bool = True, fps: float = 25.0, enable_loop: bool = False):
+    def __init__(self, video_dir: Path, videocomposer_bin: Optional[Path] = None, use_mtc: bool = True, fps: float = 25.0, enable_loop: bool = False, hw_decode_mode: Optional[str] = None):
         self.video_dir = Path(video_dir)
         self.videocomposer_bin = videocomposer_bin or self._find_videocomposer()
         self.test_results: Dict[str, Dict] = {}
         self.use_mtc = use_mtc and MTC_AVAILABLE
         self.fps = fps
         self.enable_loop = enable_loop
+        self.hw_decode_mode = hw_decode_mode  # Force specific decoder: software, vaapi, cuda, etc.
         self.mtc_helper = MTCHelper(fps=fps, port=0, portname="CodecTest") if self.use_mtc else None
         self.interrupted = False
         self.current_process = None
@@ -171,13 +172,15 @@ class CodecFormatTest:
     
     def test_video_file(self, video_path: Path, test_duration: int = 20) -> Dict:
         """Test a single video file with videocomposer."""
+        import sys
+        sys.stdout.flush()  # Ensure output is flushed
         video_path = Path(video_path)
         if not video_path.exists():
             return {"error": f"Video file not found: {video_path}"}
         
-        print(f"\n{'='*60}")
-        print(f"Testing: {video_path.name}")
-        print(f"{'='*60}")
+        print(f"\n{'='*60}", flush=True)
+        print(f"Testing: {video_path.name}", flush=True)
+        print(f"{'='*60}", flush=True)
         
         # Get video info
         info = self.get_video_info(video_path)
@@ -336,9 +339,13 @@ class CodecFormatTest:
             str(self.videocomposer_bin),
             "-v",  # Verbose
             "--osc", str(osc_port),  # Enable OSC for OSD control
-            "--hw-decode", "software",  # Force software decoding for testing
-            str(video_path)
         ]
+        
+        # Add hardware decode mode if specified
+        if self.hw_decode_mode:
+            cmd.extend(["--hw-decode", self.hw_decode_mode])
+        
+        cmd.append(str(video_path))
         
         # Start MTC before launching videocomposer
         mtc_started = self._setup_mtc()
@@ -467,30 +474,42 @@ class CodecFormatTest:
         if "hap" in output.lower() and codec == "hap":
             analysis["decoding_path"] = "HAP_DIRECT"
             analysis["success"] = True
+        # Check for software decoding FIRST (before hardware) to avoid false positives
+        # when output says "Hardware decoding disabled, using software"
+        elif any(sw in output.lower() for sw in [
+            "using software", "software decoding", "software-decoded", "cpu_software",
+            "falling back to software", "no hardware decoder", "loaded software-decoded frame",
+            "using cpu", "software codec", "software decoder", "opening software decoder"
+        ]):
+            analysis["decoding_path"] = "CPU_SOFTWARE"
+            # Success if software was expected OR if the path allows either hardware or software
+            if "SOFTWARE" in expected_path or "or" in expected_path.lower():
+                analysis["success"] = True
         # Check for hardware decoding (look for hardware decoder messages)
+        # Must check AFTER software to avoid false positives
         elif any(hw in output.lower() for hw in [
             "using hardware", "hardware decoder", "hardware decoding", "vaapi", "cuda", 
             "videotoolbox", "dxva2", "attempting to open hardware decoder",
             "loaded hardware-decoded frame", "gpu_hardware", "successfully opened hardware"
         ]):
             analysis["decoding_path"] = "GPU_HARDWARE"
+            # Hardware decoding is always considered successful when detected
             analysis["success"] = True
-        # Check for software decoding
-        elif any(sw in output.lower() for sw in [
-            "using software", "software decoding", "software-decoded", "cpu_software",
-            "falling back to software", "no hardware decoder", "loaded software-decoded frame",
-            "using cpu", "software codec"
-        ]):
-            analysis["decoding_path"] = "CPU_SOFTWARE"
-            # Success if software was expected
-            if "SOFTWARE" in expected_path:
-                analysis["success"] = True
         
         # Extract errors and warnings
+        # Filter out false positives (log messages that contain "error" but aren't actual errors)
+        false_positive_errors = [
+            "going to open midi port",  # Just a log message
+            "egl extensions",  # Verbose output, not an error
+        ]
         for line in result.get("output", []):
-            if "error" in line.lower() or "failed" in line.lower():
+            line_lower = line.lower()
+            # Skip false positive error messages
+            if any(fp in line_lower for fp in false_positive_errors):
+                continue
+            if "error" in line_lower or "failed" in line_lower:
                 analysis["errors"].append(line)
-            elif "warning" in line.lower():
+            elif "warning" in line_lower:
                 analysis["warnings"].append(line)
         
         # If no errors and process ran, consider it successful (even if we couldn't detect path)
@@ -658,6 +677,8 @@ def main():
                        help="Test formats one by one with clear output for each")
     parser.add_argument("--loop", action="store_true",
                        help="Enable looping on layers (default: no loop, uses automatic wrapping)")
+    parser.add_argument("--hw-decode", type=str, choices=["auto", "software", "vaapi", "cuda", "qsv", "videotoolbox"],
+                       help="Force specific hardware decoder mode (auto, software, vaapi, cuda, qsv, videotoolbox)")
     
     args = parser.parse_args()
     
@@ -673,7 +694,7 @@ def main():
     # Print the directory being used
     print(f"Using video directory: {video_dir.resolve()}")
     
-    tester = CodecFormatTest(video_dir, videocomposer_bin, use_mtc=not args.no_mtc, fps=args.fps, enable_loop=args.loop)
+    tester = CodecFormatTest(video_dir, videocomposer_bin, use_mtc=not args.no_mtc, fps=args.fps, enable_loop=args.loop, hw_decode_mode=args.hw_decode)
     
     results = {}
     
@@ -750,10 +771,21 @@ def main():
         # Test single video
         video_path = Path(args.video)
         if not video_path.is_absolute():
-            video_path = video_dir / video_path
+            # If path already contains video_test_files, don't add it again
+            if "video_test_files" in str(video_path):
+                video_path = Path(__file__).parent.parent / video_path
+            else:
+                video_path = video_dir / video_path
         
-        result = tester.test_video_file(video_path, args.duration)
-        results[video_path.name] = result
+        try:
+            result = tester.test_video_file(video_path, args.duration)
+            results[video_path.name] = result
+        except Exception as e:
+            print(f"ERROR: Exception during test: {e}")
+            import traceback
+            traceback.print_exc()
+            results[video_path.name] = {"error": str(e), "success": False}
+        
         tester.print_summary(results)
     elif args.test_hap:
         # Test HAP specifically

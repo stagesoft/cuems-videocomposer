@@ -281,7 +281,6 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
             // Hardware decoding: decode directly to GPU texture
             if (videoInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
                 frameOnGPU_ = true;
-                LOG_VERBOSE << "Loaded hardware-decoded frame " << frameNumber << " to GPU texture";
                 return true;
             }
             // If hardware decoding fails, fall through to software decoding

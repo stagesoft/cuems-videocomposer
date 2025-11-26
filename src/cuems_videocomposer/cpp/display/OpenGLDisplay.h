@@ -25,6 +25,11 @@ typedef unsigned int (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay, EGLImageKHR);
 typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(unsigned int, void*);
 #endif
 
+// VAAPI forward declaration (for shared display)
+#ifdef HAVE_VAAPI_INTEROP
+typedef void* VADisplay;  // Opaque pointer to VADisplay
+#endif
+
 #elif defined(PLATFORM_WINDOWS)
 struct HDC__;
 typedef struct HDC__* HDC;
@@ -86,6 +91,11 @@ public:
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC getGlEGLImageTargetTexture2DOES() const { return glEGLImageTargetTexture2DOES_; }
 #endif
 
+#ifdef HAVE_VAAPI_INTEROP
+    // VAAPI display access (shared between decoder and EGL interop)
+    VADisplay getVADisplay() const { return vaDisplay_; }
+#endif
+
 private:
     // Platform-specific initialization
 #if defined(USE_GLX) || (!defined(PLATFORM_WINDOWS) && !defined(PLATFORM_OSX))
@@ -142,6 +152,11 @@ private:
     PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR_;
     PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR_;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES_;
+#endif
+
+#ifdef HAVE_VAAPI_INTEROP
+    // VAAPI display (shared between decoder and EGL interop for zero-copy)
+    VADisplay vaDisplay_;
 #endif
 
 #elif defined(PLATFORM_WINDOWS)

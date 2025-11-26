@@ -74,7 +74,6 @@ def main():
         str(videocomposer_bin),
         "--osc", str(args.osc_port),
         "--midi", "-1",
-        "--hw-decode", "software",
         "--verbose"
     ]
     

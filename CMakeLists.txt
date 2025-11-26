@@ -137,7 +137,7 @@ if(ENABLE_OPENGL)
         # EGL for VAAPI zero-copy interop (Linux only)
         if(PLATFORM_LINUX)
             pkg_check_modules(EGL egl)
-            pkg_check_modules(VAAPI libva libva-drm)
+            pkg_check_modules(VAAPI libva libva-drm libva-x11)
             pkg_check_modules(DRM libdrm)
             
             if(EGL_FOUND AND VAAPI_FOUND AND DRM_FOUND)

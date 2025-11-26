@@ -127,9 +127,6 @@ class DynamicFileManagementTest:
         # Add MIDI port for MTC (use -1 for autodetect)
         cmd.extend(["--midi", "-1"])
         
-        # Force software decoding for testing
-        cmd.extend(["--hw-decode", "software"])
-        
         # Add verbose for debugging
         cmd.append("--verbose")
         

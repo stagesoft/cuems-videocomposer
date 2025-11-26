@@ -269,31 +269,41 @@ bool VideoFileInput::openHardwareCodec() {
     }
 
     // Find hardware decoder
+    // NOTE: Different hardware decoders work differently:
+    // - QSV/CUVID/DXVA2: Have dedicated wrapper decoders (h264_qsv, h264_cuvid)
+    // - VAAPI/VideoToolbox: Use standard decoder with hw_device_ctx attached
+    
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
+    const AVCodec* hwCodec = nullptr;
+#else
+    AVCodec* hwCodec = nullptr;
+#endif
     std::string hwCodecName;
+
     switch (hwDecoderType_) {
         case HardwareDecoder::Type::VAAPI:
-            hwCodecName = codecName + "_vaapi";
+        case HardwareDecoder::Type::VIDEOTOOLBOX:
+            // VAAPI and VideoToolbox use the standard decoder with hw_device_ctx (hwaccel method)
+            hwCodec = avcodec_find_decoder(codecId);
+            hwCodecName = codecName + " (with " + HardwareDecoder::getName(hwDecoderType_) + " hwaccel)";
             break;
         case HardwareDecoder::Type::CUDA:
-            // FFmpeg uses "cuvid" suffix for NVIDIA CUDA decoders (e.g., h264_cuvid, hevc_cuvid)
+            // FFmpeg uses "cuvid" suffix for NVIDIA CUDA decoders
             hwCodecName = codecName + "_cuvid";
+            hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
             break;
-        case HardwareDecoder::Type::VIDEOTOOLBOX:
-            hwCodecName = codecName; // VideoToolbox uses same name
+        case HardwareDecoder::Type::QSV:
+            hwCodecName = codecName + "_qsv";
+            hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
             break;
         case HardwareDecoder::Type::DXVA2:
             hwCodecName = codecName + "_dxva2";
+            hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
             break;
         default:
             return false;
     }
 
-    // FFmpeg 4.0+ (58.x) changed return type to const AVCodec*
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
-    const AVCodec* hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
-#else
-    AVCodec* hwCodec = avcodec_find_decoder_by_name(hwCodecName.c_str());
-#endif
     if (!hwCodec) {
         LOG_WARNING << "Hardware decoder " << hwCodecName << " not found, falling back to software";
         return false;
@@ -301,12 +311,17 @@ bool VideoFileInput::openHardwareCodec() {
     
     LOG_INFO << "Found hardware decoder: " << hwCodecName;
 
+    // Get hardware device type first (needed to filter hw_configs)
+    AVHWDeviceType hwDeviceType = HardwareDecoder::getFFmpegDeviceType(hwDecoderType_);
+    if (hwDeviceType == AV_HWDEVICE_TYPE_NONE) {
+        return false;
+    }
+
     // Check hardware config methods to determine how to initialize the decoder
-    // This applies to ALL hardware decoders (cuvid, vaapi, qsv, etc.)
-    // Following mpv's approach: check what methods the codec supports
-    // - METHOD_HW_DEVICE_CTX: needs hw_device_ctx set on codec context
-    // - METHOD_HW_FRAMES_CTX: needs hw_frames_ctx (not used here, but checked)
-    // - METHOD_INTERNAL: wrapper decoder (like cuvid) that manages hardware internally
+    // Following mpv's approach: check what methods the codec supports for OUR device type
+    // - METHOD_HW_DEVICE_CTX: needs hw_device_ctx set on codec context (VAAPI, VideoToolbox)
+    // - METHOD_HW_FRAMES_CTX: needs hw_frames_ctx
+    // - METHOD_INTERNAL: wrapper decoder (like cuvid, qsv) that manages hardware internally
     bool needsHwDeviceCtx = false;
     bool needsHwFramesCtx = false;
     AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
@@ -316,25 +331,31 @@ bool VideoFileInput::openHardwareCodec() {
         if (!cfg)
             break;
         
+        // Only consider configs for our target device type
+        if (cfg->device_type != hwDeviceType)
+            continue;
+        
         if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) {
             needsHwDeviceCtx = true;
-            if (hwPixFmt == AV_PIX_FMT_NONE) {
-                hwPixFmt = cfg->pix_fmt;
-            }
+            hwPixFmt = cfg->pix_fmt;
+            LOG_VERBOSE << "HW config: device_type=" << cfg->device_type 
+                       << " method=HW_DEVICE_CTX pix_fmt=" << av_get_pix_fmt_name(cfg->pix_fmt);
         }
         if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX) {
             needsHwFramesCtx = true;
             if (hwPixFmt == AV_PIX_FMT_NONE) {
                 hwPixFmt = cfg->pix_fmt;
             }
+            LOG_VERBOSE << "HW config: device_type=" << cfg->device_type 
+                       << " method=HW_FRAMES_CTX pix_fmt=" << av_get_pix_fmt_name(cfg->pix_fmt);
         }
         // AV_CODEC_HW_CONFIG_METHOD_INTERNAL means it's a wrapper decoder
-        // (like cuvid, some vaapi variants) that manages hardware internally
-        // and doesn't need hw_device_ctx set on the codec context
+        // (like cuvid, qsv) that manages hardware internally
         if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_INTERNAL) {
             needsHwDeviceCtx = false;
             needsHwFramesCtx = false;
-            // Wrapper decoders handle pixel format internally
+            LOG_VERBOSE << "HW config: device_type=" << cfg->device_type 
+                       << " method=INTERNAL - wrapper decoder";
             break;
         }
     }
@@ -344,17 +365,42 @@ bool VideoFileInput::openHardwareCodec() {
         hwPixFmt = HardwareDecoder::getHardwarePixelFormat(hwDecoderType_, codecId);
     }
 
-    // Get hardware device type
-    AVHWDeviceType hwDeviceType = HardwareDecoder::getFFmpegDeviceType(hwDecoderType_);
-    if (hwDeviceType == AV_HWDEVICE_TYPE_NONE) {
-        return false;
-    }
-
     // Create hardware device context (needed for frame transfers even if not for codec)
-    int ret = av_hwdevice_ctx_create(&hwDeviceCtx_, hwDeviceType, nullptr, nullptr, 0);
-    if (ret < 0) {
-        hwDeviceCtx_ = nullptr;
-        return false;
+    int ret = -1;
+    
+#ifdef HAVE_VAAPI_INTEROP
+    // For VAAPI: use shared VADisplay from VaapiInterop for zero-copy support
+    // This ensures the decoder and EGL interop use the same VAAPI display
+    if (hwDeviceType == AV_HWDEVICE_TYPE_VAAPI && vaapiInterop_ && vaapiInterop_->getVADisplay()) {
+        VADisplay sharedDisplay = vaapiInterop_->getVADisplay();
+        
+        hwDeviceCtx_ = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VAAPI);
+        if (hwDeviceCtx_) {
+            AVHWDeviceContext* hwctx = (AVHWDeviceContext*)hwDeviceCtx_->data;
+            AVVAAPIDeviceContext* vactx = (AVVAAPIDeviceContext*)hwctx->hwctx;
+            vactx->display = sharedDisplay;
+            
+            ret = av_hwdevice_ctx_init(hwDeviceCtx_);
+            if (ret < 0) {
+                char errbuf[AV_ERROR_MAX_STRING_SIZE];
+                av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
+                LOG_WARNING << "Failed to init shared VAAPI device: " << errbuf;
+                av_buffer_unref(&hwDeviceCtx_);
+                hwDeviceCtx_ = nullptr;
+            } else {
+                LOG_INFO << "Using shared VADisplay for VAAPI zero-copy";
+            }
+        }
+    }
+#endif
+    
+    // Fallback: create device context normally (creates its own display)
+    if (!hwDeviceCtx_) {
+        ret = av_hwdevice_ctx_create(&hwDeviceCtx_, hwDeviceType, nullptr, nullptr, 0);
+        if (ret < 0) {
+            hwDeviceCtx_ = nullptr;
+            return false;
+        }
     }
 
     // Allocate codec context for hardware decoder
@@ -422,17 +468,18 @@ bool VideoFileInput::openHardwareCodec() {
         }
 
         // Set hardware pixel format callback
+        // Store hwPixFmt value in opaque (cast value to pointer, not storing a pointer)
+        codecCtx_->opaque = reinterpret_cast<void*>(static_cast<intptr_t>(hwPixFmt));
         codecCtx_->get_format = [](AVCodecContext* ctx, const AVPixelFormat* pix_fmts) -> AVPixelFormat {
-            const AVPixelFormat* p;
-            AVPixelFormat hwPixFmt = *reinterpret_cast<AVPixelFormat*>(ctx->opaque);
-            for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+            // Cast opaque back to the enum value (it's a value stored as pointer, not a pointer)
+            AVPixelFormat hwPixFmt = static_cast<AVPixelFormat>(reinterpret_cast<intptr_t>(ctx->opaque));
+            for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
                 if (*p == hwPixFmt) {
                     return *p;
                 }
             }
             return AV_PIX_FMT_NONE;
         };
-        codecCtx_->opaque = reinterpret_cast<void*>(static_cast<intptr_t>(hwPixFmt));
     }
     // Wrapper decoders (with METHOD_INTERNAL, like cuvid) handle hardware and pixel format
     // selection internally, but we keep hwDeviceCtx_ for frame transfers
@@ -1450,32 +1497,65 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     av_packet_free(&packet);
 
     // Transfer hardware frame to GPU texture
+    // NOTE: We do NOT call av_frame_unref(hwFrame_) here because:
+    // 1. VaapiInterop creates EGL images that reference the VAAPI surface
+    // 2. EGL images are only destroyed on the NEXT frame (in releaseFrame())
+    // 3. If we unref too early, the surface gets recycled while EGL images still reference it
+    // 4. This corrupts the surface pool and causes decoding errors
+    // The hwFrame_ will be automatically unreferenced when we receive the next frame
     return transferHardwareFrameToGPU(hwFrame_, textureBuffer);
 }
 
 bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer) {
-    if (!hwFrame || !hwFrame->data[0]) {
+    if (!hwFrame) {
+        LOG_WARNING << "transferHardwareFrameToGPU: hwFrame is NULL";
+        return false;
+    }
+    
+    // For hardware frames (VAAPI, etc.), data[0] may be NULL
+    // VAAPI stores VASurfaceID in data[3], not data[0]
+    // Check format to determine if it's a valid hardware frame
+    bool isHwFrame = (hwFrame->format == AV_PIX_FMT_VAAPI ||
+                      hwFrame->format == AV_PIX_FMT_CUDA ||
+                      hwFrame->format == AV_PIX_FMT_QSV ||
+                      hwFrame->format == AV_PIX_FMT_VIDEOTOOLBOX ||
+                      hwFrame->format == AV_PIX_FMT_DXVA2_VLD);
+    
+    if (!isHwFrame && !hwFrame->data[0]) {
+        LOG_WARNING << "transferHardwareFrameToGPU: frame has no data";
         return false;
     }
 
 #ifdef HAVE_VAAPI_INTEROP
-    // VAAPI ZERO-COPY PATH: If frame is VAAPI format and we have interop, use it!
-    // This avoids ALL CPU transfers - frame stays on GPU the entire time
+    // VAAPI ZERO-COPY PATH: Use shared VADisplay for direct GPU-to-GPU transfer
+    // Two-phase import:
+    //   Phase 1: createEGLImages - can be done from any thread
+    //   Phase 2: bindTexturesToImages - must be done from GL thread
     if (hwFrame->format == AV_PIX_FMT_VAAPI && vaapiInterop_ && vaapiInterop_->isAvailable()) {
         GLuint texY = 0, texUV = 0;
         int width = 0, height = 0;
         
-        if (vaapiInterop_->importFrame(hwFrame, texY, texUV, width, height)) {
-            // Set up the texture buffer with the imported textures
-            // The VaapiInterop owns the textures, so we need to reference them
-            if (!textureBuffer.setExternalNV12Textures(texY, texUV, frameInfo_)) {
-                LOG_WARNING << "transferHardwareFrameToGPU: Failed to set external NV12 textures";
-                vaapiInterop_->releaseFrame();
-                // Fall through to CPU path
+        // Phase 1: Create EGL images (works on any thread)
+        if (vaapiInterop_->createEGLImages(hwFrame, width, height)) {
+            // Phase 2: Try to bind textures (needs GL context)
+            // If we're on the GL thread, this will succeed
+            // If not, the caller can call bindTexturesToImages later
+            if (vaapiInterop_->bindTexturesToImages(texY, texUV)) {
+                // Set up the texture buffer with the imported textures
+                if (!textureBuffer.setExternalNV12Textures(texY, texUV, frameInfo_)) {
+                    LOG_WARNING << "transferHardwareFrameToGPU: Failed to set external NV12 textures";
+                    vaapiInterop_->releaseFrame();
+                    // Fall through to CPU path
+                } else {
+                    return true;
+                }
             } else {
-                LOG_VERBOSE << "transferHardwareFrameToGPU: VAAPI zero-copy import successful "
-                           << width << "x" << height;
-                return true;
+                // EGL images created but texture binding failed (probably wrong thread)
+                // The images are still valid - they can be bound later from the GL thread
+                // For now, fall back to CPU path but keep the EGL images
+                LOG_VERBOSE << "transferHardwareFrameToGPU: VAAPI EGL images created, but GL binding deferred (wrong thread)";
+                // Release EGL images since we can't use them from this thread
+                vaapiInterop_->releaseFrame();
             }
         } else {
             LOG_VERBOSE << "transferHardwareFrameToGPU: VAAPI zero-copy failed, falling back to CPU path";
