@@ -158,6 +158,102 @@ if(ENABLE_OPENGL)
                 endif()
                 message(STATUS "VAAPI zero-copy interop disabled (missing dependencies)")
             endif()
+            
+            # Wayland support (optional, for Wayland display backend)
+            pkg_check_modules(WAYLAND wayland-client)
+            pkg_check_modules(WAYLAND_EGL wayland-egl)
+            pkg_check_modules(WAYLAND_PROTOCOLS wayland-protocols)
+            
+            if(WAYLAND_FOUND AND WAYLAND_EGL_FOUND)
+                set(HAVE_WAYLAND TRUE)
+                add_definitions(-DHAVE_WAYLAND)
+                include_directories(${WAYLAND_INCLUDE_DIRS} ${WAYLAND_EGL_INCLUDE_DIRS})
+                list(APPEND GL_LIBS ${WAYLAND_LIBRARIES} ${WAYLAND_EGL_LIBRARIES})
+                message(STATUS "Wayland display backend enabled")
+                
+                # Generate Wayland protocol headers (if wayland-protocols found)
+                if(WAYLAND_PROTOCOLS_FOUND)
+                    find_program(WAYLAND_SCANNER wayland-scanner)
+                    if(WAYLAND_SCANNER)
+                        # Get wayland-protocols directory
+                        execute_process(
+                            COMMAND ${PKG_CONFIG_EXECUTABLE} --variable=pkgdatadir wayland-protocols
+                            OUTPUT_VARIABLE WAYLAND_PROTOCOLS_DIR
+                            OUTPUT_STRIP_TRAILING_WHITESPACE
+                        )
+                        
+                        if(WAYLAND_PROTOCOLS_DIR)
+                            set(WAYLAND_PROTOCOLS_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/wayland-protocols")
+                            file(MAKE_DIRECTORY ${WAYLAND_PROTOCOLS_GEN_DIR})
+                            
+                            # xdg-shell protocol
+                            set(XDG_SHELL_XML "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
+                            set(XDG_SHELL_CLIENT_HEADER "${WAYLAND_PROTOCOLS_GEN_DIR}/xdg-shell-client-protocol.h")
+                            set(XDG_SHELL_CODE "${WAYLAND_PROTOCOLS_GEN_DIR}/xdg-shell-protocol.c")
+                            
+                            add_custom_command(
+                                OUTPUT ${XDG_SHELL_CLIENT_HEADER}
+                                COMMAND ${WAYLAND_SCANNER} client-header ${XDG_SHELL_XML} ${XDG_SHELL_CLIENT_HEADER}
+                                DEPENDS ${XDG_SHELL_XML}
+                            )
+                            
+                            add_custom_command(
+                                OUTPUT ${XDG_SHELL_CODE}
+                                COMMAND ${WAYLAND_SCANNER} private-code ${XDG_SHELL_XML} ${XDG_SHELL_CODE}
+                                DEPENDS ${XDG_SHELL_XML}
+                            )
+                            
+                            # linux-dmabuf protocol
+                            set(DMABUF_XML "${WAYLAND_PROTOCOLS_DIR}/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml")
+                            set(DMABUF_CLIENT_HEADER "${WAYLAND_PROTOCOLS_GEN_DIR}/linux-dmabuf-unstable-v1-client-protocol.h")
+                            set(DMABUF_CODE "${WAYLAND_PROTOCOLS_GEN_DIR}/linux-dmabuf-unstable-v1-protocol.c")
+                            
+                            add_custom_command(
+                                OUTPUT ${DMABUF_CLIENT_HEADER}
+                                COMMAND ${WAYLAND_SCANNER} client-header ${DMABUF_XML} ${DMABUF_CLIENT_HEADER}
+                                DEPENDS ${DMABUF_XML}
+                            )
+                            
+                            add_custom_command(
+                                OUTPUT ${DMABUF_CODE}
+                                COMMAND ${WAYLAND_SCANNER} private-code ${DMABUF_XML} ${DMABUF_CODE}
+                                DEPENDS ${DMABUF_XML}
+                            )
+                            
+                            set(WAYLAND_PROTOCOL_SOURCES
+                                ${XDG_SHELL_CLIENT_HEADER}
+                                ${XDG_SHELL_CODE}
+                                ${DMABUF_CLIENT_HEADER}
+                                ${DMABUF_CODE}
+                            )
+                            
+                            # Mark headers as generated
+                            set_source_files_properties(
+                                ${XDG_SHELL_CLIENT_HEADER}
+                                ${DMABUF_CLIENT_HEADER}
+                                PROPERTIES GENERATED TRUE
+                            )
+                            
+                            include_directories(${WAYLAND_PROTOCOLS_GEN_DIR})
+                            message(STATUS "Wayland protocols will be generated from ${WAYLAND_PROTOCOLS_DIR}")
+                        else()
+                            message(WARNING "Could not determine wayland-protocols directory")
+                        endif()
+                    else()
+                        message(WARNING "wayland-scanner not found - protocol headers will not be generated")
+                    endif()
+                else()
+                    message(STATUS "wayland-protocols not found - some Wayland features may be limited")
+                endif()
+            else()
+                if(NOT WAYLAND_FOUND)
+                    message(STATUS "Wayland not found - install libwayland-dev for Wayland backend")
+                endif()
+                if(NOT WAYLAND_EGL_FOUND)
+                    message(STATUS "Wayland EGL not found - install libwayland-egl-dev for Wayland backend")
+                endif()
+                message(STATUS "Wayland display backend disabled (missing dependencies)")
+            endif()
         endif()
     endif()
 endif()
@@ -487,10 +583,12 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/layer/LayerManager.cpp
     src/cuems_videocomposer/cpp/display/GPUImageProcessor.cpp
     src/cuems_videocomposer/cpp/display/CPUImageProcessor.cpp
-    src/cuems_videocomposer/cpp/display/OpenGLDisplay.cpp
+    src/cuems_videocomposer/cpp/display/X11Display.cpp
     src/cuems_videocomposer/cpp/display/OpenGLRenderer.cpp
     src/cuems_videocomposer/cpp/display/ShaderProgram.cpp
     src/cuems_videocomposer/cpp/display/DisplayManager.cpp
+    # Wayland backend (conditional compilation via #ifdef HAVE_WAYLAND)
+    src/cuems_videocomposer/cpp/display/WaylandDisplay.cpp
     src/cuems_videocomposer/cpp/display/XineramaHelper.cpp
     src/cuems_videocomposer/cpp/remote/OSCRemoteControl.cpp
     src/cuems_videocomposer/cpp/remote/RemoteCommandRouter.cpp
@@ -525,6 +623,11 @@ if(ENABLE_MIDI AND RTMIDI_FOUND)
     list(APPEND CPP_SOURCES
         src/cuems_videocomposer/cpp/sync/MtcReceiverMIDIDriver.cpp
     )
+endif()
+
+# Add Wayland protocol sources if Wayland is enabled
+if(HAVE_WAYLAND AND WAYLAND_PROTOCOL_SOURCES)
+    list(APPEND CPP_SOURCES ${WAYLAND_PROTOCOL_SOURCES})
 endif()
 
 # Create executable

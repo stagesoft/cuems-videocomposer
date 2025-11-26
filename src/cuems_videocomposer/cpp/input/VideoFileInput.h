@@ -76,7 +76,7 @@ public:
 #ifdef HAVE_VAAPI_INTEROP
     /**
      * Set VAAPI interop for zero-copy hardware decoding
-     * @param interop VaapiInterop instance from OpenGLDisplay
+     * @param interop VaapiInterop instance from DisplayBackend (X11Display or WaylandDisplay)
      */
     void setVaapiInterop(VaapiInterop* interop) { vaapiInterop_ = interop; }
     

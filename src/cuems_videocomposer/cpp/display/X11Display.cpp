@@ -1,4 +1,4 @@
-#include "OpenGLDisplay.h"
+#include "X11Display.h"
 #include "../layer/LayerManager.h"
 #include "../osd/OSDManager.h"
 #include "../osd/OSDRenderer.h"
@@ -41,7 +41,7 @@
 
 namespace videocomposer {
 
-OpenGLDisplay::OpenGLDisplay()
+X11Display::X11Display()
     : renderer_(std::make_unique<OpenGLRenderer>())
     , osdRenderer_(std::make_unique<OSDRenderer>())
 #if defined(PLATFORM_LINUX) || (!defined(PLATFORM_WINDOWS) && !defined(PLATFORM_OSX))
@@ -79,11 +79,11 @@ OpenGLDisplay::OpenGLDisplay()
 {
 }
 
-OpenGLDisplay::~OpenGLDisplay() {
+X11Display::~X11Display() {
     closeWindow();
 }
 
-bool OpenGLDisplay::openWindow() {
+bool X11Display::openWindow() {
     if (windowOpen_) {
         return true;
     }
@@ -143,7 +143,7 @@ bool OpenGLDisplay::openWindow() {
     return true;
 }
 
-void OpenGLDisplay::closeWindow() {
+void X11Display::closeWindow() {
     if (!windowOpen_) {
         return;
     }
@@ -176,11 +176,11 @@ void OpenGLDisplay::closeWindow() {
     windowOpen_ = false;
 }
 
-bool OpenGLDisplay::isWindowOpen() const {
+bool X11Display::isWindowOpen() const {
     return windowOpen_;
 }
 
-void OpenGLDisplay::render(LayerManager* layerManager, OSDManager* osdManager) {
+void X11Display::render(LayerManager* layerManager, OSDManager* osdManager) {
     if (!windowOpen_ || !layerManager) {
         return;
     }
@@ -229,7 +229,7 @@ void OpenGLDisplay::render(LayerManager* layerManager, OSDManager* osdManager) {
     clearCurrent();
 }
 
-void OpenGLDisplay::handleEvents() {
+void X11Display::handleEvents() {
     if (!windowOpen_) {
         return;
     }
@@ -243,7 +243,7 @@ void OpenGLDisplay::handleEvents() {
 #endif
 }
 
-void OpenGLDisplay::resize(unsigned int width, unsigned int height) {
+void X11Display::resize(unsigned int width, unsigned int height) {
     windowWidth_ = width;
     windowHeight_ = height;
 
@@ -254,23 +254,23 @@ void OpenGLDisplay::resize(unsigned int width, unsigned int height) {
     }
 }
 
-void OpenGLDisplay::getWindowSize(unsigned int* width, unsigned int* height) const {
+void X11Display::getWindowSize(unsigned int* width, unsigned int* height) const {
     if (width) *width = windowWidth_;
     if (height) *height = windowHeight_;
 }
 
-void OpenGLDisplay::setPosition(int x, int y) {
+void X11Display::setPosition(int x, int y) {
     windowX_ = x;
     windowY_ = y;
     // Platform-specific implementation would move window here
 }
 
-void OpenGLDisplay::getWindowPos(int* x, int* y) const {
+void X11Display::getWindowPos(int* x, int* y) const {
     if (x) *x = windowX_;
     if (y) *y = windowY_;
 }
 
-void OpenGLDisplay::setFullscreen(int action) {
+void X11Display::setFullscreen(int action) {
     bool newState = fullscreen_;
     
     if (action == 0) {
@@ -287,11 +287,11 @@ void OpenGLDisplay::setFullscreen(int action) {
     }
 }
 
-bool OpenGLDisplay::getFullscreen() const {
+bool X11Display::getFullscreen() const {
     return fullscreen_;
 }
 
-void OpenGLDisplay::setOnTop(int action) {
+void X11Display::setOnTop(int action) {
     bool newState = ontop_;
     
     if (action == 0) {
@@ -308,11 +308,11 @@ void OpenGLDisplay::setOnTop(int action) {
     }
 }
 
-bool OpenGLDisplay::getOnTop() const {
+bool X11Display::getOnTop() const {
     return ontop_;
 }
 
-void* OpenGLDisplay::getContext() {
+void* X11Display::getContext() {
 #if defined(USE_GLX)
     return context_;
 #elif defined(USE_WGL)
@@ -326,7 +326,7 @@ void* OpenGLDisplay::getContext() {
 
 // Platform-specific implementations
 #if defined(USE_GLX)
-bool OpenGLDisplay::initGLX() {
+bool X11Display::initGLX() {
     display_ = XOpenDisplay(nullptr);
     if (!display_) {
         std::cerr << "Cannot open X display" << std::endl;
@@ -402,7 +402,7 @@ bool OpenGLDisplay::initGLX() {
     return true;
 }
 
-void OpenGLDisplay::cleanupGLX() {
+void X11Display::cleanupGLX() {
     if (context_) {
         glXDestroyContext(display_, context_);
         context_ = nullptr;
@@ -418,7 +418,7 @@ void OpenGLDisplay::cleanupGLX() {
 }
 
 #ifdef HAVE_EGL
-bool OpenGLDisplay::initEGL() {
+bool X11Display::initEGL() {
     // Pure EGL initialization - creates X11 window, EGL context, and surface
     // This enables VAAPI zero-copy by using EGL for all OpenGL operations
     
@@ -628,7 +628,7 @@ bool OpenGLDisplay::initEGL() {
     return true;
 }
 
-void OpenGLDisplay::cleanupEGL() {
+void X11Display::cleanupEGL() {
 #ifdef HAVE_VAAPI_INTEROP
     if (vaDisplay_) {
         vaTerminate(vaDisplay_);
@@ -672,7 +672,7 @@ void OpenGLDisplay::cleanupEGL() {
     }
 }
 
-bool OpenGLDisplay::queryEGLExtensions() {
+bool X11Display::queryEGLExtensions() {
     const char* extensions = eglQueryString(eglDisplay_, EGL_EXTENSIONS);
     if (!extensions) {
         LOG_WARNING << "eglQueryString(EGL_EXTENSIONS) failed";
@@ -723,7 +723,7 @@ bool OpenGLDisplay::queryEGLExtensions() {
 }
 #endif // HAVE_EGL
 
-void OpenGLDisplay::handleEventsGLX() {
+void X11Display::handleEventsGLX() {
     if (!display_) return;
 
     XEvent event;
@@ -756,7 +756,7 @@ void OpenGLDisplay::handleEventsGLX() {
     }
 }
 
-void OpenGLDisplay::makeCurrent() {
+void X11Display::makeCurrent() {
 #if defined(USE_GLX)
 #ifdef HAVE_EGL
     // Pure EGL path - preferred for VAAPI zero-copy
@@ -780,7 +780,7 @@ void OpenGLDisplay::makeCurrent() {
 #endif
 }
 
-void OpenGLDisplay::clearCurrent() {
+void X11Display::clearCurrent() {
 #if defined(USE_GLX)
 #ifdef HAVE_EGL
     // Pure EGL path
@@ -800,7 +800,7 @@ void OpenGLDisplay::clearCurrent() {
 #endif
 }
 
-void OpenGLDisplay::swapBuffers() {
+void X11Display::swapBuffers() {
 #if defined(USE_GLX)
 #ifdef HAVE_EGL
     // Pure EGL path
@@ -825,38 +825,38 @@ void OpenGLDisplay::swapBuffers() {
 #elif defined(USE_WGL)
 // Windows (WGL) implementation - NOT SUPPORTED
 // Only Linux GLX is implemented
-bool OpenGLDisplay::initWGL() {
+bool X11Display::initWGL() {
     return false;
 }
 
-void OpenGLDisplay::cleanupWGL() {
+void X11Display::cleanupWGL() {
 }
 
-void OpenGLDisplay::handleEventsWGL() {
+void X11Display::handleEventsWGL() {
 }
 
 #elif defined(USE_CGL)
 // macOS (CGL) implementation - NOT SUPPORTED
 // Only Linux GLX is implemented
-bool OpenGLDisplay::initCGL() {
+bool X11Display::initCGL() {
     return false;
 }
 
-void OpenGLDisplay::cleanupCGL() {
+void X11Display::cleanupCGL() {
 }
 
-void OpenGLDisplay::handleEventsCGL() {
+void X11Display::handleEventsCGL() {
 }
 
-void OpenGLDisplay::makeCurrent() {
+void X11Display::makeCurrent() {
     // OSX context make current
 }
 
-void OpenGLDisplay::clearCurrent() {
+void X11Display::clearCurrent() {
     // OSX context clear
 }
 
-void OpenGLDisplay::swapBuffers() {
+void X11Display::swapBuffers() {
     // OSX swap buffers
 }
 #endif

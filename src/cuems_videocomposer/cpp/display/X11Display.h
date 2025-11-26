@@ -1,5 +1,5 @@
-#ifndef VIDEOCOMPOSER_OPENGLDISPLAY_H
-#define VIDEOCOMPOSER_OPENGLDISPLAY_H
+#ifndef VIDEOCOMPOSER_X11DISPLAY_H
+#define VIDEOCOMPOSER_X11DISPLAY_H
 
 #include "DisplayBackend.h"
 #include "OpenGLRenderer.h"
@@ -12,22 +12,10 @@ typedef struct _XDisplay Display;
 typedef unsigned long Window;
 typedef struct __GLXcontextRec *GLXContext;
 
-// EGL forward declarations (for VAAPI zero-copy)
+// EGL forward declarations for platform-specific types (not in DisplayBackend)
 #ifdef HAVE_EGL
-typedef void* EGLDisplay;
-typedef void* EGLContext;
 typedef void* EGLSurface;
 typedef void* EGLConfig;
-typedef void* EGLImageKHR;
-// Function pointer types for EGL extensions
-typedef EGLImageKHR (*PFNEGLCREATEIMAGEKHRPROC)(EGLDisplay, EGLContext, unsigned int, void*, const int*);
-typedef unsigned int (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay, EGLImageKHR);
-typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(unsigned int, void*);
-#endif
-
-// VAAPI forward declaration (for shared display)
-#ifdef HAVE_VAAPI_INTEROP
-typedef void* VADisplay;  // Opaque pointer to VADisplay
 #endif
 
 #elif defined(PLATFORM_WINDOWS)
@@ -47,17 +35,18 @@ namespace videocomposer {
 class LayerManager;
 
 /**
- * OpenGLDisplay - OpenGL-based display backend (Linux GLX only)
+ * X11Display - X11-based display backend with EGL/OpenGL (Linux only)
  * 
- * Implements DisplayBackend using OpenGL with GLX on Linux.
- * Supports multi-layer rendering and multi-display output (Xinerama/Wayland).
+ * Implements DisplayBackend using X11 + EGL + OpenGL on Linux.
+ * Supports multi-layer rendering and multi-display output (Xinerama).
  * 
- * Note: Only Linux GLX is implemented. Windows (WGL) and macOS (CGL) are not supported.
+ * Note: This backend uses X11 for windowing and EGL for OpenGL context.
+ *       For Wayland systems, use WaylandDisplay instead.
  */
-class OpenGLDisplay : public DisplayBackend {
+class X11Display : public DisplayBackend {
 public:
-    OpenGLDisplay();
-    virtual ~OpenGLDisplay();
+    X11Display();
+    virtual ~X11Display();
 
     // DisplayBackend interface
     bool openWindow() override;
@@ -76,24 +65,24 @@ public:
     bool supportsMultiDisplay() const override { return true; }
     void* getContext() override;
 
-    // OpenGL context management (public for frame loading that needs GPU texture allocation)
-    void makeCurrent();
-    void clearCurrent();
+    // OpenGL context management (override DisplayBackend interface)
+    void makeCurrent() override;
+    void clearCurrent() override;
 
 #ifdef HAVE_EGL
-    // EGL context access (for VAAPI zero-copy interop)
-    EGLDisplay getEGLDisplay() const { return eglDisplay_; }
-    bool hasVaapiSupport() const { return vaapiSupported_; }
+    // EGL context access (for VAAPI zero-copy interop) - override DisplayBackend interface
+    EGLDisplay getEGLDisplay() const override { return eglDisplay_; }
+    bool hasVaapiSupport() const override { return vaapiSupported_; }
     
-    // EGL extension function pointers (for VaapiInterop)
-    PFNEGLCREATEIMAGEKHRPROC getEglCreateImageKHR() const { return eglCreateImageKHR_; }
-    PFNEGLDESTROYIMAGEKHRPROC getEglDestroyImageKHR() const { return eglDestroyImageKHR_; }
-    PFNGLEGLIMAGETARGETTEXTURE2DOESPROC getGlEGLImageTargetTexture2DOES() const { return glEGLImageTargetTexture2DOES_; }
+    // EGL extension function pointers (for VaapiInterop) - override DisplayBackend interface
+    PFNEGLCREATEIMAGEKHRPROC getEglCreateImageKHR() const override { return eglCreateImageKHR_; }
+    PFNEGLDESTROYIMAGEKHRPROC getEglDestroyImageKHR() const override { return eglDestroyImageKHR_; }
+    PFNGLEGLIMAGETARGETTEXTURE2DOESPROC getGlEGLImageTargetTexture2DOES() const override { return glEGLImageTargetTexture2DOES_; }
 #endif
 
 #ifdef HAVE_VAAPI_INTEROP
-    // VAAPI display access (shared between decoder and EGL interop)
-    VADisplay getVADisplay() const { return vaDisplay_; }
+    // VAAPI display access (shared between decoder and EGL interop) - override DisplayBackend interface
+    VADisplay getVADisplay() const override { return vaDisplay_; }
 #endif
 
 private:
@@ -180,5 +169,5 @@ private:
 
 } // namespace videocomposer
 
-#endif // VIDEOCOMPOSER_OPENGLDISPLAY_H
+#endif // VIDEOCOMPOSER_X11DISPLAY_H
 

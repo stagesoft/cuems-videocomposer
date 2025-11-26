@@ -70,7 +70,7 @@ bool OpenGLRenderer::init() {
     }
     
     // Initialize GLEW for modern OpenGL extension loading
-    // Note: OpenGL context must already exist (created by OpenGLDisplay)
+    // Note: OpenGL context must already exist (created by DisplayBackend: X11Display or WaylandDisplay)
     // glewExperimental is needed for core profile and EGL contexts
     glewExperimental = GL_TRUE;
     GLenum glewErr = glewInit();

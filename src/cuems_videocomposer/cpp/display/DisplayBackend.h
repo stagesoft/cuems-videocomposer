@@ -4,6 +4,20 @@
 #include "../video/FrameBuffer.h"
 #include <cstdint>
 
+// Forward declarations for EGL/VAAPI types (avoid including headers)
+#ifdef HAVE_EGL
+typedef void* EGLDisplay;
+typedef void* EGLContext;
+typedef void* EGLImageKHR;
+typedef EGLImageKHR (*PFNEGLCREATEIMAGEKHRPROC)(EGLDisplay, EGLContext, unsigned int, void*, const int*);
+typedef unsigned int (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay, EGLImageKHR);
+typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(unsigned int, void*);
+#endif
+
+#ifdef HAVE_VAAPI_INTEROP
+typedef void* VADisplay;
+#endif
+
 namespace videocomposer {
 
 // Forward declarations
@@ -13,9 +27,10 @@ class OSDManager;
 /**
  * DisplayBackend - Abstract base class for display backends
  * 
- * Interface for all display backends (OpenGL, X11, SDL, etc.)
- * Keeps architecture open for future backends while only OpenGLDisplay
- * is implemented for now.
+ * Interface for all display backends (X11, Wayland, SDL, etc.)
+ * Keeps architecture open for future backends. Currently implemented:
+ * - X11Display (X11 + EGL + OpenGL)
+ * - WaylandDisplay (Wayland + EGL + OpenGL) - in progress
  */
 class DisplayBackend {
 public:
@@ -114,6 +129,46 @@ public:
      * @return Pointer to context, or nullptr if not applicable
      */
     virtual void* getContext() { return nullptr; }
+
+    /**
+     * Make this display's OpenGL context current
+     * Required for backends that support OpenGL rendering
+     */
+    virtual void makeCurrent() {}
+
+    /**
+     * Clear the current OpenGL context
+     */
+    virtual void clearCurrent() {}
+
+#ifdef HAVE_EGL
+    /**
+     * Get EGL display (for VAAPI zero-copy interop)
+     * @return EGL display handle, or nullptr if not available
+     */
+    virtual EGLDisplay getEGLDisplay() const { return nullptr; }
+
+    /**
+     * Check if backend supports VAAPI hardware decode
+     * @return true if VAAPI is supported
+     */
+    virtual bool hasVaapiSupport() const { return false; }
+
+    /**
+     * Get EGL extension function pointers (for VaapiInterop)
+     */
+    virtual PFNEGLCREATEIMAGEKHRPROC getEglCreateImageKHR() const { return nullptr; }
+    virtual PFNEGLDESTROYIMAGEKHRPROC getEglDestroyImageKHR() const { return nullptr; }
+    virtual PFNGLEGLIMAGETARGETTEXTURE2DOESPROC getGlEGLImageTargetTexture2DOES() const { return nullptr; }
+#endif
+
+#ifdef HAVE_VAAPI_INTEROP
+    /**
+     * Get VAAPI display (shared between decoder and EGL interop)
+     * @return VAAPI display handle, or nullptr if not available
+     */
+    virtual VADisplay getVADisplay() const { return nullptr; }
+#endif
 };
 
 } // namespace videocomposer

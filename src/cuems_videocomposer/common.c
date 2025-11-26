@@ -154,11 +154,11 @@ const char *xj_jack_client_name(void) {
 
 /* Display window stubs */
 void start_ontop(void) {
-    // Stub - window management handled by C++ OpenGLDisplay
+    // Stub - window management handled by C++ DisplayBackend
 }
 
 void start_fullscreen(void) {
-    // Stub - window management handled by C++ OpenGLDisplay
+    // Stub - window management handled by C++ DisplayBackend
 }
 
 /* Additional C globals (from xjadeo.c/main.c/configfile.c) */

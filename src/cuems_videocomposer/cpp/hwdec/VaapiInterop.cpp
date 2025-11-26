@@ -1,7 +1,7 @@
 #ifdef HAVE_VAAPI_INTEROP
 
 #include "VaapiInterop.h"
-#include "../display/OpenGLDisplay.h"
+#include "../display/DisplayBackend.h"
 #include "../utils/Logger.h"
 
 // Include GLEW before GL for proper initialization
@@ -63,11 +63,14 @@ VaapiInterop::VaapiInterop()
     , initialized_(false)
     , eglImageY_(EGL_NO_IMAGE_KHR)
     , eglImageUV_(EGL_NO_IMAGE_KHR)
+    , prevEglImageY_(EGL_NO_IMAGE_KHR)
+    , prevEglImageUV_(EGL_NO_IMAGE_KHR)
     , textureY_(0)
     , textureUV_(0)
     , frameWidth_(0)
     , frameHeight_(0)
     , previousFrame_(nullptr)
+    , currentFrame_(nullptr)
     // Debug instrumentation
     , debugFrameCounter_(0)
     , debugLastSurfaceId_(VA_INVALID_ID)
@@ -89,7 +92,12 @@ VaapiInterop::VaapiInterop()
 VaapiInterop::~VaapiInterop() {
     releaseFrame();
     
-    // Unref previous frame if it exists
+    // Unref frames if they exist
+    if (currentFrame_) {
+        av_frame_unref(currentFrame_);
+        av_frame_free(&currentFrame_);
+        currentFrame_ = nullptr;
+    }
     if (previousFrame_) {
         av_frame_unref(previousFrame_);
         av_frame_free(&previousFrame_);
@@ -117,18 +125,18 @@ VaapiInterop::~VaapiInterop() {
     }
 }
 
-bool VaapiInterop::init(OpenGLDisplay* display) {
+bool VaapiInterop::init(DisplayBackend* display) {
     if (!display) {
-        LOG_ERROR << "VaapiInterop: OpenGLDisplay is null";
+        LOG_ERROR << "VaapiInterop: DisplayBackend is null";
         return false;
     }
     
     if (!display->hasVaapiSupport()) {
-        LOG_WARNING << "VaapiInterop: OpenGLDisplay does not have VAAPI support";
+        LOG_WARNING << "VaapiInterop: DisplayBackend does not have VAAPI support";
         return false;
     }
     
-    // Get EGL display and extension functions from OpenGLDisplay
+    // Get EGL display and extension functions from DisplayBackend
     eglDisplay_ = display->getEGLDisplay();
     if (eglDisplay_ == EGL_NO_DISPLAY) {
         LOG_ERROR << "VaapiInterop: Invalid EGL display";
@@ -388,8 +396,6 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     // Create EGL images only - do NOT bind textures here
     // The caller should call bindTexturesToImages() from the GL thread
     
-    auto startTime = std::chrono::high_resolution_clock::now();
-    
     if (!initialized_) {
         LOG_ERROR << "VaapiInterop: Not initialized";
         return false;
@@ -413,21 +419,41 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     // Get VAAPI surface from AVFrame
     VASurfaceID surface = (VASurfaceID)(uintptr_t)vaapiFrame->data[3];
     
-    // Release previous frame resources (EGL images only, keep textures for reuse)
-    releaseFrame();
+    // CRITICAL: Save old EGL images before creating new ones
+    // They must stay alive until new textures are bound (GPU might still be sampling from them)
+    // They will be destroyed in bindTexturesToImages() AFTER new textures are bound
+    prevEglImageY_ = eglImageY_;
+    prevEglImageUV_ = eglImageUV_;
+    eglImageY_ = EGL_NO_IMAGE_KHR;
+    eglImageUV_ = EGL_NO_IMAGE_KHR;
     
-    // CRITICAL: Unref the previous-previous frame NOW
-    // This releases its VAAPI surface back to the pool for reuse
-    // Note: We delay calling av_frame_ref until the end, after all validation passes
-    if (previousFrame_) {
-        av_frame_unref(previousFrame_);
-    } else {
-        // Allocate previousFrame_ on first use
+    // CRITICAL: Frame reference management - SIMPLIFIED approach like mpv
+    // We keep only ONE AVFrame reference (currentFrame_) - the frame being rendered
+    // When importing frame N+1, we do NOT release frame N yet - GPU is still rendering it!
+    // Frame N will be released in bindTexturesToImages() AFTER new textures are bound
+    // This matches mpv's map()/unmap() pattern
+    
+    // Allocate currentFrame_ on first use
+    if (!currentFrame_) {
+        currentFrame_ = av_frame_alloc();
+        if (!currentFrame_) {
+            LOG_ERROR << "VaapiInterop: Failed to allocate currentFrame_";
+            return false;
+        }
+    }
+    
+    // Allocate previousFrame_ on first use (used only to swap frames)
+    if (!previousFrame_) {
         previousFrame_ = av_frame_alloc();
         if (!previousFrame_) {
             LOG_ERROR << "VaapiInterop: Failed to allocate previousFrame_";
             return false;
         }
+    }
+    
+    // Move current frame to previous slot (will be released after new textures bound)
+    if (currentFrame_->buf[0]) {
+        av_frame_move_ref(previousFrame_, currentFrame_);
     }
     
     // Get VAAPI device context from frame
@@ -569,10 +595,10 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         return false;
     }
     
-    // CRITICAL: Clone the current frame to previousFrame_ (increment ref count)
+    // CRITICAL: Clone the new frame to currentFrame_ (increment ref count)
     // This keeps the VAAPI surface alive while we use its EGL images
     // We do this AFTER all validation and EGL image creation succeeds
-    int ret = av_frame_ref(previousFrame_, vaapiFrame);
+    int ret = av_frame_ref(currentFrame_, vaapiFrame);
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
@@ -589,8 +615,6 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
 }
 
 bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
-    auto startTime = std::chrono::high_resolution_clock::now();
-    
     if (!hasEGLImages()) {
         LOG_ERROR << "VaapiInterop: No EGL images to bind";
         return false;
@@ -696,11 +720,9 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     
     glBindTexture(GL_TEXTURE_2D, 0);
     
-    // CRITICAL: Force GPU synchronization to ensure EGL image bindings are complete
-    // This is essential for DMA-BUF backed textures
-    // glFlush() only submits commands, glFinish() waits for completion
+    // CRITICAL: Flush GPU commands to ensure EGL image bindings are submitted
+    // glFlush() submits commands to GPU without blocking
     glFlush();
-    glFinish();  // Force GPU to complete all operations before continuing
     
     // EXPERIMENTAL: Use EGL sync fence to ensure texture data is ready
     // This may help with GPU caching issues by forcing synchronization
@@ -727,6 +749,41 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         if (oldTextureUV != 0) {
             glDeleteTextures(1, &oldTextureUV);
         }
+    }
+    
+    // CRITICAL: NOW destroy old EGL images (after new textures are bound)
+    // The GPU is now sampling from new textures, so old EGL images can be released
+    EGLDisplay currentDisplay = eglGetCurrentDisplay();
+    if (currentDisplay == EGL_NO_DISPLAY) {
+        currentDisplay = eglDisplay_;
+    }
+    
+    if (prevEglImageY_ != EGL_NO_IMAGE_KHR) {
+        eglDestroyImageKHR_(currentDisplay, prevEglImageY_);
+        prevEglImageY_ = EGL_NO_IMAGE_KHR;
+    }
+    if (prevEglImageUV_ != EGL_NO_IMAGE_KHR) {
+        eglDestroyImageKHR_(currentDisplay, prevEglImageUV_);
+        prevEglImageUV_ = EGL_NO_IMAGE_KHR;
+    }
+    
+    // Close old DMA-BUF FDs if keepFDsOpen_ mode was used
+    // (These are from the previous frame)
+    if (openYFd_ >= 0) {
+        close(openYFd_);
+        openYFd_ = -1;
+    }
+    if (openUVFd_ >= 0) {
+        close(openUVFd_);
+        openUVFd_ = -1;
+    }
+    
+    // CRITICAL: NOW release the old AVFrame (after new textures bound and old EGL images destroyed)
+    // This matches mpv's unmap() pattern - frame is released immediately after rendering completes
+    // The GPU has already submitted commands for the old frame (glFlush was called above)
+    // So it's safe to release the VAAPI surface back to the pool
+    if (previousFrame_ && previousFrame_->buf[0]) {
+        av_frame_unref(previousFrame_);
     }
     
     // Return NEW texture IDs
@@ -872,6 +929,16 @@ void VaapiInterop::debugReadbackVaapiSurface(VASurfaceID surface, VADisplay vaDi
 }
 
 void VaapiInterop::releaseFrame() {
+    // CRITICAL: Wait for GPU to finish rendering before releasing resources
+    // The GPU might still be sampling from textures backed by these EGL images/DMA-BUFs
+    // If we release them while rendering is in progress, we'll get frozen frames
+    // when the VAAPI surface pool recycles surfaces
+    EGLContext currentContext = eglGetCurrentContext();
+    if (currentContext != EGL_NO_CONTEXT) {
+        // We have a GL context - ensure all rendering is complete
+        glFinish();
+    }
+    
     // Use eglGetCurrentDisplay() like mpv does
     EGLDisplay currentDisplay = eglGetCurrentDisplay();
     if (currentDisplay == EGL_NO_DISPLAY) {

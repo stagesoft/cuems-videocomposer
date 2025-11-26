@@ -28,14 +28,16 @@
 #include "VideoComposerApplication.h"
 #include "config/ConfigurationManager.h"
 #include "input/VideoFileInput.h"
-#include "display/OpenGLDisplay.h"
+#include "display/X11Display.h"
+#ifdef HAVE_WAYLAND
+#include "display/WaylandDisplay.h"
+#endif
 #include "input/HAPVideoInput.h"
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
 #include "layer/LayerManager.h"
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
-#include "display/OpenGLDisplay.h"
 #include "display/DisplayManager.h"
 #include "remote/OSCRemoteControl.h"
 
@@ -162,29 +164,62 @@ bool VideoComposerApplication::initializeDisplay() {
         return false;
     }
 
-    // Create OpenGL display backend
-    displayBackend_ = std::make_unique<OpenGLDisplay>();
+    // Auto-detect and create display backend (prefer Wayland over X11)
+    const char* waylandDisplay = getenv("WAYLAND_DISPLAY");
+    const char* x11Display = getenv("DISPLAY");
+    
+    bool waylandAttempted = false;
+    
+#ifdef HAVE_WAYLAND
+    if (waylandDisplay) {
+        LOG_INFO << "WAYLAND_DISPLAY=" << waylandDisplay << " detected - attempting Wayland backend";
+        displayBackend_ = std::make_unique<WaylandDisplay>();
+        waylandAttempted = true;
+    } else
+#endif
+    if (x11Display) {
+        LOG_INFO << "Using X11 display backend (DISPLAY=" << x11Display << ")";
+        displayBackend_ = std::make_unique<X11Display>();
+    } else {
+        LOG_ERROR << "No display server detected (neither WAYLAND_DISPLAY nor DISPLAY set)";
+        return false;
+    }
 
     // Create window (single window mode for now)
     if (!displayManager_->createWindows(displayBackend_.get(), 0)) {
-        std::cerr << "Failed to create display window" << std::endl;
-        return false;
+#ifdef HAVE_WAYLAND
+        // If Wayland failed but X11 is available, try falling back
+        if (waylandAttempted && x11Display) {
+            LOG_WARNING << "Wayland backend failed - falling back to X11";
+            displayBackend_.reset();
+            displayBackend_ = std::make_unique<X11Display>();
+            
+            if (!displayManager_->createWindows(displayBackend_.get(), 0)) {
+                LOG_ERROR << "X11 fallback also failed";
+                return false;
+            }
+            LOG_INFO << "Successfully fell back to X11 display backend";
+        } else
+#endif
+        {
+            LOG_ERROR << "Failed to create display window";
+            return false;
+        }
     }
 
 #ifdef HAVE_VAAPI_INTEROP
     // Initialize VAAPI zero-copy interop (if available)
     // Need to make OpenGL context current for texture generation
-    OpenGLDisplay* glDisplay = dynamic_cast<OpenGLDisplay*>(displayBackend_.get());
-    if (glDisplay && glDisplay->hasVaapiSupport()) {
-        glDisplay->makeCurrent();  // Need GL context for texture generation
+    if (displayBackend_->hasVaapiSupport()) {
+        displayBackend_->makeCurrent();  // Need GL context for texture generation
         vaapiInterop_ = std::make_unique<VaapiInterop>();
-        if (vaapiInterop_->init(glDisplay)) {
+        if (vaapiInterop_->init(displayBackend_.get())) {
             LOG_INFO << "VaapiInterop initialized - VAAPI zero-copy enabled for video playback";
         } else {
             LOG_WARNING << "VaapiInterop initialization failed - falling back to CPU copy";
             vaapiInterop_.reset();
         }
-        glDisplay->clearCurrent();
+        displayBackend_->clearCurrent();
     }
 #endif
 
@@ -268,22 +303,14 @@ int VideoComposerApplication::run() {
         // Make OpenGL context current before updating layers
         // This is needed because hardware decoding may allocate GPU textures during frame loading
         if (displayBackend_ && displayBackend_->isWindowOpen()) {
-            // Cast to OpenGLDisplay to access makeCurrent (temporary solution)
-            // TODO: Add makeCurrent/clearCurrent to DisplayBackend interface if needed
-            OpenGLDisplay* glDisplay = dynamic_cast<OpenGLDisplay*>(displayBackend_.get());
-            if (glDisplay) {
-                glDisplay->makeCurrent();
-            }
+            displayBackend_->makeCurrent();
         }
         
         updateLayers();
         
         // Clear OpenGL context after updating (render will make it current again)
         if (displayBackend_ && displayBackend_->isWindowOpen()) {
-            OpenGLDisplay* glDisplay = dynamic_cast<OpenGLDisplay*>(displayBackend_.get());
-            if (glDisplay) {
-                glDisplay->clearCurrent();
-            }
+            displayBackend_->clearCurrent();
         }
         
         render();

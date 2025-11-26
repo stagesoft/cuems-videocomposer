@@ -58,7 +58,7 @@ extern "C" {
 namespace videocomposer {
 
 // Forward declaration
-class OpenGLDisplay;
+class DisplayBackend;
 
 /**
  * VaapiInterop - Zero-copy VAAPI to OpenGL texture interop
@@ -78,11 +78,11 @@ public:
     ~VaapiInterop();
     
     /**
-     * Initialize with OpenGLDisplay (gets EGL display and extension functions)
-     * @param display OpenGLDisplay instance with EGL initialized
+     * Initialize with DisplayBackend (gets EGL display and extension functions)
+     * @param display DisplayBackend instance with EGL initialized (X11Display or WaylandDisplay)
      * @return true if initialization succeeded
      */
-    bool init(OpenGLDisplay* display);
+    bool init(DisplayBackend* display);
     
     /**
      * Phase 1: Create EGL images from VAAPI frame (can be called from any thread)
@@ -163,10 +163,10 @@ private:
     // VAAPI display (shared with FFmpeg decoder for zero-copy)
     VADisplay vaDisplay_;
     
-    // EGL handles (from OpenGLDisplay)
+    // EGL handles (from DisplayBackend)
     EGLDisplay eglDisplay_;
     
-    // EGL extension function pointers (from OpenGLDisplay)
+    // EGL extension function pointers (from DisplayBackend)
     PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR_;
     PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR_;
     // GL_OES_EGL_image (OpenGL ES) - may be null on desktop GL
@@ -187,6 +187,9 @@ private:
     // Current frame state
     EGLImageKHR eglImageY_;
     EGLImageKHR eglImageUV_;
+    // Previous EGL images - kept alive until new textures are bound
+    EGLImageKHR prevEglImageY_;
+    EGLImageKHR prevEglImageUV_;
     GLuint textureY_;
     GLuint textureUV_;
     
@@ -194,9 +197,13 @@ private:
     int frameWidth_;
     int frameHeight_;
     
-    // Previous frame reference - keeps VAAPI surface alive until EGL images are destroyed
-    // This is CRITICAL: we must keep the AVFrame alive while EGL images reference its surface
-    AVFrame* previousFrame_;
+    // Frame reference management - keeps VAAPI surfaces alive during GPU rendering
+    // This is CRITICAL: we must keep AVFrames alive while GPU is still rendering from their surfaces
+    // We need TWO frame references because:
+    //   - currentFrame_: being rendered by GPU right now
+    //   - previousFrame_: just imported, will be rendered next frame
+    AVFrame* previousFrame_;   // Frame N-1 (being rendered)
+    AVFrame* currentFrame_;    // Frame N (just imported, queued for rendering)
     
     // ========== DEBUG INSTRUMENTATION ==========
     // Frame counter for debugging frozen frames issue
