@@ -322,12 +322,6 @@ bool VideoFileInput::openHardwareCodec() {
     
     AVCodecID codecId = codecParams->codec_id;
     std::string codecName = avcodec_get_name(codecId);
-    
-    // Hardware decoding only for H.264, HEVC, AV1
-    if (codecId != AV_CODEC_ID_H264 && codecId != AV_CODEC_ID_HEVC && codecId != AV_CODEC_ID_AV1) {
-        LOG_VERBOSE << "Codec " << codecName << " does not support hardware decoding, will use software";
-        return false;
-    }
 
     if (hwPreference_ == HardwareDecodePreference::SOFTWARE_ONLY) {
         LOG_VERBOSE << "Hardware decoding disabled via preference, using software decoder";
@@ -1857,7 +1851,6 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
             return false;
         }
         
-        LOG_VERBOSE << "transferHardwareFrameToGPU: Uploaded NV12 directly (no sws_scale)";
         return true;
     }
     
