@@ -73,7 +73,6 @@ private:
 
     bool initializeFFmpeg();
     bool openCodec();
-    bool indexFrames();
     bool seekToFrame(int64_t frameNumber);
     HAPVariant detectHAPVariant();
     void refineHAPVariantFromFrame(AVFrame* frame);
@@ -99,18 +98,7 @@ private:
     AVFrame* frame_;
     int videoStream_;
 
-    // Frame indexing
-    struct FrameIndex {
-        int64_t pkt_pts;
-        int64_t pkt_pos;
-        int64_t frame_pts;
-        int64_t frame_pos;
-        int64_t timestamp;
-        int64_t seekpts;
-        int64_t seekpos;
-        uint8_t key;
-    };
-    FrameIndex* frameIndex_;
+    // HAP is intra-frame only - no index needed, every frame is a keyframe
     int64_t frameCount_;
     int64_t lastDecodedPTS_;
     int64_t lastDecodedFrameNo_;

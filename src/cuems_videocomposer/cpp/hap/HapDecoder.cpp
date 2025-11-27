@@ -43,8 +43,6 @@ bool HapDecoder::decode(const uint8_t* packetData, size_t packetSize,
         return false;
     }
 
-    LOG_VERBOSE << "HAP frame has " << textureCount << " texture(s)";
-
     // Decode each texture
     for (unsigned int i = 0; i < textureCount; i++) {
         HapDecodedTexture texture;
@@ -93,13 +91,9 @@ bool HapDecoder::decode(const uint8_t* packetData, size_t packetSize,
 
         // Verify bytes used
         if (bytesUsed != dxtSize) {
-            LOG_VERBOSE << "HAP decode: expected " << dxtSize << " bytes, got " << bytesUsed;
             texture.size = bytesUsed;
             texture.data.resize(bytesUsed);
         }
-
-        LOG_VERBOSE << "Decoded HAP texture " << i << ": format=0x" << std::hex << textureFormat
-                   << std::dec << ", size=" << bytesUsed << " bytes";
 
         textures.push_back(std::move(texture));
     }

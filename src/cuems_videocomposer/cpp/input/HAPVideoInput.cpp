@@ -39,7 +39,6 @@ HAPVideoInput::HAPVideoInput()
     , codecCtx_(nullptr)
     , frame_(nullptr)
     , videoStream_(-1)
-    , frameIndex_(nullptr)
     , frameCount_(0)
     , lastDecodedPTS_(-1)
     , lastDecodedFrameNo_(-1)
@@ -184,14 +183,12 @@ bool HAPVideoInput::open(const std::string& source) {
         frameInfo_.totalFrames = static_cast<int64_t>(framerate * duration);
     }
 
-    // Index frames (optional, for faster seeking)
-    if (!indexFrames()) {
-        // Indexing failed, but we can still proceed
-        // However, seeking will fall back to timestamp-based method
-        LOG_WARNING << "HAP: Frame indexing failed, will use timestamp-based seeking";
-    } else {
-        LOG_INFO << "HAP: Frame indexing completed, indexed " << frameCount_ << " frames";
-    }
+    // HAP is an intra-frame codec where every frame is a keyframe
+    // No indexing needed - we can seek directly to any frame using timestamp calculation
+    // This makes file opening instant instead of scanning the entire file
+    frameCount_ = frameInfo_.totalFrames;
+    scanComplete_ = true;
+    LOG_INFO << "HAP: Ready for playback (" << frameCount_ << " frames, no indexing needed - all keyframes)";
 
     ready_ = true;
     return true;
@@ -277,96 +274,9 @@ HAPVideoInput::HAPVariant HAPVideoInput::detectHAPVariant() {
     return HAPVariant::HAP;
 }
 
-bool HAPVideoInput::indexFrames() {
-    // Full frame indexing for HAP - similar to VideoFileInput
-    // This enables faster seeking by indexing all frames
-
-    frameCount_ = 0;
-    frameIndex_ = nullptr;
-
-    const size_t initialSize = 10000;
-    frameIndex_ = static_cast<FrameIndex*>(calloc(initialSize, sizeof(FrameIndex)));
-    if (!frameIndex_) {
-        return false;
-    }
-
-    size_t indexSize = initialSize;
-    AVStream* avStream = mediaReader_.getStream(videoStream_);
-    if (!avStream) {
-        free(frameIndex_);
-        frameIndex_ = nullptr;
-        return false;
-    }
-    AVRational timeBase = avStream->time_base;
-
-    // Rewind to beginning of file
-    if (!mediaReader_.seekToTime(0.0, videoStream_, AVSEEK_FLAG_BACKWARD)) {
-        free(frameIndex_);
-        frameIndex_ = nullptr;
-        return false;
-    }
-
-    // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
-    if (codecCtx_) {
-        avcodec_flush_buffers(codecCtx_);
-    }
-
-    // Scan all frames and build index
-    AVPacket* packet = av_packet_alloc();
-    if (!packet) {
-        free(frameIndex_);
-        frameIndex_ = nullptr;
-        return false;
-    }
-    
-    while (mediaReader_.readPacket(packet) == 0) {
-        if (packet->stream_index != videoStream_) {
-            av_packet_unref(packet);
-            continue;
-        }
-
-        int64_t ts = AV_NOPTS_VALUE;
-        if (packet->pts != AV_NOPTS_VALUE) {
-            ts = packet->pts;
-        } else if (packet->dts != AV_NOPTS_VALUE) {
-            ts = packet->dts;
-        }
-
-        if (ts == AV_NOPTS_VALUE) {
-            av_packet_unref(packet);
-            continue;
-        }
-
-        // Grow array if needed
-        if (frameCount_ >= static_cast<int64_t>(indexSize)) {
-            indexSize *= 2;
-            frameIndex_ = static_cast<FrameIndex*>(realloc(frameIndex_, indexSize * sizeof(FrameIndex)));
-            if (!frameIndex_) {
-                av_packet_unref(packet);
-                av_packet_free(&packet);
-                return false;
-            }
-        }
-
-        FrameIndex& idx = frameIndex_[frameCount_];
-        idx.pkt_pts = packet->pts;
-        idx.pkt_pos = packet->pos;
-        idx.frame_pts = ts;
-        idx.frame_pos = packet->pos;
-        idx.timestamp = frameCount_;
-        idx.seekpts = ts;
-        idx.seekpos = packet->pos;
-        idx.key = (packet->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
-
-        frameCount_++;
-        av_packet_unref(packet);
-    }
-    
-    av_packet_free(&packet);
-
-    scanComplete_ = true;
-    return true;
-}
+// HAP is an intra-frame codec - indexFrames() is not needed
+// Every frame is a keyframe, so we can seek directly using timestamp calculation
+// This is handled in seekToFrame() using calculatePtsForFrame()
 
 bool HAPVideoInput::seek(int64_t frameNumber) {
     if (!isReady()) {
@@ -382,71 +292,44 @@ bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
         return false;
     }
 
-    // Simple approach: use indexed seek if available, otherwise timestamp-based
-    if (scanComplete_ && frameIndex_ && frameNumber >= 0 && frameNumber < frameCount_) {
-        const FrameIndex& idx = frameIndex_[frameNumber];
-        
-        // Check if we need to seek (skip for sequential frames)
-        bool needSeek = false;
-        if (lastDecodedPTS_ < 0 || lastDecodedFrameNo_ < 0) {
-            needSeek = true;
-        } else if (lastDecodedPTS_ > idx.seekpts) {
-            needSeek = true;
-        } else if ((frameNumber - lastDecodedFrameNo_) != 1) {
-            if (lastDecodedFrameNo_ >= 0 && lastDecodedFrameNo_ < frameCount_) {
-                if (idx.seekpts != frameIndex_[lastDecodedFrameNo_].seekpts) {
-                    needSeek = true;
-                }
-            } else {
-                needSeek = true;
-            }
-        }
-
-        if (needSeek) {
-            // Try timestamp-based seek (simplest and most reliable)
-            if (idx.seekpts >= 0) {
-                bool ret = mediaReader_.seek(idx.seekpts, videoStream_, AVSEEK_FLAG_BACKWARD);
-                if (!ret) {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-
-            // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
-            if (codecCtx_) {
-                avcodec_flush_buffers(codecCtx_);
-            }
-        }
-
-        lastDecodedPTS_ = -1;
-        lastDecodedFrameNo_ = -1;
-        currentFrame_ = frameNumber;
-        return true;
-    }
-
-    // Fallback: timestamp-based seeking
-    double framerate = frameInfo_.framerate;
+    // HAP is an intra-frame codec - every frame is a keyframe
+    // We can seek directly to any frame using timestamp calculation
+    // No index needed - this is instant
     
+    double framerate = frameInfo_.framerate;
     if (framerate <= 0) {
         return false;
     }
 
-    // Calculate timestamp from frame number
-    double targetTime = (double)frameNumber / framerate;
-    
-    bool ret = mediaReader_.seekToTime(targetTime, videoStream_, AVSEEK_FLAG_BACKWARD);
-    if (!ret) {
-        return false;
+    // Check if we need to seek (skip for sequential frames - just advance)
+    bool needSeek = false;
+    if (lastDecodedFrameNo_ < 0) {
+        needSeek = true;  // First seek
+    } else if (frameNumber < lastDecodedFrameNo_) {
+        needSeek = true;  // Backward seek
+    } else if (frameNumber != lastDecodedFrameNo_ + 1) {
+        needSeek = true;  // Non-sequential forward seek
+    }
+    // For sequential frames (frameNumber == lastDecodedFrameNo_ + 1), no seek needed
+
+    if (needSeek) {
+        // Calculate timestamp from frame number
+        double targetTime = static_cast<double>(frameNumber) / framerate;
+        
+        bool ret = mediaReader_.seekToTime(targetTime, videoStream_, AVSEEK_FLAG_BACKWARD);
+        if (!ret) {
+            return false;
+        }
+
+        // Flush codec buffers
+        if (codecCtx_) {
+            avcodec_flush_buffers(codecCtx_);
+        }
+        
+        lastDecodedPTS_ = -1;
+        lastDecodedFrameNo_ = -1;
     }
 
-    // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
-    if (codecCtx_) {
-        avcodec_flush_buffers(codecCtx_);
-    }
-
-    lastDecodedPTS_ = -1;
-    lastDecodedFrameNo_ = -1;
     currentFrame_ = frameNumber;
     return true;
 }
@@ -600,8 +483,6 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
                        << ", falling back to FFmpeg RGBA path (reduced performance)";
             LOG_WARNING << "Error: " << hapDecoder_.getLastError();
             fallbackWarningShown_ = true;
-        } else {
-            LOG_VERBOSE << "Using FFmpeg fallback for HAP frame " << frameNumber;
         }
     } else {
         av_packet_free(&packet);
@@ -778,7 +659,6 @@ bool HAPVideoInput::decodeHapDirectToTexture(AVPacket* packet, GPUTextureFrameBu
         }
 
         textureBuffer.setHapVariant(HapVariant::HAP_Q_ALPHA);
-        LOG_VERBOSE << "Uploaded HAP Q Alpha frame (color + alpha)";
     } else {
         // Single texture: HAP, HAP Q, or HAP Alpha
         if (textures.size() != 1) {
@@ -827,7 +707,6 @@ bool HAPVideoInput::decodeHapDirectToTexture(AVPacket* packet, GPUTextureFrameBu
         }
 
         textureBuffer.setHapVariant(gpuVariant);
-        LOG_VERBOSE << "Uploaded HAP frame (format=0x" << std::hex << textures[0].format << std::dec << ")";
     }
 
     return true;
@@ -857,16 +736,10 @@ bool HAPVideoInput::decodeWithFFmpegFallback(int64_t frameNumber, GPUTextureFram
     }
 
     textureBuffer.setHapVariant(HapVariant::NONE);  // Not a compressed HAP texture
-    LOG_VERBOSE << "Uploaded HAP frame via FFmpeg fallback (uncompressed)";
     return true;
 }
 
 void HAPVideoInput::cleanup() {
-    // Free frame index
-    if (frameIndex_) {
-        free(frameIndex_);
-        frameIndex_ = nullptr;
-    }
     frameCount_ = 0;
 
     // Free frame (must use av_frame_free for frames allocated with av_frame_alloc)

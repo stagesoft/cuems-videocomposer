@@ -264,7 +264,6 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         // HAP with direct texture upload: decode directly to compressed DXT GPU texture
         if (hapInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
             frameOnGPU_ = true;
-            LOG_VERBOSE << "Loaded HAP frame " << frameNumber << " to GPU (direct DXT upload)";
             return true;
         }
         // If direct upload fails, fall through to FFmpeg fallback (handled in readFrameToTexture)

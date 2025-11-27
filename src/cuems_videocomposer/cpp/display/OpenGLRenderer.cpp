@@ -761,7 +761,6 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
             
             if (isHAP && variant == HapVariant::HAP_Q && hapQShader_) {
                 // HAP Q: YCoCg DXT5 (single texture) - needs YCoCg→RGB conversion
-                LOG_VERBOSE << "Using HAP Q shader (YCoCg→RGB conversion)";
                 shader = hapQShader_.get();
                 shader->use();
                 shader->setUniform("uTexture", 0);  // Texture unit 0

@@ -397,10 +397,8 @@ class CodecFormatTest:
         
         cmd.append(str(video_path))
         
-        # Start MTC before launching videocomposer
-        mtc_started = self._setup_mtc()
-        
         process = None
+        mtc_started = False
         try:
             if duration > 0:
                 print(f"  Running videocomposer for {duration} seconds...")
@@ -415,8 +413,130 @@ class CodecFormatTest:
             )
             self.current_process = process  # Store for signal handler
             
-            # Wait longer for videocomposer to fully initialize OSC server
-            time.sleep(1.5)
+            # Wait for videocomposer to initialize and check if indexing is needed
+            time.sleep(1.0)
+            
+            # Monitor output for indexing completion before starting MTC
+            indexing_complete = False
+            pass1_complete = False
+            pass2_complete = False
+            pass3_complete = False
+            output_lines = []
+            indexing_timeout = 300  # 5 minutes max for indexing
+            indexing_start_time = time.time()
+            
+            print(f"  Waiting for video indexing to complete (if needed)...")
+            
+            # Read output to detect indexing status
+            while True:
+                if self.interrupted:
+                    break
+                
+                if process.poll() is not None:
+                    break
+                
+                # Timeout for indexing
+                if time.time() - indexing_start_time > indexing_timeout:
+                    print(f"  Warning: Indexing timeout, starting MTC anyway")
+                    break
+                
+                try:
+                    line = process.stdout.readline()
+                    if line:
+                        line_stripped = line.strip()
+                        output_lines.append(line_stripped)
+                        
+                        # Check for indexing pass completion messages
+                        line_lower = line_stripped.lower()
+                        
+                        # Pass 1: "Pass 1 complete: indexed ..." or "Indexing video (Pass 1: Scanning packets)..."
+                        if "pass 1 complete" in line_lower:
+                            pass1_complete = True
+                            print(f"    ✓ Indexing Pass 1 complete")
+                        elif "pass 1:" in line_lower and "scanning packets" in line_lower:
+                            # Pass 1 started
+                            print(f"    Indexing Pass 1 started...")
+                        
+                        # Pass 2: "Indexing video (Pass 2: Verifying keyframes)..."
+                        # Pass 2 completion is detected when Pass 3 starts
+                        if "pass 2:" in line_lower and "verifying keyframes" in line_lower:
+                            print(f"    Indexing Pass 2 started...")
+                            # Pass 2 is complete when we see Pass 3 start
+                        
+                        # Pass 3: "Indexing video (Pass 3: Creating seek table)..."
+                        if "pass 3:" in line_lower and ("creating seek table" in line_lower or "creating index" in line_lower):
+                            # Pass 3 started means Pass 2 is complete
+                            if not pass2_complete:
+                                pass2_complete = True
+                                print(f"    ✓ Indexing Pass 2 complete")
+                            pass3_complete = True
+                            print(f"    ✓ Indexing Pass 3 detected")
+                        elif "creating index:" in line_lower or "creating seek table" in line_lower:
+                            # Alternative format for Pass 3
+                            if not pass2_complete:
+                                pass2_complete = True
+                                print(f"    ✓ Indexing Pass 2 complete")
+                            pass3_complete = True
+                            print(f"    ✓ Indexing Pass 3 detected")
+                        
+                        # Check for scan complete or indexing complete messages
+                        if any(phrase in line_lower for phrase in [
+                            "scan complete",
+                            "indexing complete",
+                            "frame indexing completed"
+                        ]):
+                            # If we saw multi-pass indexing, wait for all 3 passes
+                            if pass1_complete:
+                                if pass2_complete and pass3_complete:
+                                    indexing_complete = True
+                                    print(f"  ✓ All indexing passes complete")
+                                    break
+                                elif pass3_complete:
+                                    # Pass 1 and 3 done, assume Pass 2 was quick
+                                    indexing_complete = True
+                                    print(f"  ✓ Indexing complete (Pass 1 and 3 done)")
+                                    break
+                                else:
+                                    # Only Pass 1 done, continue waiting
+                                    continue
+                            else:
+                                # No multi-pass indexing detected, single pass complete
+                                indexing_complete = True
+                                print(f"  ✓ Indexing complete")
+                                break
+                        
+                        # If no indexing messages after a short time, assume no indexing needed
+                        if time.time() - indexing_start_time > 3.0:
+                            # Check if we've seen any indexing messages at all
+                            has_indexing = any("indexing" in l.lower() for l in output_lines)
+                            if not has_indexing:
+                                # No indexing messages, file doesn't need indexing
+                                indexing_complete = True
+                                print(f"  ✓ No indexing needed for this file")
+                                break
+                            # If we saw indexing but not all passes, continue waiting
+                            elif pass1_complete and not pass2_complete and not pass3_complete:
+                                # Only pass 1 done, continue waiting
+                                continue
+                            elif pass1_complete and pass2_complete and not pass3_complete:
+                                # Pass 1 and 2 done, continue waiting for pass 3
+                                continue
+                
+                except Exception as e:
+                    # If readline fails, break and proceed
+                    break
+            
+            # Start MTC after indexing is complete (or if no indexing needed)
+            if indexing_complete or (not any("indexing" in l.lower() for l in output_lines)):
+                print(f"  Starting MTC timecode...")
+                mtc_started = self._setup_mtc()
+            else:
+                # Indexing still in progress, but we'll start MTC anyway after timeout
+                print(f"  Warning: Indexing may still be in progress, starting MTC")
+                mtc_started = self._setup_mtc()
+            
+            # Wait for videocomposer to fully initialize OSC server
+            time.sleep(0.5)
             
             # Enable OSD timecode display if requested
             if enable_osd:
@@ -437,8 +557,7 @@ class CodecFormatTest:
                 self._send_osc_two_int_command(osc_port, "/videocomposer/layer//loop", 1, -1)
                 time.sleep(0.3)
             
-            # Collect output
-            output_lines = []
+            # Continue collecting output (we already started collecting above)
             start_time = time.time()
             
             while True:
