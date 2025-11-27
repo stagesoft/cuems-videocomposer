@@ -342,7 +342,7 @@ bool X11Display::initGLX() {
         GLX_RED_SIZE, 8,
         GLX_GREEN_SIZE, 8,
         GLX_BLUE_SIZE, 8,
-        GLX_ALPHA_SIZE, 8,
+        GLX_ALPHA_SIZE, 0,  // Opaque window - no compositor-level transparency
         None
     };
 
@@ -467,7 +467,7 @@ bool X11Display::initEGL() {
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
         EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
+        EGL_ALPHA_SIZE, 0,  // Opaque window - no compositor-level transparency
         EGL_DEPTH_SIZE, 0,
         EGL_STENCIL_SIZE, 0,
         EGL_NONE

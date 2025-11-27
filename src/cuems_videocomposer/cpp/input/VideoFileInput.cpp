@@ -9,6 +9,7 @@
 
 #ifdef HAVE_VAAPI_INTEROP
 #include "../hwdec/VaapiInterop.h"
+#include "../display/DisplayBackend.h"
 #endif
 
 // OpenGL includes
@@ -58,6 +59,7 @@ VideoFileInput::VideoFileInput()
     , hwPreference_(HardwareDecodePreference::AUTO)
 #ifdef HAVE_VAAPI_INTEROP
     , vaapiInterop_(nullptr)
+    , displayBackend_(nullptr)
 #endif
 {
     frameRateQ_ = {1, 1};
@@ -1699,6 +1701,18 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     );
     lastDecodedFrame = decodedFrameNum;
 
+    // Lazy initialization of VaapiInterop (needs GL context which may not be available at open time)
+#ifdef HAVE_VAAPI_INTEROP
+    if (!vaapiInterop_ && displayBackend_ && displayBackend_->hasVaapiSupport() && 
+        hwDecoderType_ == HardwareDecoder::Type::VAAPI) {
+        vaapiInterop_ = std::make_unique<VaapiInterop>();
+        if (!vaapiInterop_->init(displayBackend_)) {
+            LOG_WARNING << "Failed to initialize per-instance VaapiInterop, falling back to CPU copy";
+            vaapiInterop_.reset();
+        }
+    }
+#endif
+
     // Transfer hardware frame to GPU texture
     // MPV-style: VaapiInterop will ref the frame, and we'll unref our copy immediately after transfer
     bool success = transferHardwareFrameToGPU(hwFrame_, textureBuffer);
@@ -1951,6 +1965,11 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
 }
 
 #ifdef HAVE_VAAPI_INTEROP
+void VideoFileInput::setDisplayBackend(DisplayBackend* displayBackend) {
+    displayBackend_ = displayBackend;
+    // VaapiInterop will be created lazily when needed (requires GL context)
+}
+
 bool VideoFileInput::hasVaapiZeroCopy() const {
     return vaapiInterop_ != nullptr && vaapiInterop_->isAvailable() &&
            hwDecoderType_ == HardwareDecoder::Type::VAAPI;
@@ -2014,6 +2033,11 @@ void VideoFileInput::cleanup() {
     // Close media reader (closes format context)
     mediaReader_.close();
         formatCtx_ = nullptr;
+
+#ifdef HAVE_VAAPI_INTEROP
+    // Clean up per-instance VaapiInterop
+    vaapiInterop_.reset();
+#endif
 
     videoStream_ = -1;
     lastDecodedPTS_ = -1;

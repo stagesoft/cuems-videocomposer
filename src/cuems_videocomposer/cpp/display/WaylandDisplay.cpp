@@ -510,13 +510,15 @@ bool WaylandDisplay::initEGL() {
     }
     
     // Step 4: Choose EGL config
+    // Note: EGL_ALPHA_SIZE set to 0 for opaque window (no compositor-level transparency)
+    // Internal alpha blending still works for HAP Alpha, OSD, and layer opacity
     EGLint configAttribs[] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
         EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
+        EGL_ALPHA_SIZE, 0,  // Opaque window - no compositor-level transparency
         EGL_DEPTH_SIZE, 0,
         EGL_STENCIL_SIZE, 0,
         EGL_NONE

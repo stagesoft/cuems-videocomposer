@@ -94,11 +94,6 @@ private:
     // Global sync source (shared across all layers)
     std::unique_ptr<SyncSource> globalSyncSource_;
 
-#ifdef HAVE_VAAPI_INTEROP
-    // VAAPI zero-copy interop (shared across all VideoFileInput instances)
-    std::unique_ptr<VaapiInterop> vaapiInterop_;
-#endif
-
     // Application state
     bool running_;
     bool initialized_;

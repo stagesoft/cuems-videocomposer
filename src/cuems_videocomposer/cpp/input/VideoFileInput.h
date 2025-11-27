@@ -19,9 +19,10 @@ extern "C" {
 
 namespace videocomposer {
 
-// Forward declaration for VAAPI zero-copy interop
+// Forward declarations
 #ifdef HAVE_VAAPI_INTEROP
 class VaapiInterop;
+class DisplayBackend;
 #endif
 
 /**
@@ -75,10 +76,10 @@ public:
 
 #ifdef HAVE_VAAPI_INTEROP
     /**
-     * Set VAAPI interop for zero-copy hardware decoding
-     * @param interop VaapiInterop instance from DisplayBackend (X11Display or WaylandDisplay)
+     * Set DisplayBackend for creating per-instance VAAPI interop
+     * @param displayBackend DisplayBackend instance with VAAPI support
      */
-    void setVaapiInterop(VaapiInterop* interop) { vaapiInterop_ = interop; }
+    void setDisplayBackend(DisplayBackend* displayBackend);
     
     /**
      * Check if zero-copy VAAPI decoding is available
@@ -132,7 +133,8 @@ private:
     HardwareDecodePreference hwPreference_;
     
 #ifdef HAVE_VAAPI_INTEROP
-    VaapiInterop* vaapiInterop_;      // VAAPI zero-copy interop (not owned)
+    std::unique_ptr<VaapiInterop> vaapiInterop_;  // VAAPI zero-copy interop (owned per-instance)
+    DisplayBackend* displayBackend_;  // DisplayBackend for initializing interop (not owned)
 #endif
 
     // Frame indexing

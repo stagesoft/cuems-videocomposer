@@ -42,7 +42,6 @@
 #include "remote/OSCRemoteControl.h"
 
 #ifdef HAVE_VAAPI_INTEROP
-#include "hwdec/VaapiInterop.h"
 #endif
 #include "osd/OSDManager.h"
 #include "utils/Logger.h"
@@ -208,18 +207,10 @@ bool VideoComposerApplication::initializeDisplay() {
     }
 
 #ifdef HAVE_VAAPI_INTEROP
-    // Initialize VAAPI zero-copy interop (if available)
-    // Need to make OpenGL context current for texture generation
+    // VAAPI zero-copy interop is now per-instance (created by each VideoFileInput)
+    // Each layer gets its own interop instance when it opens a file
     if (displayBackend_->hasVaapiSupport()) {
-        displayBackend_->makeCurrent();  // Need GL context for texture generation
-        vaapiInterop_ = std::make_unique<VaapiInterop>();
-        if (vaapiInterop_->init(displayBackend_.get())) {
-            LOG_INFO << "VaapiInterop initialized - VAAPI zero-copy enabled for video playback";
-        } else {
-            LOG_WARNING << "VaapiInterop initialization failed - falling back to CPU copy";
-            vaapiInterop_.reset();
-        }
-        displayBackend_->clearCurrent();
+        LOG_INFO << "VAAPI support available - layers will use per-instance zero-copy interop";
     }
 #endif
 
@@ -428,13 +419,8 @@ void VideoComposerApplication::render() {
     if (displayBackend_ && layerManager_) {
         displayBackend_->render(layerManager_.get(), osdManager_.get());
         
-#ifdef HAVE_VAAPI_INTEROP
-        // MPV-style immediate release: Release VAAPI surface right after rendering
-        // This returns the surface to the pool immediately, preventing pool exhaustion
-        if (vaapiInterop_) {
-            vaapiInterop_->releaseCurrentFrame();
-        }
-#endif
+        // Note: Each layer now has its own VaapiInterop instance
+        // Frame release is handled per-layer in LayerDisplay/OpenGLRenderer
     }
 }
 
@@ -569,9 +555,9 @@ std::unique_ptr<InputSource> VideoComposerApplication::createInputSourceFromFile
     tempInput->setHardwareDecodePreference(hwPref);
     
 #ifdef HAVE_VAAPI_INTEROP
-    // Set VAAPI interop for zero-copy hardware decoding
-    if (vaapiInterop_) {
-        tempInput->setVaapiInterop(vaapiInterop_.get());
+    // Set DisplayBackend for per-instance VaapiInterop creation
+    if (displayBackend_) {
+        tempInput->setDisplayBackend(displayBackend_.get());
     }
 #endif
     

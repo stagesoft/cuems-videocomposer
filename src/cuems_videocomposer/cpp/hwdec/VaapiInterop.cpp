@@ -441,12 +441,13 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         }
     }
     
-    // Previous frame should have been released by now via releaseCurrentFrame()
-    // If not, release it now (safety check)
+    // CRITICAL: Release any existing frame BEFORE importing new one
+    // This is necessary when multiple layers share the same VaapiInterop instance
+    // Each layer may try to import a frame before the previous layer's frame is released
+    // Releasing here ensures we don't have multiple frames in flight
     if (currentFrame_->buf[0]) {
-        VASurfaceID currentSurface = (VASurfaceID)(uintptr_t)currentFrame_->data[3];
-        LOG_ERROR << "VaapiInterop: currentFrame_ still has surface " << currentSurface 
-                  << " (should have been released!) - releasing now";
+        // Release the previous frame's resources (but keep EGL images/textures for now)
+        // They will be cleaned up in bindTexturesToImages() after new textures are bound
         av_frame_unref(currentFrame_);
     }
     

@@ -95,7 +95,7 @@ bool OpenGLRenderer::init() {
     }
 
     // Initialize OpenGL state (matches original xjadeo)
-    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);  // Black background, fully opaque
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -601,6 +601,7 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
 }
 
 void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layers) {
+    // Clear to opaque black (alpha = 1.0)
     glClear(GL_COLOR_BUFFER_BIT);
 
     // Render layers in z-order (already sorted by LayerManager)
@@ -675,21 +676,8 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
     
     // Use shader-based rendering if available (supports corner deformation)
     if (useShaders_ && rgbaShader_) {
-        // Apply blend mode
-        switch (properties.blendMode) {
-            case LayerProperties::NORMAL:
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                break;
-            case LayerProperties::MULTIPLY:
-                glBlendFunc(GL_DST_COLOR, GL_ZERO);
-                break;
-            case LayerProperties::SCREEN:
-                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
-                break;
-            case LayerProperties::OVERLAY:
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-                break;
-        }
+        // Apply blend mode (use shared function to avoid duplication)
+        applyBlendModeFromProps(properties);
         
         // Select shader based on texture format and quality setting
         ShaderProgram* shader = nullptr;
@@ -899,21 +887,8 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
         glMultMatrixf(homography);
     }
 
-    // Apply blend mode
-    switch (properties.blendMode) {
-        case LayerProperties::NORMAL:
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            break;
-        case LayerProperties::MULTIPLY:
-            glBlendFunc(GL_DST_COLOR, GL_ZERO);
-            break;
-        case LayerProperties::SCREEN:
-            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
-            break;
-        case LayerProperties::OVERLAY:
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-            break;
-    }
+    // Apply blend mode (use shared function to avoid duplication)
+    applyBlendModeFromProps(properties);
 
     // Set opacity
     glColor4f(1.0f, 1.0f, 1.0f, properties.opacity);
