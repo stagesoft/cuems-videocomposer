@@ -620,11 +620,32 @@ if(ENABLE_HAP_DIRECT)
         include_directories(${SNAPPY_INCLUDE_DIRS})
         set(SNAPPY_LIBS ${SNAPPY_LIBRARIES})
         
+        # Determine HAP source location: prefer git submodule, fallback to backup
+        set(HAP_SOURCE_DIR "")
+        set(HAP_SOURCE_FILE "")
+        
+        # First, try git submodule location
+        if(EXISTS "${CMAKE_SOURCE_DIR}/external/hap/source/hap.c")
+            set(HAP_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/hap/source")
+            set(HAP_SOURCE_FILE "${CMAKE_SOURCE_DIR}/external/hap/source/hap.c")
+            message(STATUS "Using HAP sources from git submodule: external/hap")
+        # Fallback to backup copy
+        elseif(EXISTS "${CMAKE_SOURCE_DIR}/external/hap_backup/source/hap.c")
+            set(HAP_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/hap_backup/source")
+            set(HAP_SOURCE_FILE "${CMAKE_SOURCE_DIR}/external/hap_backup/source/hap.c")
+            message(STATUS "Using HAP sources from backup: external/hap_backup (git submodule not available)")
+        else()
+            message(FATAL_ERROR "HAP source files not found. Expected locations:\n"
+                "  - external/hap/source/hap.c (git submodule)\n"
+                "  - external/hap_backup/source/hap.c (backup copy)\n"
+                "Please initialize git submodules with: git submodule update --init --recursive")
+        endif()
+        
         # Add Vidvox hap source files
         list(APPEND C_SOURCES
-            external/hap/source/hap.c
+            ${HAP_SOURCE_FILE}
         )
-        include_directories(external/hap/source)
+        include_directories(${HAP_SOURCE_DIR})
         
         # Add HapDecoder wrapper
         list(APPEND CPP_SOURCES
@@ -731,9 +752,16 @@ if(BUILD_TESTS)
         list(APPEND TEST_CPP_SOURCES
             src/cuems_videocomposer/cpp/hap/HapDecoder.cpp
         )
-        list(APPEND TEST_HAP_SOURCES
-            external/hap/source/hap.c
-        )
+        # Use same HAP source location as main build
+        if(EXISTS "${CMAKE_SOURCE_DIR}/external/hap/source/hap.c")
+            list(APPEND TEST_HAP_SOURCES
+                external/hap/source/hap.c
+            )
+        elseif(EXISTS "${CMAKE_SOURCE_DIR}/external/hap_backup/source/hap.c")
+            list(APPEND TEST_HAP_SOURCES
+                external/hap_backup/source/hap.c
+            )
+        endif()
     endif()
     
     add_executable(cuems_videocomposer_test ${TEST_SOURCES} ${TEST_CPP_SOURCES} ${TEST_HAP_SOURCES} src/cuems_videocomposer/common.c)
@@ -741,6 +769,14 @@ if(BUILD_TESTS)
         src/cuems_videocomposer
         src/cuems_videocomposer/cpp
     )
+    # Add HAP include directory for tests (use same logic as main build)
+    if(ENABLE_HAP_DIRECT AND SNAPPY_FOUND)
+        if(EXISTS "${CMAKE_SOURCE_DIR}/external/hap/source/hap.c")
+            target_include_directories(cuems_videocomposer_test PRIVATE external/hap/source)
+        elseif(EXISTS "${CMAKE_SOURCE_DIR}/external/hap_backup/source/hap.c")
+            target_include_directories(cuems_videocomposer_test PRIVATE external/hap_backup/source)
+        endif()
+    endif()
     target_link_libraries(cuems_videocomposer_test
         cuems-mediadecoder
         ${FFMPEG_LIBRARIES}
