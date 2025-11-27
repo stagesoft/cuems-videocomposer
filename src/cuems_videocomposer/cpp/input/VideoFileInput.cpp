@@ -1992,7 +1992,6 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
             return false;
         }
         
-        LOG_VERBOSE << "transferHardwareFrameToGPU: Uploaded YUV420P directly (no sws_scale)";
         return true;
     }
 
@@ -2052,11 +2051,6 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
         LOG_WARNING << "transferHardwareFrameToGPU: sws_scale failed, result=" << result;
         return false;
     }
-    
-    // Debug: Check first few pixels to verify conversion worked
-    LOG_VERBOSE << "transferHardwareFrameToGPU: sws_scale converted " << result << " lines, "
-               << "first pixel RGBA: " << (int)rgbaBuffer[0] << "," << (int)rgbaBuffer[1] << ","
-               << (int)rgbaBuffer[2] << "," << (int)rgbaBuffer[3];
 
     // Upload RGBA data to GPU texture
     if (!textureBuffer.uploadUncompressedData(rgbaBuffer.data(), rgbaSize,

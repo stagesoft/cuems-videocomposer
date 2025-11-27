@@ -305,7 +305,6 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
     // Other input sources: use CPU frame buffer (default)
     if (inputSource_->readFrame(frameNumber, cpuFrameBuffer_)) {
         frameOnGPU_ = false;
-        LOG_VERBOSE << "Loaded frame " << frameNumber << " to CPU buffer";
         return true;
     }
     return false;
