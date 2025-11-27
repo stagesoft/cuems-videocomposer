@@ -767,7 +767,109 @@ static int64_t keyframeLookupHelper(LocalFrameIndex* frameIndex, int64_t fcnt,
     return -1;
 }
 
+bool VideoFileInput::isIntraFrameCodec() const {
+    // Check if codec is intra-frame only (all frames are keyframes)
+    // These codecs don't need indexing - direct seek mode works perfectly
+    if (!codecCtx_) {
+        return false;
+    }
+    
+    AVCodecID codecId = codecCtx_->codec_id;
+    
+    switch (codecId) {
+        // Professional intra-frame codecs
+        case AV_CODEC_ID_PRORES:     // Apple ProRes (all variants)
+        case AV_CODEC_ID_DNXHD:      // Avid DNxHD/DNxHR
+        case AV_CODEC_ID_MJPEG:      // Motion JPEG
+        case AV_CODEC_ID_MJPEGB:     // Motion JPEG-B
+        case AV_CODEC_ID_RAWVIDEO:   // Uncompressed video
+        case AV_CODEC_ID_V210:       // Uncompressed 10-bit 4:2:2
+        case AV_CODEC_ID_V410:       // Uncompressed 10-bit 4:4:4
+        case AV_CODEC_ID_R210:       // Uncompressed RGB 10-bit
+        case AV_CODEC_ID_R10K:       // AJA Kona 10-bit RGB
+        case AV_CODEC_ID_AVUI:       // Avid Meridien Uncompressed
+        case AV_CODEC_ID_AYUV:       // Uncompressed packed 4:4:4
+        case AV_CODEC_ID_TARGA_Y216: // Pinnacle TARGA CineWave YUV16
+        case AV_CODEC_ID_JPEG2000:   // JPEG 2000 (intra-frame)
+        #ifdef AV_CODEC_ID_CINEFORM
+        case AV_CODEC_ID_CINEFORM:   // GoPro CineForm
+        #endif
+            return true;
+        
+        // HAP is handled by HAPVideoInput, but include here for completeness
+        case AV_CODEC_ID_HAP:
+        #ifdef AV_CODEC_ID_HAPQ
+        case AV_CODEC_ID_HAPQ:
+        #endif
+        #ifdef AV_CODEC_ID_HAPALPHA
+        case AV_CODEC_ID_HAPALPHA:
+        #endif
+            return true;
+        
+        default:
+            return false;
+    }
+}
+
+void VideoFileInput::setupDirectSeekMode() {
+    // Setup direct seek mode for intra-frame codecs
+    // All frames are keyframes, so we can calculate positions mathematically
+    
+    AVStream* avStream = mediaReader_.getStream(videoStream_);
+    if (!avStream) {
+        return;
+    }
+    
+    AVRational timeBase = avStream->time_base;
+    int64_t frames = frameInfo_.totalFrames;
+    if (frames <= 0) {
+        double duration = mediaReader_.getDuration();
+        if (duration > 0 && frameInfo_.framerate > 0) {
+            frames = static_cast<int64_t>(duration * frameInfo_.framerate);
+        } else {
+            frames = 10000; // Default estimate
+        }
+    }
+    
+    // Allocate index for direct seek
+    frameIndex_ = static_cast<FrameIndex*>(calloc(frames, sizeof(FrameIndex)));
+    if (!frameIndex_) {
+        return;
+    }
+    
+    // Get first PTS from stream
+    int64_t firstPTS = 0;
+    if (avStream->start_time != AV_NOPTS_VALUE) {
+        firstPTS = avStream->start_time;
+    }
+    
+    // Fill index with calculated positions (all keyframes)
+    for (int64_t i = 0; i < frames; ++i) {
+        frameIndex_[i].key = 1;  // All keyframes
+        frameIndex_[i].pkt_pts = firstPTS + av_rescale_q(i, frameRateQ_, timeBase);
+        frameIndex_[i].frame_pts = frameIndex_[i].pkt_pts;
+        frameIndex_[i].pkt_pos = -1;  // Use timestamp seeking
+        frameIndex_[i].frame_pos = -1;
+        frameIndex_[i].timestamp = av_rescale_q(i, frameRateQ_, timeBase);
+        frameIndex_[i].seekpts = frameIndex_[i].pkt_pts;
+        frameIndex_[i].seekpos = -1;
+    }
+    
+    frameCount_ = frames;
+    scanComplete_ = true;
+    byteSeek_ = false;  // Use timestamp seeking
+}
+
 bool VideoFileInput::indexFrames() {
+    // Check if codec is intra-frame only (all keyframes)
+    // These codecs don't need the expensive 3-pass indexing
+    if (isIntraFrameCodec()) {
+        const char* codecName = codecCtx_ ? avcodec_get_name(codecCtx_->codec_id) : "unknown";
+        LOG_INFO << "Codec " << codecName << " is intra-frame only (all keyframes), skipping indexing";
+        setupDirectSeekMode();
+        return scanComplete_;
+    }
+    
     // xjadeo-style 3-pass indexing implementation
 
     frameCount_ = 0;

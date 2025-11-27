@@ -103,6 +103,8 @@ private:
     bool openCodec();
     bool openHardwareCodec();
     bool indexFrames();
+    bool isIntraFrameCodec() const;  // Check if codec is intra-frame only (all keyframes)
+    void setupDirectSeekMode();      // Setup direct seek mode for intra-frame codecs
     bool seekToFrame(int64_t frameNumber);
     bool seekByTimestamp(int64_t frameNumber);
     int64_t parsePTSFromFrame(AVFrame* frame);
