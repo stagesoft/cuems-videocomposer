@@ -491,16 +491,33 @@ class DynamicFileManagementTest:
         time.sleep(0.2)
         print("MTC follow enabled on both layers")
         
-        # Step 5: Initial image controls setup
-        print("\n--- Step 5: Initial Image Controls Setup ---")
+        # Step 5: Enable OSD display
+        print("\n--- Step 5: Enable OSD Display ---")
+        # Enable timecode display (SMPTE) - send both commands for compatibility
+        # /videocomposer/osd/timecode with integer 1 enables SMPTE mode
+        self.send_osc("/videocomposer/osd/timecode", 1, verbose=True)
+        time.sleep(0.1)
+        # /videocomposer/osd/smpte with string sets y position (89 = near top, but not too high)
+        self.send_osc("/videocomposer/osd/smpte", "70", verbose=True)
+        time.sleep(0.1)
+        # Enable frame number display (position at y=90%)
+        self.send_osc("/videocomposer/osd/frame", 90, verbose=True)
+        time.sleep(0.1)
+        # Enable black box background for OSD
+        self.send_osc("/videocomposer/osd/box", 1, verbose=True)
+        time.sleep(0.1)
+        print("OSD enabled: timecode and frame number display")
+        
+        # Step 6: Initial image controls setup
+        print("\n--- Step 6: Initial Image Controls Setup ---")
         self.test_layer_controls(cue_id_1, layer_num=1)
         time.sleep(0.5)
         self.test_layer_controls(cue_id_2, layer_num=2)
         time.sleep(0.5)
         
-        # Step 5.5: Enable looping if requested
+        # Step 6.5: Enable looping if requested
         if self.enable_loop:
-            print("\n--- Step 5.5: Enable Looping on Both Layers ---")
+            print("\n--- Step 6.5: Enable Looping on Both Layers ---")
             # Enable infinite loop on both layers
             self.send_osc(f"/videocomposer/layer/{cue_id_1}/loop", 1, -1)  # Enable, infinite
             time.sleep(0.1)
@@ -508,8 +525,8 @@ class DynamicFileManagementTest:
             time.sleep(0.1)
             print("Looping enabled on both layers")
         
-        # Step 6: Progressive image adjustments over 30 seconds
-        print("\n--- Step 6: Progressive Image Adjustments (30 seconds) ---")
+        # Step 7: Progressive image adjustments over 30 seconds
+        print("\n--- Step 7: Progressive Image Adjustments (30 seconds) ---")
         print("Making continuous smooth adjustments to all image controls...")
         self.progressive_image_adjustments(cue_id_1, cue_id_2, duration=30)
         
@@ -520,6 +537,7 @@ class DynamicFileManagementTest:
         print(f"  - Layer 1 (top-left, smaller, rotated): {cue_id_1}")
         print(f"  - Layer 2 (bottom-right, larger, different blend): {cue_id_2}")
         print("  - Both layers following MTC timecode")
+        print("  - OSD enabled: timecode and frame number display")
         if self.enable_loop:
             print("  - Looping enabled on both layers")
         print("  - Progressive adjustments completed (30 seconds)")
