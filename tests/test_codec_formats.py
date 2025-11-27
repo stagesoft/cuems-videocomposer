@@ -9,7 +9,7 @@ This test:
 4. Can be used to verify codec support and decoding performance
 
 Usage:
-    python3 tests/test_codec_formats.py [--video-dir PATH] [--test-all] [--test-hw] [--test-sw]
+    python3 tests/test_codec_formats.py [--video-dir PATH] [--test-all] [--test-hw] [--test-sw] [--test-dir PATH]
 """
 
 import sys
@@ -113,7 +113,7 @@ class CodecFormatTest:
         except Exception as e:
             return {"error": str(e)}
     
-    def test_video_file_interactive(self, video_path: Path, test_duration: int = 20) -> Dict:
+    def test_video_file_interactive(self, video_path: Path, test_duration: int = 0) -> Dict:
         """Test a single video file interactively - ask user if video is visible."""
         video_path = Path(video_path)
         if not video_path.exists():
@@ -135,12 +135,24 @@ class CodecFormatTest:
         print(f"  FPS: {info['fps']:.2f}")
         print(f"  Duration: {info['duration']:.2f}s")
         
-        # Run videocomposer
-        print(f"\n  Playing video for {test_duration} seconds...")
+        # If duration is 0, use video's actual duration (play to end)
+        actual_duration = test_duration
+        if test_duration == 0:
+            video_duration = info.get("duration", 0)
+            if video_duration > 0:
+                actual_duration = int(video_duration) + 2  # Add 2 seconds buffer
+                print(f"\n  Playing video to end: {video_duration:.2f}s (with 2s buffer)...")
+            else:
+                # If we can't determine duration, use a long timeout (10 minutes)
+                actual_duration = 600
+                print(f"\n  Playing video to end: using 10 minute timeout (video duration unknown)...")
+        else:
+            print(f"\n  Playing video for {test_duration} seconds...")
+        
         print(f"  Please watch the videocomposer window and observe if video is visible.")
         print(f"  The window should open shortly...\n")
         
-        result = self._run_videocomposer(video_path, test_duration, verbose_output=False)
+        result = self._run_videocomposer(video_path, actual_duration, verbose_output=False)
         
         # Ask user if they saw video
         print(f"\n  Video playback completed.")
@@ -170,7 +182,7 @@ class CodecFormatTest:
         
         return test_result
     
-    def test_video_file(self, video_path: Path, test_duration: int = 20) -> Dict:
+    def test_video_file(self, video_path: Path, test_duration: int = 0) -> Dict:
         """Test a single video file with videocomposer."""
         import sys
         sys.stdout.flush()  # Ensure output is flushed
@@ -194,12 +206,29 @@ class CodecFormatTest:
         print(f"  FPS: {info['fps']:.2f}")
         print(f"  Duration: {info['duration']:.2f}s")
         
+        # Detect HAP variant if HAP codec
+        if info.get("codec", "").lower() == "hap":
+            hap_variant = self._detect_hap_variant(video_path, info)
+            print(f"  HAP Variant: {hap_variant}")
+        
         # Determine expected decoding path
         expected_path = self._determine_expected_path(info)
         print(f"  Expected decoding: {expected_path}")
         
+        # If duration is 0, use video's actual duration (play to end)
+        actual_duration = test_duration
+        if test_duration == 0:
+            video_duration = info.get("duration", 0)
+            if video_duration > 0:
+                actual_duration = int(video_duration) + 2  # Add 2 seconds buffer
+                print(f"  Playing to end: {video_duration:.2f}s (with 2s buffer)")
+            else:
+                # If we can't determine duration, use a long timeout (10 minutes)
+                actual_duration = 600
+                print(f"  Playing to end: using 10 minute timeout (video duration unknown)")
+        
         # Run videocomposer with OSD enabled
-        result = self._run_videocomposer(video_path, test_duration, enable_osd=True)
+        result = self._run_videocomposer(video_path, actual_duration, enable_osd=True)
         
         # Analyze output
         analysis = self._analyze_output(result, info, expected_path)
@@ -231,11 +260,24 @@ class CodecFormatTest:
         codec = info.get("codec", "").lower()
         
         if codec in ["hap"]:
-            return "HAP_DIRECT (zero-copy GPU)"
+            return "HAP_DIRECT (zero-copy GPU DXT)"
         elif codec in ["h264", "hevc", "av1"]:
             return "GPU_HARDWARE (if available) or CPU_SOFTWARE"
         else:
             return "CPU_SOFTWARE"
+    
+    def _detect_hap_variant(self, video_path: Path, info: Dict) -> str:
+        """Detect HAP variant from filename or codec info."""
+        name = video_path.name.lower()
+        
+        if "hap_hq_alpha" in name or "hapqalpha" in name:
+            return "HAP Q Alpha (dual DXT5)"
+        elif "hap_alpha" in name or "hapalpha" in name:
+            return "HAP Alpha (DXT5 RGBA)"
+        elif "hap_hq" in name or "hapq" in name or "haphq" in name:
+            return "HAP Q (DXT5 YCoCg)"
+        else:
+            return "HAP (DXT1 RGB)"
     
     def _setup_mtc(self):
         """Setup and start MTC timecode sender."""
@@ -333,6 +375,14 @@ class CodecFormatTest:
             print(f"    Warning: Failed to send OSC two-int command: {e}")
     
     def _run_videocomposer(self, video_path: Path, duration: int, verbose_output: bool = True, enable_osd: bool = False) -> Dict:
+        """Run videocomposer with the video file.
+        
+        Args:
+            video_path: Path to video file
+            duration: Duration in seconds. If 0, will wait for process to finish naturally.
+            verbose_output: Whether to print output lines
+            enable_osd: Whether to enable OSD timecode display
+        """
         """Run videocomposer with the video file."""
         osc_port = 7000  # Default OSC port
         cmd = [
@@ -352,7 +402,10 @@ class CodecFormatTest:
         
         process = None
         try:
-            print(f"  Running videocomposer for {duration} seconds...")
+            if duration > 0:
+                print(f"  Running videocomposer for {duration} seconds...")
+            else:
+                print(f"  Running videocomposer until video ends...")
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -401,7 +454,9 @@ class CodecFormatTest:
                 if process.poll() is not None:
                     break
                 
-                if time.time() - start_time > duration:
+                # If duration is 0, wait for process to finish naturally
+                # Otherwise, stop after duration seconds
+                if duration > 0 and time.time() - start_time > duration:
                     process.terminate()
                     time.sleep(0.5)
                     if process.poll() is None:
@@ -470,10 +525,27 @@ class CodecFormatTest:
         if codec in output.lower():
             analysis["detected_codec"] = codec
         
-        # Check for HAP detection
-        if "hap" in output.lower() and codec == "hap":
-            analysis["decoding_path"] = "HAP_DIRECT"
-            analysis["success"] = True
+        # Check for HAP detection (look for direct DXT upload messages)
+        if codec == "hap":
+            # Check for direct HAP decode (optimal path)
+            if any(hap_direct in output.lower() for hap_direct in [
+                "hap direct", "direct dxt", "uploaded hap frame", "hap frame has",
+                "decoded hap texture", "hap direct texture upload enabled",
+                "loaded hap frame.*to gpu.*direct dxt"
+            ]):
+                analysis["decoding_path"] = "HAP_DIRECT (DXT compressed)"
+                analysis["success"] = True
+            # Check for FFmpeg fallback (still works, but not optimal)
+            elif any(fallback in output.lower() for fallback in [
+                "ffmpeg fallback", "falling back to ffmpeg", "uploaded hap frame via ffmpeg"
+            ]):
+                analysis["decoding_path"] = "HAP_FFMPEG_FALLBACK (uncompressed RGBA)"
+                analysis["success"] = True  # Still successful, just not optimal
+                analysis["warnings"].append("Using FFmpeg fallback instead of direct DXT decode")
+            # Generic HAP detection
+            elif "hap" in output.lower():
+                analysis["decoding_path"] = "HAP_DETECTED"
+                analysis["success"] = True
         # Check for software decoding FIRST (before hardware) to avoid false positives
         # when output says "Hardware decoding disabled, using software"
         elif any(sw in output.lower() for sw in [
@@ -545,6 +617,24 @@ class CodecFormatTest:
         # Remove duplicates and sort
         return sorted(set(videos))
     
+    def find_hap_videos(self) -> List[Path]:
+        """Find all HAP test videos, sorted by variant."""
+        hap_videos = self.find_test_videos(["*hap*"])
+        
+        # Sort by variant priority: standard HAP, then HAP Q, then Alpha variants
+        def hap_sort_key(path: Path) -> tuple:
+            name = path.name.lower()
+            if "hap_hq_alpha" in name or "hapqalpha" in name:
+                return (3, name)  # HAP Q Alpha last
+            elif "hap_alpha" in name or "hapalpha" in name:
+                return (2, name)  # HAP Alpha
+            elif "hap_hq" in name or "hapq" in name or "haphq" in name:
+                return (1, name)  # HAP Q
+            else:
+                return (0, name)  # Standard HAP first
+        
+        return sorted(hap_videos, key=hap_sort_key)
+    
     def run_all_tests(self, test_hw: bool = True, test_sw: bool = True, duration: int = 20, one_by_one: bool = False) -> Dict:
         """Run tests on all available test videos."""
         videos = self.find_test_videos()
@@ -558,7 +648,10 @@ class CodecFormatTest:
         print(f"Testing hardware decoding: {test_hw}")
         print(f"Testing software decoding: {test_sw}")
         if one_by_one:
-            print(f"Running tests one by one with {duration} seconds per video\n")
+            if duration > 0:
+                print(f"Running tests one by one with {duration} seconds per video\n")
+            else:
+                print(f"Running tests one by one, playing each video to the end\n")
         
         results = {}
         for i, video in enumerate(videos, 1):
@@ -569,11 +662,13 @@ class CodecFormatTest:
             
             # Test all videos from video_test_files directory
             # Filter by test type only if explicitly disabled
+            # Note: HAP is always tested regardless of test_hw/test_sw flags
             video_name = video.name.lower()
             if not test_hw and any(codec in video_name for codec in ["h264", "hevc", "av1"]):
                 continue
             if not test_sw and any(codec in video_name for codec in ["vp9", "mpeg4"]):
                 continue
+            # HAP is always included (it's neither hardware nor software in the traditional sense)
             
             if one_by_one:
                 print(f"\n{'='*60}")
@@ -668,9 +763,9 @@ def main():
     parser.add_argument("--test-sw", action="store_true", default=True,
                        help="Test software codecs (VP9, MPEG-4)")
     parser.add_argument("--test-hap", action="store_true",
-                       help="Test HAP codec specifically")
-    parser.add_argument("--duration", type=int, default=20,
-                       help="Test duration per video in seconds (default: 20)")
+                       help="Test HAP codec specifically (tests all HAP variants: HAP, HAP Q, HAP Alpha, HAP Q Alpha)")
+    parser.add_argument("--duration", type=int, default=0,
+                       help="Test duration per video in seconds (default: 0 = play to end)")
     parser.add_argument("--video", type=str,
                        help="Test a specific video file")
     parser.add_argument("--no-mtc", action="store_true",
@@ -685,20 +780,35 @@ def main():
                        help="Enable looping on layers (default: no loop, uses automatic wrapping)")
     parser.add_argument("--hw-decode", type=str, choices=["auto", "software", "vaapi", "cuda", "qsv", "videotoolbox"],
                        help="Force specific hardware decoder mode (auto, software, vaapi, cuda, qsv, videotoolbox)")
+    parser.add_argument("--test-dir", type=str,
+                       help="Test all videos from a specific directory (alternative to --video-dir for testing). "
+                            "Note: Paths with spaces must be quoted, e.g., --test-dir 'path with spaces'")
     
     args = parser.parse_args()
     
-    video_dir = Path(args.video_dir)
+    # Determine which directory to use for testing
+    if args.test_dir:
+        # Use the specified test directory
+        test_dir = Path(args.test_dir)
+        if not test_dir.exists():
+            print(f"ERROR: Test directory not found: {test_dir}")
+            sys.exit(1)
+        if not test_dir.is_dir():
+            print(f"ERROR: Path is not a directory: {test_dir}")
+            sys.exit(1)
+        video_dir = test_dir  # Use test_dir for finding videos
+        print(f"Testing all videos from: {test_dir.resolve()}")
+    else:
+        # Use the default video directory
+        video_dir = Path(args.video_dir)
+        if not video_dir.exists():
+            print(f"ERROR: Video directory not found: {video_dir}")
+            print(f"Expected location: {Path(__file__).parent.parent / 'video_test_files'}")
+            print("Run tests/create_test_videos.sh first to create test files")
+            sys.exit(1)
+        print(f"Using video directory: {video_dir.resolve()}")
+    
     videocomposer_bin = Path(args.videocomposer) if args.videocomposer else None
-    
-    if not video_dir.exists():
-        print(f"ERROR: Video directory not found: {video_dir}")
-        print(f"Expected location: {Path(__file__).parent.parent / 'video_test_files'}")
-        print("Run tests/create_test_videos.sh first to create test files")
-        sys.exit(1)
-    
-    # Print the directory being used
-    print(f"Using video directory: {video_dir.resolve()}")
     
     tester = CodecFormatTest(video_dir, videocomposer_bin, use_mtc=not args.no_mtc, fps=args.fps, enable_loop=args.loop, hw_decode_mode=args.hw_decode)
     
@@ -706,7 +816,13 @@ def main():
     
     if args.interactive:
         # Interactive mode: test one video at a time
-        videos = tester.find_test_videos()
+        if args.test_hap:
+            videos = tester.find_hap_videos()
+            print(f"\n{'='*60}")
+            print(f"INTERACTIVE HAP TEST MODE")
+            print(f"{'='*60}")
+        else:
+            videos = tester.find_test_videos()
         
         if not videos:
             print(f"ERROR: No test videos found in {video_dir}")
@@ -794,14 +910,133 @@ def main():
         
         tester.print_summary(results)
     elif args.test_hap:
-        # Test HAP specifically
-        hap_videos = tester.find_test_videos(["*hap*"])
+        # Test HAP specifically - test all HAP variants
+        print(f"\n{'='*60}")
+        print("HAP CODEC TEST")
+        print(f"{'='*60}")
+        print("Testing HAP direct texture upload implementation")
+        print("Expected: Direct DXT decode to GPU (zero-copy)")
+        print(f"{'='*60}\n")
+        
+        hap_videos = tester.find_hap_videos()
         if not hap_videos:
             print("ERROR: No HAP test videos found")
+            print(f"Expected HAP videos in: {video_dir}")
+            print("HAP test videos should match pattern: *hap*.mov")
+            print("\nAvailable HAP variants to test:")
+            print("  - test_hap.mov (Standard HAP - DXT1)")
+            print("  - test_hap_hq.mov (HAP Q - DXT5 YCoCg)")
+            print("  - test_hap_alpha.mov (HAP Alpha - DXT5 RGBA)")
+            print("  - test_hap_hq_alpha.mov (HAP Q Alpha - dual DXT5)")
             sys.exit(1)
         
-        for video in hap_videos:
-            results[video.name] = tester.test_video_file(video, args.duration)
+        print(f"Found {len(hap_videos)} HAP test video(s):")
+        for i, video in enumerate(hap_videos, 1):
+            variant = tester._detect_hap_variant(video, tester.get_video_info(video))
+            print(f"  {i}. {video.name} - {variant}")
+        print()
+        
+        for i, video in enumerate(hap_videos, 1):
+            if tester.interrupted:
+                print("\n⚠️  Test stopped by user")
+                break
+            
+            print(f"\n{'='*60}")
+            print(f"HAP Test {i}/{len(hap_videos)}: {video.name}")
+            print(f"{'='*60}")
+            
+            try:
+                result = tester.test_video_file(video, args.duration)
+                results[video.name] = result
+                
+                # Show HAP-specific results
+                if result.get("success"):
+                    path = result.get("analysis", {}).get("decoding_path", "UNKNOWN")
+                    if "DIRECT" in path:
+                        print(f"  ✓ HAP direct DXT decode working")
+                    elif "FALLBACK" in path:
+                        print(f"  ⚠ HAP using FFmpeg fallback (suboptimal)")
+                    else:
+                        print(f"  ? HAP decode path: {path}")
+                else:
+                    print(f"  ✗ HAP decode failed")
+                    
+            except KeyboardInterrupt:
+                print("\n⚠️  Test interrupted during HAP test")
+                tester.interrupted = True
+                break
+            except Exception as e:
+                print(f"  ERROR: Exception during HAP test: {e}")
+                results[video.name] = {"error": str(e), "success": False}
+        
+        tester.print_summary(results)
+        
+        # HAP-specific summary
+        print(f"\n{'='*60}")
+        print("HAP TEST SUMMARY")
+        print(f"{'='*60}")
+        direct_count = sum(1 for r in results.values() 
+                          if "DIRECT" in r.get("analysis", {}).get("decoding_path", ""))
+        fallback_count = sum(1 for r in results.values() 
+                            if "FALLBACK" in r.get("analysis", {}).get("decoding_path", ""))
+        failed_count = sum(1 for r in results.values() if not r.get("success", False))
+        
+        print(f"Direct DXT decode: {direct_count}/{len(results)} ✓")
+        print(f"FFmpeg fallback: {fallback_count}/{len(results)} ⚠")
+        print(f"Failed: {failed_count}/{len(results)} ✗")
+        
+        if direct_count == len(results):
+            print("\n✓ All HAP variants using optimal direct DXT decode!")
+        elif fallback_count > 0:
+            print(f"\n⚠ {fallback_count} HAP variant(s) using FFmpeg fallback")
+            print("  Check logs for: 'HAP direct decode failed' or 'snappy not found'")
+        if failed_count > 0:
+            print(f"\n✗ {failed_count} HAP variant(s) failed to decode")
+    elif args.test_dir:
+        # Test all videos from the specified directory
+        print(f"\n{'='*60}")
+        print(f"TESTING ALL VIDEOS FROM DIRECTORY")
+        print(f"{'='*60}")
+        print(f"Directory: {args.test_dir}")
+        if args.duration > 0:
+            print(f"Duration per video: {args.duration} seconds")
+        else:
+            print(f"Duration per video: play to end")
+        print(f"{'='*60}\n")
+        
+        videos = tester.find_test_videos()
+        if not videos:
+            print(f"ERROR: No video files found in {args.test_dir}")
+            print("Supported formats: *.mp4, *.mov, *.avi, *.mkv, *.webm")
+            sys.exit(1)
+        
+        print(f"Found {len(videos)} video file(s):")
+        for i, video in enumerate(videos, 1):
+            print(f"  {i}. {video.name}")
+        print()
+        
+        for i, video in enumerate(videos, 1):
+            if tester.interrupted:
+                print("\n⚠️  Test stopped by user")
+                break
+            
+            print(f"\n{'='*60}")
+            print(f"Test {i}/{len(videos)}: {video.name}")
+            print(f"{'='*60}")
+            
+            try:
+                result = tester.test_video_file(video, args.duration)
+                results[video.name] = result
+            except KeyboardInterrupt:
+                print("\n⚠️  Test interrupted during video playback")
+                tester.interrupted = True
+                break
+            except Exception as e:
+                print(f"  ERROR: Exception during test: {e}")
+                import traceback
+                traceback.print_exc()
+                results[video.name] = {"error": str(e), "success": False}
+        
         tester.print_summary(results)
     else:
         # Test all
