@@ -207,6 +207,109 @@ bool VideoFileInput::isReady() const {
     return ready_ && mediaReader_.isReady();
 }
 
+// Helper function to check if codec parameters are compatible with hardware decoding
+static bool isCompatibleWithHardwareDecoder(AVCodecParameters* codecParams, HardwareDecoder::Type hwType) {
+    if (!codecParams) {
+        return false;
+    }
+    
+    AVCodecID codecId = codecParams->codec_id;
+    
+    // Check for known incompatibilities based on bit depth and profile
+    if (codecId == AV_CODEC_ID_H264) {
+        // H.264 hardware decoders typically only support 8-bit (baseline, main, high profiles)
+        // High 10 Profile (profile 110) is 10-bit and not supported by most hardware decoders
+        // Check bits_per_raw_sample first (most reliable)
+        // Note: 0 means unknown/unset and typically defaults to 8-bit, so only check if > 8
+        if (codecParams->bits_per_raw_sample > 8) {
+            LOG_INFO << "H.264 video has " << codecParams->bits_per_raw_sample 
+                     << "-bit depth, not supported by hardware decoder, falling back to software";
+            return false;
+        }
+        
+        // Also check profile: High 10 Profile (110) is 10-bit
+        // Baseline = 66, Main = 77, High = 100, High 10 = 110
+        // Check if profile value is 110 (High 10 Profile)
+        if (codecParams->profile == 110) {
+            LOG_INFO << "H.264 High 10 Profile detected (10-bit), not supported by hardware decoder, falling back to software";
+            return false;
+        }
+    } else if (codecId == AV_CODEC_ID_HEVC) {
+        // HEVC hardware decoder support varies, but many don't support 12-bit
+        // Check bits_per_raw_sample (0 means unknown/unset)
+        if (codecParams->bits_per_raw_sample > 10) {
+            LOG_INFO << "HEVC video has " << codecParams->bits_per_raw_sample 
+                     << "-bit depth, may not be supported by hardware decoder, falling back to software";
+            return false;
+        }
+    }
+    
+    // Additional compatibility check: try to query hardware decoder capabilities
+    // Get the codec we would use for hardware decoding
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 0, 0)
+    const AVCodec* codec = nullptr;
+#else
+    AVCodec* codec = nullptr;
+#endif
+    
+    // Find the appropriate hardware codec
+    switch (hwType) {
+        case HardwareDecoder::Type::VAAPI:
+        case HardwareDecoder::Type::VIDEOTOOLBOX:
+            // These use standard decoder with hw_device_ctx
+            codec = avcodec_find_decoder(codecId);
+            break;
+        case HardwareDecoder::Type::CUDA: {
+            std::string codecName = avcodec_get_name(codecId);
+            codec = avcodec_find_decoder_by_name((codecName + "_cuvid").c_str());
+            break;
+        }
+        case HardwareDecoder::Type::QSV: {
+            std::string codecName = avcodec_get_name(codecId);
+            codec = avcodec_find_decoder_by_name((codecName + "_qsv").c_str());
+            break;
+        }
+        case HardwareDecoder::Type::DXVA2: {
+            std::string codecName = avcodec_get_name(codecId);
+            codec = avcodec_find_decoder_by_name((codecName + "_dxva2").c_str());
+            break;
+        }
+        default:
+            return false;
+    }
+    
+    if (!codec) {
+        return false;
+    }
+    
+    // Check hardware configurations to see if the decoder supports this format
+    AVHWDeviceType hwDeviceType = HardwareDecoder::getFFmpegDeviceType(hwType);
+    if (hwDeviceType == AV_HWDEVICE_TYPE_NONE) {
+        return false;
+    }
+    
+    // Check if there's a hardware config that supports this device type
+    bool hasCompatibleConfig = false;
+    for (int n = 0; ; n++) {
+        const AVCodecHWConfig *cfg = avcodec_get_hw_config(codec, n);
+        if (!cfg) {
+            break;
+        }
+        
+        if (cfg->device_type == hwDeviceType) {
+            hasCompatibleConfig = true;
+            break;
+        }
+    }
+    
+    if (!hasCompatibleConfig) {
+        LOG_VERBOSE << "No compatible hardware configuration found for codec, will use software";
+        return false;
+    }
+    
+    return true;
+}
+
 bool VideoFileInput::openHardwareCodec() {
     // Try to open hardware decoder if available
     // First, we need to detect the codec type
@@ -265,6 +368,13 @@ bool VideoFileInput::openHardwareCodec() {
             LOG_WARNING << "Requested hardware decoder (" << HardwareDecoder::getName(forcedType)
                         << ") is not available for codec " << codecName << ", falling back to software";
         }
+        return false;
+    }
+
+    // Check if the codec parameters are compatible with the hardware decoder
+    // This detects incompatibilities like 10-bit H.264, unsupported profiles, etc.
+    if (!isCompatibleWithHardwareDecoder(codecParams, hwDecoderType_)) {
+        LOG_INFO << "Codec format not compatible with hardware decoder, falling back to software";
         return false;
     }
 

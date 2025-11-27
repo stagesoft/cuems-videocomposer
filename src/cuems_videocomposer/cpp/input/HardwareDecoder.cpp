@@ -22,34 +22,14 @@ HardwareDecoder::Type HardwareDecoder::detectAvailable() {
     }
     
     // Try to detect available hardware decoders
-    // Check in order of preference: CUDA > VAAPI > QSV > VideoToolbox > DXVA2
-    // VAAPI is preferred over QSV because we have VaapiInterop for zero-copy GPU texture uploads
+    // Check in order of preference: VAAPI > CUDA > QSV > VideoToolbox > DXVA2
+    // VAAPI is checked first because we have VaapiInterop for zero-copy GPU texture uploads
+    // Once one is found, we stop checking the others
     
     AVBufferRef* hwDeviceCtx = nullptr;
+    int ret = -1;
     
-    // Check CUDA (NVIDIA)
-    #ifdef __linux__
-    hwDeviceCtx = nullptr;
-    int ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0);
-    if (ret >= 0 && hwDeviceCtx != nullptr) {
-        LOG_INFO << "Hardware decoder detected: CUDA (NVIDIA)";
-        av_buffer_unref(&hwDeviceCtx);
-        cached_hw_type = Type::CUDA;
-        hw_type_detected = true;
-        return Type::CUDA;
-    }
-    if (ret < 0) {
-        char errbuf[AV_ERROR_MAX_STRING_SIZE];
-        av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
-        LOG_VERBOSE << "CUDA hardware decoder not available: " << errbuf << " (error code: " << ret << ")";
-    }
-    if (hwDeviceCtx) {
-        av_buffer_unref(&hwDeviceCtx);
-        hwDeviceCtx = nullptr;
-    }
-    #endif
-    
-    // Check VAAPI (Linux, Intel/AMD) - preferred for zero-copy with VaapiInterop
+    // Check VAAPI first (Linux, Intel/AMD) - preferred for zero-copy with VaapiInterop
     #ifdef __linux__
     hwDeviceCtx = nullptr;
     ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0);
@@ -71,7 +51,29 @@ HardwareDecoder::Type HardwareDecoder::detectAvailable() {
     }
     #endif
     
-    // Check QSV (Intel Quick Sync Video - Linux/Windows) - fallback if VAAPI not available
+    // Check CUDA second (NVIDIA)
+    #ifdef __linux__
+    hwDeviceCtx = nullptr;
+    ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0);
+    if (ret >= 0 && hwDeviceCtx != nullptr) {
+        LOG_INFO << "Hardware decoder detected: CUDA (NVIDIA)";
+        av_buffer_unref(&hwDeviceCtx);
+        cached_hw_type = Type::CUDA;
+        hw_type_detected = true;
+        return Type::CUDA;
+    }
+    if (ret < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
+        LOG_VERBOSE << "CUDA hardware decoder not available: " << errbuf << " (error code: " << ret << ")";
+    }
+    if (hwDeviceCtx) {
+        av_buffer_unref(&hwDeviceCtx);
+        hwDeviceCtx = nullptr;
+    }
+    #endif
+    
+    // Check QSV third (Intel Quick Sync Video - Linux/Windows)
     #if defined(__linux__) || defined(_WIN32)
     hwDeviceCtx = nullptr;
     ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_QSV, nullptr, nullptr, 0);

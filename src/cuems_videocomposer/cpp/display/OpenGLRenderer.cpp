@@ -523,8 +523,6 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 if (glErr != GL_NO_ERROR) {
                     LOG_ERROR << "GL error after texture upload: 0x" << std::hex << glErr << std::dec;
                 }
-                LOG_VERBOSE << "CPU texture upload: " << layerTextureWidth << "x" << layerTextureHeight 
-                           << " texId=" << layerTextureId;
 
         // Calculate quad size with letterboxing (matches original xjadeo)
         // Original uses _gl_quad_x and _gl_quad_y for letterboxing
@@ -577,8 +575,6 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 // Use pixel coordinates for GL_TEXTURE_RECTANGLE_ARB
                 // NOTE: renderQuad uses textureWidth_ and textureHeight_ members, so we need to pass them
                 // Use a custom render here with explicit dimensions
-                LOG_VERBOSE << "CPU quad render: x=" << x << " y=" << y << " w=" << w << " h=" << h
-                           << " texW=" << layerTextureWidth << " texH=" << layerTextureHeight;
                 glBegin(GL_QUADS);
                 glTexCoord2f(0.0f, (GLfloat)layerTextureHeight); glVertex2f(x, y);
                 glTexCoord2f((GLfloat)layerTextureWidth, (GLfloat)layerTextureHeight); glVertex2f(x + w, y);
