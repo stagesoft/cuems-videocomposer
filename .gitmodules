@@ -7,3 +7,6 @@
 [submodule "src/cuems-mediadecoder"]
 	path = src/cuems-mediadecoder
 	url = git@github.com:stagesoft/cuems-mediadecoder.git
+[submodule "external/hap"]
+	path = external/hap
+	url = https://github.com/Vidvox/hap.git
