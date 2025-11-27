@@ -220,7 +220,7 @@ class CodecFormatTest:
         if test_duration == 0:
             video_duration = info.get("duration", 0)
             if video_duration > 0:
-                actual_duration = int(video_duration) + 2  # Add 2 seconds buffer
+                actual_duration = int(video_duration) + 4  # Add 2 seconds buffer
                 print(f"  Playing to end: {video_duration:.2f}s (with 2s buffer)")
             else:
                 # If we can't determine duration, use a long timeout (10 minutes)
@@ -460,11 +460,10 @@ class CodecFormatTest:
             # Wait for videocomposer to initialize
             time.sleep(1.0)
             
-            # If codec doesn't need indexing, start MTC immediately
+            # If codec doesn't need indexing, skip indexing wait
             if not needs_indexing:
                 codec_name = video_info.get("codec", "unknown").upper() if "error" not in video_info else "unknown"
-                print(f"  Codec {codec_name} doesn't need indexing (all keyframes), starting MTC immediately...")
-                mtc_started = self._setup_mtc()
+                print(f"  Codec {codec_name} doesn't need indexing (all keyframes)")
                 indexing_complete = True  # Skip indexing wait
                 output_lines = []  # Initialize for later use
             else:
@@ -578,15 +577,17 @@ class CodecFormatTest:
                             # If readline fails, break and proceed
                             break
                 
-                # Start MTC after indexing is complete (or if no indexing needed)
-                if not mtc_started:
-                    if indexing_complete or (not any("indexing" in l.lower() for l in output_lines)):
-                        print(f"  Starting MTC timecode...")
-                        mtc_started = self._setup_mtc()
-                    else:
-                        # Indexing still in progress, but we'll start MTC anyway after timeout
-                        print(f"  Warning: Indexing may still be in progress, starting MTC")
-                        mtc_started = self._setup_mtc()
+                # Indexing complete or timed out - will wait for stabilization below
+                if not indexing_complete:
+                    # Indexing timeout case
+                    print(f"  Warning: Indexing may still be in progress")
+            
+            # Wait 6 seconds for video file to stabilize after opening (plus any indexing wait)
+            # This applies to both codecs that need indexing and those that don't
+            print(f"  Waiting 6 seconds for video file to stabilize...")
+            time.sleep(6.0)
+            print(f"  Starting MTC timecode...")
+            mtc_started = self._setup_mtc()
             
             # Wait for videocomposer to fully initialize OSC server
             time.sleep(0.5)

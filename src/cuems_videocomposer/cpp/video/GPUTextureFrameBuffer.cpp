@@ -630,8 +630,6 @@ bool GPUTextureFrameBuffer::uploadHapQAlphaData(const uint8_t* colorData, size_t
     
     glBindTexture(GL_TEXTURE_2D, 0);
     
-    LOG_VERBOSE << "GPUTextureFrameBuffer: Uploaded HAP Q Alpha data (color=" << colorSize 
-               << " bytes, alpha=" << alphaSize << " bytes)";
     
     return true;
 }
