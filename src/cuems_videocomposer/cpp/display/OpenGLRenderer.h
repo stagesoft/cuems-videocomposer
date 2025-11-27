@@ -75,10 +75,12 @@ private:
     GLuint quadVBO_;                // Vertex Buffer Object for quad
     
     // Shader programs
-    std::unique_ptr<ShaderProgram> rgbaShader_;      // For CPU frames, HAP
+    std::unique_ptr<ShaderProgram> rgbaShader_;      // For CPU frames, HAP, HAP Alpha
     std::unique_ptr<ShaderProgram> rgbaShaderHQ_;    // High-quality variant for extreme warps
     std::unique_ptr<ShaderProgram> nv12Shader_;      // For VAAPI/CUDA NV12
     std::unique_ptr<ShaderProgram> yuv420pShader_;   // For YUV420P fallback
+    std::unique_ptr<ShaderProgram> hapQShader_;      // For HAP Q (YCoCg→RGB)
+    std::unique_ptr<ShaderProgram> hapQAlphaShader_; // For HAP Q Alpha (dual texture)
     bool useShaders_;               // Enable shader rendering (vs fixed-function)
     
     // Deferred texture deletion (textures to delete after swapBuffers)

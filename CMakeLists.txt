@@ -608,6 +608,48 @@ if(VAAPI_FOUND AND EGL_FOUND AND DRM_FOUND)
     )
 endif()
 
+# HAP direct texture upload (optional, requires snappy)
+option(ENABLE_HAP_DIRECT "Enable HAP direct texture upload (requires snappy)" ON)
+
+if(ENABLE_HAP_DIRECT)
+    # Find snappy library for HAP decompression
+    pkg_check_modules(SNAPPY snappy)
+    if(SNAPPY_FOUND)
+        add_definitions(-DENABLE_HAP_DIRECT)
+        add_definitions(${SNAPPY_CFLAGS})
+        include_directories(${SNAPPY_INCLUDE_DIRS})
+        set(SNAPPY_LIBS ${SNAPPY_LIBRARIES})
+        
+        # Add Vidvox hap source files
+        list(APPEND C_SOURCES
+            external/hap/source/hap.c
+        )
+        include_directories(external/hap/source)
+        
+        # Add HapDecoder wrapper
+        list(APPEND CPP_SOURCES
+            src/cuems_videocomposer/cpp/hap/HapDecoder.cpp
+        )
+        
+        message(STATUS "HAP direct texture upload enabled (with snappy)")
+    else()
+        message(WARNING "Snappy not found - HAP direct decode disabled, will use FFmpeg fallback")
+        message(STATUS "Install libsnappy-dev to enable HAP direct texture upload")
+    endif()
+else()
+    message(STATUS "HAP direct texture upload disabled (ENABLE_HAP_DIRECT=OFF)")
+endif()
+
+# OpenMP for parallel HAP chunk decompression (optional)
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    message(STATUS "OpenMP found - HAP parallel decompression enabled")
+    set(OPENMP_LIBS OpenMP::OpenMP_CXX)
+else()
+    message(STATUS "OpenMP not found - HAP decode will use single thread")
+    set(OPENMP_LIBS "")
+endif()
+
 # Add cuemslogger library (required by mtcreceiver)
 add_subdirectory(src/cuemslogger)
 
@@ -683,7 +725,18 @@ if(BUILD_TESTS)
         )
     endif()
     
-    add_executable(cuems_videocomposer_test ${TEST_SOURCES} ${TEST_CPP_SOURCES} src/cuems_videocomposer/common.c)
+    # Add HAP decoder if enabled
+    set(TEST_HAP_SOURCES "")
+    if(ENABLE_HAP_DIRECT AND SNAPPY_FOUND)
+        list(APPEND TEST_CPP_SOURCES
+            src/cuems_videocomposer/cpp/hap/HapDecoder.cpp
+        )
+        list(APPEND TEST_HAP_SOURCES
+            external/hap/source/hap.c
+        )
+    endif()
+    
+    add_executable(cuems_videocomposer_test ${TEST_SOURCES} ${TEST_CPP_SOURCES} ${TEST_HAP_SOURCES} src/cuems_videocomposer/common.c)
     target_include_directories(cuems_videocomposer_test PRIVATE
         src/cuems_videocomposer
         src/cuems_videocomposer/cpp
@@ -693,6 +746,8 @@ if(BUILD_TESTS)
         ${FFMPEG_LIBRARIES}
         ${ALSA_LIBS}
         ${RTMIDI_LIBRARIES}
+        ${SNAPPY_LIBS}
+        ${OPENMP_LIBS}
         m
         pthread
     )
@@ -781,6 +836,8 @@ target_link_libraries(cuems-videocomposer
     ${MQ_LIBS}
     ${DPY_XINERAMA_LIBRARIES}
     ${RTMIDI_LIBRARIES}
+    ${SNAPPY_LIBS}
+    ${OPENMP_LIBS}
     m
     pthread
 )

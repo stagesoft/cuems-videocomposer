@@ -20,6 +20,9 @@
 #ifndef GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
 #define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
 #endif
+#ifndef GL_COMPRESSED_RGBA_BPTC_UNORM
+#define GL_COMPRESSED_RGBA_BPTC_UNORM 0x8E8C
+#endif
 
 extern "C" {
 #include <libavutil/avutil.h>
@@ -44,6 +47,9 @@ HAPVideoInput::HAPVideoInput()
     , currentFrame_(-1)
     , hapVariant_(HAPVariant::HAP)
     , ready_(false)
+#ifdef ENABLE_HAP_DIRECT
+    , fallbackWarningShown_(false)
+#endif
 {
     frameRateQ_ = {1, 1};
     frameInfo_ = {};
@@ -556,10 +562,6 @@ bool HAPVideoInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
                frame_->data[0] + y * frame_->linesize[0],
                bytesPerLine);
     }
-    
-    LOG_VERBOSE << "HAP: Copied " << (bytesPerLine * frameInfo_.height) << " bytes RGBA data "
-               << "(linesize[0]=" << frame_->linesize[0] << ", width=" << frameInfo_.width 
-               << ", height=" << frameInfo_.height << ")";
 
     int64_t pts = parsePTSFromFrame(frame_);
     if (pts != AV_NOPTS_VALUE) {
@@ -572,14 +574,42 @@ bool HAPVideoInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
 }
 
 bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffer& textureBuffer) {
-    // DEPRECATED: HAP now uses readFrame() (CPU path) which treats HAP as uncompressed RGBA
-    // FFmpeg's HAP decoder outputs uncompressed RGBA (pix_fmt=rgb0), NOT compressed DXT
-    // This method is kept for interface compatibility but should not be used for HAP
-    // Use readFrame() instead, which uploads to GPU during rendering
-    (void)frameNumber;  // Unused
-    (void)textureBuffer;  // Unused
-    LOG_WARNING << "HAP: readFrameToTexture() is deprecated - HAP now uses uncompressed RGBA path via readFrame()";
-    return false;
+    if (!isReady()) {
+        return false;
+    }
+
+#ifdef ENABLE_HAP_DIRECT
+    // Try direct HAP decode first (optimal path)
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        return false;
+    }
+
+    if (readRawPacket(frameNumber, packet)) {
+        bool success = decodeHapDirectToTexture(packet, textureBuffer);
+        av_packet_free(&packet);
+        
+        if (success) {
+            currentFrame_ = frameNumber;
+            return true;
+        }
+        
+        // Log fallback warning (once per file)
+        if (!fallbackWarningShown_) {
+            LOG_WARNING << "HAP direct decode failed for frame " << frameNumber 
+                       << ", falling back to FFmpeg RGBA path (reduced performance)";
+            LOG_WARNING << "Error: " << hapDecoder_.getLastError();
+            fallbackWarningShown_ = true;
+        } else {
+            LOG_VERBOSE << "Using FFmpeg fallback for HAP frame " << frameNumber;
+        }
+    } else {
+        av_packet_free(&packet);
+    }
+#endif
+
+    // Fallback: FFmpeg decode to RGBA, upload as uncompressed
+    return decodeWithFFmpegFallback(frameNumber, textureBuffer);
 }
 
 void HAPVideoInput::refineHAPVariantFromFrame(AVFrame* frame) {
@@ -664,6 +694,173 @@ InputSource::CodecType HAPVideoInput::getHAPVariant() const {
 }
 
 
+#ifdef ENABLE_HAP_DIRECT
+bool HAPVideoInput::readRawPacket(int64_t frameNumber, AVPacket* packet) {
+    // Seek to frame if needed
+    if (currentFrame_ < 0 || currentFrame_ != frameNumber) {
+        if (!seek(frameNumber)) {
+            LOG_WARNING << "Failed to seek to frame " << frameNumber;
+            return false;
+        }
+    }
+
+    // Read packets until we find the video packet for this frame
+    int bailout = 20;
+    while (bailout > 0) {
+        av_packet_unref(packet);
+        int err = mediaReader_.readPacket(packet);
+        if (err < 0) {
+            if (err == AVERROR_EOF) {
+                --bailout;
+                continue;
+            } else {
+                return false;
+            }
+        }
+
+        if (packet->stream_index != videoStream_) {
+            continue;
+        }
+
+        // Found video packet
+        return true;
+    }
+
+    return false;
+}
+
+bool HAPVideoInput::decodeHapDirectToTexture(AVPacket* packet, GPUTextureFrameBuffer& textureBuffer) {
+    if (!packet || packet->size == 0) {
+        return false;
+    }
+
+    // Get HAP variant from packet
+    HapVariant variant = hapDecoder_.getVariant(packet->data, packet->size);
+    if (variant == HapVariant::NONE) {
+        LOG_WARNING << "Unknown HAP variant in packet";
+        return false;
+    }
+
+    // Decode HAP packet to DXT textures
+    std::vector<HapDecodedTexture> textures;
+    if (!hapDecoder_.decode(packet->data, packet->size, 
+                            frameInfo_.width, frameInfo_.height, textures)) {
+        return false;
+    }
+
+    if (textures.empty()) {
+        LOG_WARNING << "No textures decoded from HAP packet";
+        return false;
+    }
+
+    // Upload textures based on variant
+    if (variant == HapVariant::HAP_Q_ALPHA) {
+        // Dual texture: YCoCg color + alpha
+        if (textures.size() != 2) {
+            LOG_WARNING << "HAP Q Alpha should have 2 textures, got " << textures.size();
+            return false;
+        }
+
+        // Allocate dual texture if needed
+        if (!textureBuffer.isValid() || textureBuffer.getPlaneType() != TexturePlaneType::HAP_Q_ALPHA) {
+            if (!textureBuffer.allocateHapQAlpha(frameInfo_)) {
+                LOG_WARNING << "Failed to allocate HAP Q Alpha texture";
+                return false;
+            }
+        }
+
+        // Upload both textures
+        if (!textureBuffer.uploadHapQAlphaData(
+                textures[0].data.data(), textures[0].size,
+                textures[1].data.data(), textures[1].size,
+                frameInfo_.width, frameInfo_.height)) {
+            return false;
+        }
+
+        textureBuffer.setHapVariant(HapVariant::HAP_Q_ALPHA);
+        LOG_VERBOSE << "Uploaded HAP Q Alpha frame (color + alpha)";
+    } else {
+        // Single texture: HAP, HAP Q, or HAP Alpha
+        if (textures.size() != 1) {
+            LOG_WARNING << "Single-texture HAP should have 1 texture, got " << textures.size();
+            return false;
+        }
+
+        // Determine OpenGL format from HAP format
+        GLenum glFormat;
+        HapVariant gpuVariant;
+        switch (textures[0].format) {
+            case HapTextureFormat_RGB_DXT1:
+                glFormat = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+                gpuVariant = HapVariant::HAP;
+                break;
+            case HapTextureFormat_RGBA_DXT5:
+                glFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+                gpuVariant = HapVariant::HAP_ALPHA;
+                break;
+            case HapTextureFormat_YCoCg_DXT5:
+                glFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+                gpuVariant = HapVariant::HAP_Q;
+                break;
+            case HapTextureFormat_RGBA_BPTC_UNORM:
+                glFormat = GL_COMPRESSED_RGBA_BPTC_UNORM;
+                gpuVariant = HapVariant::HAP_R;  // HAP R (BPTC/BC7 - best quality + alpha) - UNTESTED
+                break;
+            default:
+                LOG_WARNING << "Unsupported HAP texture format: 0x" << std::hex << textures[0].format;
+                return false;
+        }
+
+        // Allocate texture if needed
+        if (!textureBuffer.isValid() || textureBuffer.getTextureFormat() != glFormat) {
+            if (!textureBuffer.allocate(frameInfo_, glFormat, true)) {
+                LOG_WARNING << "Failed to allocate HAP texture";
+                return false;
+            }
+        }
+
+        // Upload compressed DXT data
+        if (!textureBuffer.uploadCompressedData(
+                textures[0].data.data(), textures[0].size,
+                frameInfo_.width, frameInfo_.height, glFormat)) {
+            return false;
+        }
+
+        textureBuffer.setHapVariant(gpuVariant);
+        LOG_VERBOSE << "Uploaded HAP frame (format=0x" << std::hex << textures[0].format << std::dec << ")";
+    }
+
+    return true;
+}
+#endif
+
+bool HAPVideoInput::decodeWithFFmpegFallback(int64_t frameNumber, GPUTextureFrameBuffer& textureBuffer) {
+    // Use standard readFrame to decode to CPU buffer
+    FrameBuffer cpuBuffer;
+    if (!readFrame(frameNumber, cpuBuffer)) {
+        return false;
+    }
+
+    // Allocate GPU texture if needed
+    if (!textureBuffer.isValid() || textureBuffer.getTextureFormat() != GL_RGBA) {
+        if (!textureBuffer.allocate(frameInfo_, GL_RGBA, false)) {
+            LOG_WARNING << "Failed to allocate fallback texture";
+            return false;
+        }
+    }
+
+    // Upload CPU buffer to GPU as uncompressed RGBA
+    if (!textureBuffer.uploadUncompressedData(
+            cpuBuffer.data(), cpuBuffer.size(),
+            frameInfo_.width, frameInfo_.height, GL_RGBA)) {
+        return false;
+    }
+
+    textureBuffer.setHapVariant(HapVariant::NONE);  // Not a compressed HAP texture
+    LOG_VERBOSE << "Uploaded HAP frame via FFmpeg fallback (uncompressed)";
+    return true;
+}
+
 void HAPVideoInput::cleanup() {
     // Free frame index
     if (frameIndex_) {
@@ -691,6 +888,10 @@ void HAPVideoInput::cleanup() {
     lastDecodedFrameNo_ = -1;
     scanComplete_ = false;
     currentFrame_ = -1;
+    
+#ifdef ENABLE_HAP_DIRECT
+    fallbackWarningShown_ = false;
+#endif
 }
 
 } // namespace videocomposer

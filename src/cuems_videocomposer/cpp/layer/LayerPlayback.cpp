@@ -258,18 +258,26 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
     }
 
     // Check if this is a HAP codec
-    // For HAP, we decode to CPU first (compressed DXT data), then upload to GPU during rendering
-    // This avoids needing OpenGL context during decoding (like mpv does)
     HAPVideoInput* hapInput = dynamic_cast<HAPVideoInput*>(inputSource_.get());
     if (hapInput) {
-        // HAP codec: decode to CPU buffer (compressed DXT data)
-        // We'll upload to GPU during rendering when OpenGL context is available
+#ifdef ENABLE_HAP_DIRECT
+        // HAP with direct texture upload: decode directly to compressed DXT GPU texture
+        if (hapInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
+            frameOnGPU_ = true;
+            LOG_VERBOSE << "Loaded HAP frame " << frameNumber << " to GPU (direct DXT upload)";
+            return true;
+        }
+        // If direct upload fails, fall through to FFmpeg fallback (handled in readFrameToTexture)
+        LOG_WARNING << "HAP direct decode failed for frame " << frameNumber;
+        return false;
+#else
+        // HAP without direct upload: decode to CPU buffer as RGBA (FFmpeg fallback)
         if (hapInput->readFrame(frameNumber, cpuFrameBuffer_)) {
-            frameOnGPU_ = false; // Store in CPU for now, upload during rendering
-            LOG_VERBOSE << "Loaded HAP frame " << frameNumber << " to CPU buffer (uncompressed RGBA)";
+            frameOnGPU_ = false;
             return true;
         }
         return false;
+#endif
     }
     
     // Check if this is VideoFileInput with hardware decoding

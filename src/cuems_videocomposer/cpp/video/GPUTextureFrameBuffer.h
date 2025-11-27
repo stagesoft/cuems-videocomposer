@@ -16,9 +16,22 @@ namespace videocomposer {
  * Texture plane type for multi-plane formats
  */
 enum class TexturePlaneType {
-    SINGLE,      // Single-plane RGB/RGBA
-    YUV_NV12,    // 2 planes: Y (R8) + UV (RG8)
-    YUV_420P     // 3 planes: Y (R8) + U (R8) + V (R8)
+    SINGLE,         // Single-plane RGB/RGBA
+    YUV_NV12,       // 2 planes: Y (R8) + UV (RG8)
+    YUV_420P,       // 3 planes: Y (R8) + U (R8) + V (R8)
+    HAP_Q_ALPHA     // 2 planes: YCoCg DXT5 + Alpha RGTC1 (HAP Q Alpha)
+};
+
+/**
+ * HAP variant types (for texture metadata)
+ */
+enum class HapVariant {
+    NONE = 0,
+    HAP,            // Standard HAP (DXT1)
+    HAP_Q,          // HAP Q (DXT5 YCoCg)
+    HAP_ALPHA,      // HAP Alpha (DXT5 RGBA)
+    HAP_Q_ALPHA,    // HAP Q Alpha (DXT5 YCoCg + RGTC1 Alpha)
+    HAP_R           // HAP R (BPTC/BC7 RGBA - best quality + alpha) - UNTESTED
 };
 
 /**
@@ -75,6 +88,9 @@ public:
 
     // Check if this is a HAP texture (DXT1/DXT5 compressed)
     bool isHAPTexture() const { return isHAP_; }
+    
+    // Get HAP variant
+    HapVariant getHapVariant() const { return hapVariant_; }
 
     // Check if this is a GPU texture (vs CPU buffer)
     bool isGPUTexture() const { return textureIds_[0] != 0; }
@@ -89,6 +105,17 @@ public:
     // data: compressed texture data (DXT1/DXT5)
     // size: size of compressed data in bytes
     bool uploadCompressedData(const uint8_t* data, size_t size, int width, int height, GLenum format);
+    
+    // Allocate HAP Q Alpha dual-texture (YCoCg color + alpha)
+    bool allocateHapQAlpha(const FrameInfo& info);
+    
+    // Upload HAP Q Alpha dual-texture data
+    bool uploadHapQAlphaData(const uint8_t* colorData, size_t colorSize,
+                             const uint8_t* alphaData, size_t alphaSize,
+                             int width, int height);
+    
+    // Set HAP variant
+    void setHapVariant(HapVariant variant) { hapVariant_ = variant; }
 
     // Upload uncompressed texture data (for hardware decoded frames)
     bool uploadUncompressedData(const uint8_t* data, size_t size, int width, int height, GLenum format, int stride = 0);
@@ -119,6 +146,7 @@ private:
     FrameInfo info_;                 // Frame information
     bool isHAP_;                     // True if this is a HAP texture (DXT1/DXT5)
     bool ownsTexture_;               // True if this instance owns the texture (should delete on destruction)
+    HapVariant hapVariant_;          // HAP variant (if isHAP_ is true)
 };
 
 } // namespace videocomposer

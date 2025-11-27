@@ -96,6 +96,28 @@ std::vector<const VideoLayer*> LayerManager::getLayers() const {
 }
 
 void LayerManager::updateAll() {
+    // TODO: PERFORMANCE - Layer-parallel HAP decoding
+    // Currently layers are updated sequentially, which means HAP decode happens
+    // one layer at a time. For 10+ HAP layers, this takes 10-12ms (30-36% of frame budget).
+    //
+    // To achieve 6-7x speedup for multi-layer HAP:
+    // 1. Create a shared DecodeThreadPool (singleton, hardware_concurrency threads)
+    // 2. Submit all layer decode jobs to the pool in parallel
+    // 3. Wait for all decodes to complete before rendering
+    //
+    // Example architecture:
+    //   DecodeThreadPool& pool = DecodeThreadPool::instance();
+    //   for (auto& layer : layers_) {
+    //       pool.enqueue([&layer]() { layer->decodeFrame(); });
+    //   }
+    //   pool.waitAll();
+    //   for (auto& layer : layers_) {
+    //       layer->uploadToGPU();  // GPU uploads must be sequential (OpenGL context)
+    //   }
+    //
+    // Note: GPU texture uploads must remain on main thread (OpenGL context bound).
+    // Only the CPU decode (Snappy decompression) should be parallelized.
+    
     // Collect layers to remove (auto-unload)
     std::vector<int> layersToRemove;
     

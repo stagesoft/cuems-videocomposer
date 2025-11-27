@@ -11,12 +11,15 @@
 #include <GL/gl.h>
 #endif
 
-// HAP uses S3TC compressed textures
+// HAP uses S3TC compressed textures (DXT1/DXT5) and BPTC (BC7) for HAP R
 #ifndef GL_COMPRESSED_RGB_S3TC_DXT1_EXT
 #define GL_COMPRESSED_RGB_S3TC_DXT1_EXT 0x83F0
 #endif
 #ifndef GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
 #define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
+#endif
+#ifndef GL_COMPRESSED_RGBA_BPTC_UNORM
+#define GL_COMPRESSED_RGBA_BPTC_UNORM 0x8E8C
 #endif
 
 namespace videocomposer {
@@ -48,6 +51,7 @@ GPUTextureFrameBuffer::GPUTextureFrameBuffer()
     , textureFormat_(0)
     , isHAP_(false)
     , ownsTexture_(false)
+    , hapVariant_(HapVariant::NONE)
 {
 }
 
@@ -66,6 +70,7 @@ GPUTextureFrameBuffer::GPUTextureFrameBuffer(const GPUTextureFrameBuffer& other)
     , info_(other.info_)
     , isHAP_(other.isHAP_)
     , ownsTexture_(false)  // Copy does NOT own the texture
+    , hapVariant_(other.hapVariant_)
 {
 }
 
@@ -86,6 +91,7 @@ GPUTextureFrameBuffer& GPUTextureFrameBuffer::operator=(const GPUTextureFrameBuf
         info_ = other.info_;
         isHAP_ = other.isHAP_;
         ownsTexture_ = false;  // Copy does NOT own the texture
+        hapVariant_ = other.hapVariant_;
     }
     return *this;
 }
@@ -98,6 +104,7 @@ GPUTextureFrameBuffer::GPUTextureFrameBuffer(GPUTextureFrameBuffer&& other) noex
     , info_(other.info_)
     , isHAP_(other.isHAP_)
     , ownsTexture_(other.ownsTexture_)  // Take ownership from other
+    , hapVariant_(other.hapVariant_)
 {
     // Clear other so it doesn't delete the texture
     other.textureIds_[0] = 0;
@@ -108,6 +115,7 @@ GPUTextureFrameBuffer::GPUTextureFrameBuffer(GPUTextureFrameBuffer&& other) noex
     other.textureFormat_ = 0;
     other.isHAP_ = false;
     other.ownsTexture_ = false;
+    other.hapVariant_ = HapVariant::NONE;
 }
 
 GPUTextureFrameBuffer& GPUTextureFrameBuffer::operator=(GPUTextureFrameBuffer&& other) noexcept {
@@ -127,6 +135,7 @@ GPUTextureFrameBuffer& GPUTextureFrameBuffer::operator=(GPUTextureFrameBuffer&& 
         info_ = other.info_;
         isHAP_ = other.isHAP_;
         ownsTexture_ = other.ownsTexture_;
+        hapVariant_ = other.hapVariant_;
         
         // Clear other so it doesn't delete the texture
         other.textureIds_[0] = 0;
@@ -137,6 +146,7 @@ GPUTextureFrameBuffer& GPUTextureFrameBuffer::operator=(GPUTextureFrameBuffer&& 
         other.textureFormat_ = 0;
         other.isHAP_ = false;
         other.ownsTexture_ = false;
+        other.hapVariant_ = HapVariant::NONE;
     }
     return *this;
 }
@@ -235,6 +245,7 @@ void GPUTextureFrameBuffer::release() {
     textureFormat_ = 0;
     isHAP_ = false;
     ownsTexture_ = false;
+    hapVariant_ = HapVariant::NONE;
 }
 
 GLuint GPUTextureFrameBuffer::getTextureId(int plane) const {
@@ -528,6 +539,99 @@ bool GPUTextureFrameBuffer::setExternalNV12Textures(GLuint texY, GLuint texUV, c
     info_ = info;
     isHAP_ = false;
     ownsTexture_ = false;  // Don't own these textures - VaapiInterop owns them
+    hapVariant_ = HapVariant::NONE;
+    
+    return true;
+}
+
+bool GPUTextureFrameBuffer::allocateHapQAlpha(const FrameInfo& info) {
+    // Release old texture if we own it
+    if (ownsTexture_) {
+        release();
+    }
+    
+    info_ = info;
+    planeType_ = TexturePlaneType::HAP_Q_ALPHA;
+    isHAP_ = true;
+    ownsTexture_ = true;
+    hapVariant_ = HapVariant::HAP_Q_ALPHA;
+    numPlanes_ = 2;
+    
+    LOG_VERBOSE << "GPUTextureFrameBuffer: Allocating HAP Q Alpha dual-texture (width=" << info.width 
+               << ", height=" << info.height << ")";
+    
+    // Generate textures for both planes
+    glGenTextures(2, textureIds_);
+    if (!checkGLError("glGenTextures(HAP Q Alpha)")) {
+        return false;
+    }
+    
+    // Setup first texture (YCoCg DXT5)
+    glBindTexture(GL_TEXTURE_2D, textureIds_[0]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (!checkGLError("glTexParameteri(HAP Q Alpha color)")) {
+        release();
+        return false;
+    }
+    
+    // Setup second texture (Alpha RGTC1)
+    glBindTexture(GL_TEXTURE_2D, textureIds_[1]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (!checkGLError("glTexParameteri(HAP Q Alpha alpha)")) {
+        release();
+        return false;
+    }
+    
+    glBindTexture(GL_TEXTURE_2D, 0);
+    
+    LOG_VERBOSE << "GPUTextureFrameBuffer: HAP Q Alpha dual-texture allocated successfully";
+    return true;
+}
+
+bool GPUTextureFrameBuffer::uploadHapQAlphaData(const uint8_t* colorData, size_t colorSize,
+                                                const uint8_t* alphaData, size_t alphaSize,
+                                                int width, int height) {
+    if (textureIds_[0] == 0 || textureIds_[1] == 0) {
+        LOG_ERROR << "GPUTextureFrameBuffer: No HAP Q Alpha textures allocated";
+        return false;
+    }
+    
+    if (!colorData || !alphaData || colorSize == 0 || alphaSize == 0) {
+        LOG_ERROR << "GPUTextureFrameBuffer: Invalid HAP Q Alpha data";
+        return false;
+    }
+    
+    // Upload YCoCg color texture (DXT5)
+    glBindTexture(GL_TEXTURE_2D, textureIds_[0]);
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT,
+                           width, height, 0,
+                           static_cast<GLsizei>(colorSize), colorData);
+    if (!checkGLError("glCompressedTexImage2D(HAP Q Alpha color)")) {
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return false;
+    }
+    
+    // Upload alpha texture (RGTC1/BC4)
+    glBindTexture(GL_TEXTURE_2D, textureIds_[1]);
+    // GL_COMPRESSED_RED_RGTC1 = 0x8DBB (same as HapTextureFormat_A_RGTC1)
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, 0x8DBB,
+                           width, height, 0,
+                           static_cast<GLsizei>(alphaSize), alphaData);
+    if (!checkGLError("glCompressedTexImage2D(HAP Q Alpha alpha)")) {
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return false;
+    }
+    
+    glBindTexture(GL_TEXTURE_2D, 0);
+    
+    LOG_VERBOSE << "GPUTextureFrameBuffer: Uploaded HAP Q Alpha data (color=" << colorSize 
+               << " bytes, alpha=" << alphaSize << " bytes)";
     
     return true;
 }

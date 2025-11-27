@@ -9,6 +9,10 @@
 #include <memory>
 #include <cstdint>
 
+#ifdef ENABLE_HAP_DIRECT
+#include "../hap/HapDecoder.h"
+#endif
+
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -75,6 +79,15 @@ private:
     void refineHAPVariantFromFrame(AVFrame* frame);
     int64_t parsePTSFromFrame(AVFrame* frame);
     void cleanup();
+    
+#ifdef ENABLE_HAP_DIRECT
+    // Direct HAP decoding methods (Vidvox SDK)
+    bool decodeHapDirectToTexture(AVPacket* packet, GPUTextureFrameBuffer& textureBuffer);
+    bool readRawPacket(int64_t frameNumber, AVPacket* packet);
+#endif
+    
+    // FFmpeg fallback methods
+    bool decodeWithFFmpegFallback(int64_t frameNumber, GPUTextureFrameBuffer& textureBuffer);
 
     // Media decoder module
     cuems_mediadecoder::MediaFileReader mediaReader_;
@@ -112,6 +125,12 @@ private:
     // Internal state
     bool ready_;
     AVRational frameRateQ_;
+    
+#ifdef ENABLE_HAP_DIRECT
+    // HAP direct decoding
+    HapDecoder hapDecoder_;
+    bool fallbackWarningShown_;
+#endif
 };
 
 } // namespace videocomposer

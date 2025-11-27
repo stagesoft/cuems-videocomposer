@@ -5,6 +5,7 @@
 #include "../input/HAPVideoInput.h"
 #include "../input/InputSource.h"
 #include "VideoShaders.h"
+#include "HapShaders.h"
 #include <GL/glew.h>  // Must be included before GL/gl.h
 extern "C" {
 #ifndef HAVE_GL
@@ -731,16 +732,51 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
             shader->setUniform("uTexU", 1);   // Texture unit 1
             shader->setUniform("uTexV", 2);   // Texture unit 2
             
-        } else {
-            // RGBA/single-plane format (HAP, decompressed frames)
-            shader = (properties.cornerDeform.enabled && 
-                     properties.cornerDeform.highQuality && 
-                     rgbaShaderHQ_) 
-                    ? rgbaShaderHQ_.get() 
-                    : rgbaShader_.get();
+        } else if (planeType == TexturePlaneType::HAP_Q_ALPHA && hapQAlphaShader_) {
+            // HAP Q Alpha (dual texture: YCoCg color + alpha)
+            shader = hapQAlphaShader_.get();
+            
+            // Bind YCoCg color texture to unit 0
+            glActiveTexture(GL_TEXTURE0);
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, gpuFrame.getTextureId(0));
+            
+            // Bind alpha texture to unit 1
+            glActiveTexture(GL_TEXTURE1);
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, gpuFrame.getTextureId(1));
+            
+            // Reset to texture unit 0
+            glActiveTexture(GL_TEXTURE0);
             
             shader->use();
-            shader->setUniform("uTexture", 0);  // Texture unit 0
+            shader->setUniform("uTexture", 0);       // YCoCg texture unit 0
+            shader->setUniform("uTextureAlpha", 1);  // Alpha texture unit 1
+            
+        } else {
+            // RGBA/single-plane format (HAP, HAP Alpha, decompressed frames)
+            // Check if this is HAP Q (YCoCg format)
+            bool isHAP = gpuFrame.isHAPTexture();
+            HapVariant variant = gpuFrame.getHapVariant();
+            
+            if (isHAP && variant == HapVariant::HAP_Q && hapQShader_) {
+                // HAP Q: YCoCg DXT5 (single texture) - needs YCoCg→RGB conversion
+                LOG_VERBOSE << "Using HAP Q shader (YCoCg→RGB conversion)";
+                shader = hapQShader_.get();
+                shader->use();
+                shader->setUniform("uTexture", 0);  // Texture unit 0
+            } else {
+                // Standard RGBA/HAP/HAP Alpha/HAP R (BPTC RGBA renders like standard RGBA)
+                // NOTE: HAP R support is UNTESTED - needs verification with actual HAP R files
+                shader = (properties.cornerDeform.enabled && 
+                         properties.cornerDeform.highQuality && 
+                         rgbaShaderHQ_) 
+                        ? rgbaShaderHQ_.get() 
+                        : rgbaShader_.get();
+                
+                shader->use();
+                shader->setUniform("uTexture", 0);  // Texture unit 0
+            }
         }
         
         shader->setUniform("uOpacity", properties.opacity);
@@ -1122,6 +1158,20 @@ bool OpenGLRenderer::initShaders() {
         return false;
     }
     
+    // Create HAP Q shader (YCoCg→RGB conversion)
+    hapQShader_ = std::make_unique<ShaderProgram>();
+    if (!hapQShader_->createFromSource(HAP_VERTEX_SHADER, HAP_Q_FRAGMENT_SHADER)) {
+        LOG_WARNING << "Failed to create HAP Q shader, HAP Q videos will use fallback";
+        hapQShader_.reset();
+    }
+    
+    // Create HAP Q Alpha shader (dual texture: YCoCg + alpha)
+    hapQAlphaShader_ = std::make_unique<ShaderProgram>();
+    if (!hapQAlphaShader_->createFromSource(HAP_VERTEX_SHADER, HAP_Q_ALPHA_FRAGMENT_SHADER)) {
+        LOG_WARNING << "Failed to create HAP Q Alpha shader, HAP Q Alpha videos will use fallback";
+        hapQAlphaShader_.reset();
+    }
+    
     LOG_VERBOSE << "All video shaders compiled successfully";
     return true;
 }
@@ -1131,6 +1181,8 @@ void OpenGLRenderer::cleanupShaders() {
     rgbaShaderHQ_.reset();
     nv12Shader_.reset();
     yuv420pShader_.reset();
+    hapQShader_.reset();
+    hapQAlphaShader_.reset();
 }
 
 void OpenGLRenderer::computeMVPMatrix(float* mvp, float x, float y, float width, float height,
