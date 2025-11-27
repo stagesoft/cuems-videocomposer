@@ -602,8 +602,17 @@ bool VideoFileInput::openHardwareCodec() {
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
-        LOG_WARNING << "Failed to open hardware decoder " << hwCodecName 
-                    << ": " << errbuf << " (error code: " << ret << "), falling back to software";
+        
+        // Provide more helpful error messages for specific codecs
+        if (codecId == AV_CODEC_ID_AV1 && hwDecoderType_ == HardwareDecoder::Type::CUDA) {
+            LOG_WARNING << "AV1 CUDA hardware decoding not supported by this GPU. "
+                        << "AV1 CUDA requires Ada Lovelace architecture (RTX 40 series or newer). "
+                        << "Falling back to software decoding.";
+        } else {
+            LOG_WARNING << "Failed to open hardware decoder " << hwCodecName 
+                        << ": " << errbuf << " (error code: " << ret << "), falling back to software";
+        }
+        
         avcodec_free_context(&codecCtx_);
         codecCtx_ = nullptr;
         av_buffer_unref(&hwDeviceCtx_);

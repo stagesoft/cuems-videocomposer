@@ -5,6 +5,7 @@
 #include "../layer/LayerManager.h"
 #include "../osd/OSDManager.h"
 #include "../osd/OSDRenderer.h"
+#include "../input/HardwareDecoder.h"
 #include "../utils/Logger.h"
 
 #include <wayland-client.h>
@@ -669,11 +670,58 @@ bool WaylandDisplay::initVAAPI() {
         return false;
     }
     
+    // Set up libva error/info callbacks to route through our Logger (like mpv does)
+    // This suppresses libva stderr messages and routes them through our logging system
+    vaSetErrorCallback(vaDisplay_, [](void* context, const char* msg) {
+        // Check if a hardware decoder is available - if so, suppress the error (just normal probing)
+        HardwareDecoder::Type hwDecoder = HardwareDecoder::detectAvailable();
+        bool hwDecoderAvailable = (hwDecoder != HardwareDecoder::Type::NONE);
+        
+        // If another hardware decoder is available, completely suppress the error
+        // It's expected when probing and not an actual problem
+        if (hwDecoderAvailable) {
+            return; // Don't log anything - just suppress
+        }
+        
+        // No hardware decoder available - log as error
+        Logger& logger = Logger::getInstance();
+        std::string message = std::string("libva: ") + msg;
+        // Remove trailing newline if present
+        if (!message.empty() && message.back() == '\n') {
+            message.pop_back();
+        }
+        if (!logger.isQuiet() && logger.getLevel() >= Logger::ERROR) {
+            logger.error(message);
+        }
+    }, nullptr);
+    
+    vaSetInfoCallback(vaDisplay_, [](void* context, const char* msg) {
+        // Route libva info messages through our Logger (verbose level)
+        Logger& logger = Logger::getInstance();
+        if (!logger.isQuiet() && logger.getLevel() >= Logger::VERBOSE) {
+            std::string message = std::string("libva: ") + msg;
+            // Remove trailing newline if present
+            if (!message.empty() && message.back() == '\n') {
+                message.pop_back();
+            }
+            logger.verbose(message);
+        }
+    }, nullptr);
+    
     // Initialize VAAPI
+    // Check if a hardware decoder is available - if so, VAAPI failures are normal (just probing)
+    HardwareDecoder::Type hwDecoder = HardwareDecoder::detectAvailable();
+    bool hwDecoderAvailable = (hwDecoder != HardwareDecoder::Type::NONE);
+    
     int majorVer, minorVer;
     VAStatus status = vaInitialize(vaDisplay_, &majorVer, &minorVer);
     if (status != VA_STATUS_SUCCESS) {
-        LOG_WARNING << "vaInitialize failed: " << vaErrorStr(status);
+        // If another hardware decoder is available, this is just normal probing
+        if (hwDecoderAvailable) {
+            LOG_INFO << "VAAPI initialization failed (probing): " << vaErrorStr(status);
+        } else {
+            LOG_WARNING << "vaInitialize failed: " << vaErrorStr(status);
+        }
         vaDisplay_ = nullptr;
         close(vaDrmFd_);
         vaDrmFd_ = -1;

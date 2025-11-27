@@ -497,7 +497,8 @@ class CodecFormatTest:
             analysis["success"] = True
         
         # Extract errors and warnings
-        # Filter out false positives (log messages that contain "error" but aren't actual errors)
+        # Only count lines that are actually marked as [ERROR] or [WARNING]
+        # Don't count [INFO] or [VERBOSE] lines that just happen to contain "error" or "failed"
         false_positive_errors = [
             "going to open midi port",  # Just a log message
             "egl extensions",  # Verbose output, not an error
@@ -507,10 +508,15 @@ class CodecFormatTest:
             # Skip false positive error messages
             if any(fp in line_lower for fp in false_positive_errors):
                 continue
-            if "error" in line_lower or "failed" in line_lower:
+            
+            # Only count actual ERROR or WARNING log levels
+            # [INFO] and [VERBOSE] messages are not errors, even if they contain "error" or "failed"
+            if "[error]" in line_lower:
                 analysis["errors"].append(line)
-            elif "warning" in line_lower:
+            elif "[warning]" in line_lower:
                 analysis["warnings"].append(line)
+            # Don't count lines that just contain "error" or "failed" if they're INFO/VERBOSE
+            # (those are informational messages, not actual errors)
         
         # If no errors and process ran, consider it successful (even if we couldn't detect path)
         if not analysis["errors"] and result.get("returncode") in [0, -15, -9]:  # 0=success, -15=TERM, -9=KILL

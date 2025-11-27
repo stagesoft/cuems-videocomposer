@@ -699,6 +699,11 @@ if(BUILD_TESTS)
     
     # Link OpenGL if available
     if(PLATFORM_LINUX)
+        # Link X11 libraries (needed for HardwareDecoder VAAPI detection)
+        if(X11_FOUND)
+            target_link_libraries(cuems_videocomposer_test ${X11_LIBRARIES})
+        endif()
+        
         find_library(GL_LIBRARY GL)
         if(GL_LIBRARY)
             target_link_libraries(cuems_videocomposer_test ${GL_LIBRARY})
