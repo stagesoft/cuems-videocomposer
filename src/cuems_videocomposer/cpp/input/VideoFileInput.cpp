@@ -1192,6 +1192,13 @@ bool VideoFileInput::seek(int64_t frameNumber) {
     return seekToFrame(targetFrame);
 }
 
+void VideoFileInput::resetSeekState() {
+    // Reset internal tracking to force next seek to actually perform the seek
+    // even if seeking to the same frame number (used for MTC full frame SYSEX)
+    lastDecodedPTS_ = -1;
+    lastDecodedFrameNo_ = -1;
+}
+
 bool VideoFileInput::seekToFrame(int64_t frameNumber) {
     if (frameNumber < 0 || frameNumber >= frameCount_ || !frameIndex_) {
         return false;

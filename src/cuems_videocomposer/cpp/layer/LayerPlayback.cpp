@@ -1,7 +1,7 @@
 #include "LayerPlayback.h"
 #include "../utils/Logger.h"
 #include "../utils/SMPTEUtils.h"
-#include "../sync/MIDISyncSource.h"
+#include "../sync/SyncSource.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/VideoFileInput.h"
 #include <algorithm>
@@ -206,15 +206,41 @@ void LayerPlayback::updateFromSyncSource() {
             }
         }
         
+        // Check if a full frame SYSEX was received (indicates explicit position command)
+        // Full frames require immediate seek/update regardless of frame number change
+        // This works with any SyncSource (including FramerateConverterSyncSource wrapper)
+        bool fullFrameReceived = syncSource_->wasFullFrameReceived();
+        if (fullFrameReceived) {
+            LOG_INFO << "MTC: Full frame SYSEX received - forcing seek to frame " << adjustedFrame;
+        }
+        
         // Match xjadeo's approach: always try to load the frame if it changed
         // xjadeo calls display_frame() every loop iteration, but only processes if frame changed
         // We do the same: poll MTC every update, but only load if frame changed
         // The seek logic inside loadFrame/readFrame will handle optimization
         // (no seek for consecutive frames, etc.)
-        // xjadeo doesn't check for full SYSEX frames - it just uses the frame number
-        // and lets seek_frame() decide whether to seek based on frame relationships
-        if (adjustedFrame != lastSyncFrame_) {
-            if (loadFrame(adjustedFrame)) {
+        // However, full SYSEX frames are explicit position commands and must always seek
+        // even if the frame number is the same (e.g., 00:00:00:00 to reset position)
+        if (adjustedFrame != lastSyncFrame_ || fullFrameReceived) {
+            if (fullFrameReceived) {
+                // Full frame received - force a seek first, then load
+                // This ensures we jump to the exact position even if frame number is same
+                // Reset seek state to bypass codec optimizations (needed for H264 with indexing)
+                LOG_VERBOSE << "MTC: Full frame - forcing seek to frame " << adjustedFrame;
+                if (inputSource_) {
+                    inputSource_->resetSeekState();  // Force actual seek even if same frame
+                }
+                if (inputSource_ && inputSource_->seek(adjustedFrame)) {
+                    if (loadFrame(adjustedFrame)) {
+                        currentFrame_ = adjustedFrame;
+                        lastSyncFrame_ = adjustedFrame;
+                    } else {
+                        LOG_WARNING << "Failed to load frame " << adjustedFrame << " after full frame seek";
+                    }
+                } else {
+                    LOG_WARNING << "Failed to seek to frame " << adjustedFrame << " for full frame update";
+                }
+            } else if (loadFrame(adjustedFrame)) {
                 // Normal update - loadFrame() handles seek optimization internally
                 // (no seek for consecutive frames, seeks for backwards/non-consecutive)
                 currentFrame_ = adjustedFrame;

@@ -50,6 +50,7 @@ public:
     bool isReady() const override;
     bool readFrame(int64_t frameNumber, FrameBuffer& buffer) override;
     bool seek(int64_t frameNumber) override;
+    void resetSeekState() override;
     FrameInfo getFrameInfo() const override;
     int64_t getCurrentFrame() const override;
     CodecType detectCodec() const override;

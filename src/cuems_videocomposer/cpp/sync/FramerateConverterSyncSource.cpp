@@ -96,5 +96,12 @@ double FramerateConverterSyncSource::getFramerate() const {
     return wrappedSyncSource_->getFramerate();
 }
 
+bool FramerateConverterSyncSource::wasFullFrameReceived() {
+    if (!wrappedSyncSource_) {
+        return false;
+    }
+    return wrappedSyncSource_->wasFullFrameReceived();
+}
+
 } // namespace videocomposer
 

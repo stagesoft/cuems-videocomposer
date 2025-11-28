@@ -164,5 +164,16 @@ bool MIDISyncSource::chooseDriver(const std::string& driverName) {
     return false;
 }
 
+bool MIDISyncSource::wasFullFrameReceived() {
+#ifdef HAVE_MTCRECEIVER
+    MtcReceiverMIDIDriver* mtcDriver = dynamic_cast<MtcReceiverMIDIDriver*>(driver_.get());
+    if (mtcDriver) {
+        return mtcDriver->wasFullFrameReceived();
+    }
+#endif
+    // Other drivers don't support full frame detection yet
+    return false;
+}
+
 } // namespace videocomposer
 

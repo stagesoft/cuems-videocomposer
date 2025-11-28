@@ -287,6 +287,13 @@ bool HAPVideoInput::seek(int64_t frameNumber) {
     return seekToFrame(frameNumber);
 }
 
+void HAPVideoInput::resetSeekState() {
+    // Reset internal tracking to force next seek to actually perform the seek
+    // even if seeking to the same frame number (used for MTC full frame SYSEX)
+    lastDecodedPTS_ = -1;
+    lastDecodedFrameNo_ = -1;
+}
+
 bool HAPVideoInput::seekToFrame(int64_t frameNumber) {
     if (!formatCtx_ || videoStream_ < 0) {
         return false;

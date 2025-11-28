@@ -72,6 +72,12 @@ public:
      */
     bool chooseDriver(const std::string& driverName);
     
+    /**
+     * Check if a full frame SYSEX was just received (indicates position jump/seek needed)
+     * @return true if a full frame was received since last check
+     */
+    bool wasFullFrameReceived() override;
+    
 private:
     std::unique_ptr<MIDIDriver> driver_;
     MTCDecoder mtcDecoder_;

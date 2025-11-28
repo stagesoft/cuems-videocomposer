@@ -57,6 +57,13 @@ public:
      * @return Framerate in frames per second, or -1.0 if unknown/variable
      */
     virtual double getFramerate() const { return -1.0; }
+    
+    /**
+     * Check if a full frame SYSEX was just received (indicates position jump/seek needed)
+     * This is used by MTC sync sources to signal that an explicit position command was received.
+     * @return true if a full frame was received since last check
+     */
+    virtual bool wasFullFrameReceived() { return false; }
 };
 
 } // namespace videocomposer

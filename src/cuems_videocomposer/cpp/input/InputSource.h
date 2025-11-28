@@ -50,6 +50,14 @@ public:
      * @return true on success, false on failure
      */
     virtual bool seek(int64_t frameNumber) = 0;
+    
+    /**
+     * Reset internal seek optimization state
+     * Call this before seek() to force a full seek even if the frame number
+     * is the same as the current position. Used for MTC full frame SYSEX
+     * position commands where we must seek regardless of current position.
+     */
+    virtual void resetSeekState() {}
 
     /**
      * Get information about the video source

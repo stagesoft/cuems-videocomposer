@@ -37,11 +37,15 @@ public:
     void setVerbose(bool verbose);
     void setClockAdjustment(bool enable);
     
+    // Check if a full frame SYSEX was just received (indicates position jump/seek needed)
+    bool wasFullFrameReceived();
+    
 private:
     std::unique_ptr<MtcReceiver> mtcReceiver_;
     double framerate_;
     bool verbose_;
     bool clockAdjustment_;
+    bool lastFullFrameReceived_;
     mutable std::mutex mutex_;
 };
 

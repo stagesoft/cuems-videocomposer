@@ -43,6 +43,11 @@ public:
      * @param inputSource New input source (can be nullptr)
      */
     void setInputSource(InputSource* inputSource) { inputSource_ = inputSource; }
+    
+    /**
+     * Check if a full frame SYSEX was just received - delegates to wrapped sync source
+     */
+    bool wasFullFrameReceived() override;
 
 private:
     SyncSource* wrappedSyncSource_;  // Non-owning reference to sync source
