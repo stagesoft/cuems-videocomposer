@@ -17,6 +17,7 @@ MtcReceiverMIDIDriver::MtcReceiverMIDIDriver()
     , framerate_(25.0)
     , verbose_(false)
     , clockAdjustment_(false)
+    , lastFullFrameReceived_(false)
 {
 }
 
@@ -126,16 +127,25 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
         return -1;
     }
     
+    // Check if a full frame was just received
+    bool fullFrameReceived = MtcReceiver::wasLastUpdateFullFrame;
+    
     // Get current timecode frame directly (like xjadeo - discrete updates)
     // xjadeo uses smpte_to_frame() which calculates: frame = f + fps * (s + 60*m + 3600*h)
     // This matches xjadeo's approach: only update when complete timecode is received
     // No incremental updates, no backwards jumps from mtcHead resets
     MtcFrame curFrame = MtcReceiver::getCurFrame();
     
-    // Check if we have valid timecode by checking mtcHead (mtcreceiver sets this when timecode is received)
-    // Note: curFrame can be 00:00:00:00 which is valid, so we check mtcHead instead
+    // For detecting resync vs seek: remember last frame we reported
+    static int64_t lastReportedFrame = -1;
+    
+    // Check if we have valid timecode
+    // Note: mtcHeadMs == 0 can be valid for timecode 00:00:00:00
+    // So we also accept full frames (explicit position commands) even if mtcHead is 0
     long int mtcHeadMs = MtcReceiver::mtcHead.load();
-    if (mtcHeadMs == 0) {
+    if (mtcHeadMs == 0 && !fullFrameReceived) {
+        // No timecode received yet (never had any MTC data)
+        // But if a full frame was just received, process it even if it's 00:00:00:00
         return -1;
     }
     
@@ -167,12 +177,49 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     int64_t totalSeconds = curFrame.hours * 3600 + curFrame.minutes * 60 + curFrame.seconds;
     int64_t frame = curFrame.frames + static_cast<int64_t>(fps * totalSeconds);
     
+    // Detect if full frame is a RESYNC (periodic, position matches) vs SEEK (position jump)
+    // Resync full frames are sent periodically for network reliability (rtpmidid)
+    // and should NOT trigger a forced seek if we're already at the right position
+    bool isSeekFullFrame = false;
+    if (fullFrameReceived) {
+        // Check if the full frame position matches where we expect to be
+        // Allow tolerance of 2 frames (accounts for MTC 8-quarter-frame delay)
+        int64_t frameDiff = std::abs(frame - lastReportedFrame);
+        if (lastReportedFrame < 0 || frameDiff > 2) {
+            // Position jump or first full frame - this is a SEEK
+            isSeekFullFrame = true;
+            printf("MTC: Full frame SEEK - frame=%lld (was %lld), timecode=%s\n", 
+                   (long long)frame, (long long)lastReportedFrame, curFrame.toString().c_str());
+            fflush(stdout);
+            if (verbose_) {
+                LOG_INFO << "MTC: Full frame SEEK to frame " << frame 
+                         << " (" << curFrame.toString() << ")";
+            }
+        } else {
+            // Position matches - this is just a RESYNC for network reliability
+            // Don't trigger seek, just update timing
+            if (verbose_) {
+                static int resyncCount = 0;
+                if (++resyncCount % 10 == 0) {  // Log every 10th resync (~20 sec)
+                    LOG_INFO << "MTC: Full frame resync at frame " << frame 
+                             << " (network keepalive)";
+                }
+            }
+        }
+    }
+    
+    // Update last reported frame
+    lastReportedFrame = frame;
+    
     // Return frame even if not "running" - we have valid MTC data
     // The rolling state will be determined separately
     
-    if (verbose_ && frame >= 0) {
-        // Log frame updates periodically
-        LOG_INFO << "MTC: frame " << frame << " (fps=" << fps << ", rolling)";
+    if (verbose_ && frame >= 0 && !fullFrameReceived) {
+        // Log frame updates periodically (but not for full frames, already logged above)
+        static int logCounter = 0;
+        if (++logCounter % 60 == 0) {
+            LOG_INFO << "MTC: frame " << frame << " (fps=" << fps << ", rolling)";
+        }
     }
     
     // Apply clock adjustment if enabled
@@ -180,6 +227,10 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
         // mtcreceiver already handles timing internally
         // We might need to add adjustment here if needed
     }
+    
+    // Store the full frame flag so it can be checked by the sync source
+    // Only mark as "full frame received" if it's a SEEK, not a resync
+    lastFullFrameReceived_ = isSeekFullFrame;
     
     return frame;
 }
@@ -197,6 +248,18 @@ void MtcReceiverMIDIDriver::setVerbose(bool verbose) {
 void MtcReceiverMIDIDriver::setClockAdjustment(bool enable) {
     std::lock_guard<std::mutex> lock(mutex_);
     clockAdjustment_ = enable;
+}
+
+bool MtcReceiverMIDIDriver::wasFullFrameReceived() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bool result = lastFullFrameReceived_;
+    // Reset the flag after checking (one-time notification)
+    if (result) {
+        lastFullFrameReceived_ = false;
+        // Also reset the mtcreceiver flag so it doesn't trigger again
+        MtcReceiver::wasLastUpdateFullFrame = false;
+    }
+    return result;
 }
 
 } // namespace videocomposer
