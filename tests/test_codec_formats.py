@@ -508,29 +508,34 @@ class CodecFormatTest:
                                     # Pass 1 started
                                     print(f"    Indexing Pass 1 started...")
                                 
-                                # Pass 2: "Indexing video (Pass 2: Verifying keyframes)..."
-                                # Pass 2 completion is detected when Pass 3 starts
-                                if "pass 2:" in line_lower and "verifying keyframes" in line_lower:
+                                # Pass 2: "Pass 2 complete: verified ..." or "Indexing video (Pass 2: Verifying keyframes)..."
+                                if "pass 2 complete" in line_lower:
+                                    pass2_complete = True
+                                    print(f"    ✓ Indexing Pass 2 complete")
+                                elif "pass 2:" in line_lower and "verifying keyframes" in line_lower:
                                     print(f"    Indexing Pass 2 started...")
-                                    # Pass 2 is complete when we see Pass 3 start
                                 
-                                # Pass 3: "Indexing video (Pass 3: Creating seek table)..."
-                                if "pass 3:" in line_lower and ("creating seek table" in line_lower or "creating index" in line_lower):
-                                    # Pass 3 started means Pass 2 is complete
+                                # Pass 3: "Pass 3 complete: seek table created" or "Indexing video (Pass 3: Creating seek table)..."
+                                if "pass 3 complete" in line_lower:
+                                    pass3_complete = True
+                                    print(f"    ✓ Indexing Pass 3 complete")
+                                    # Pass 3 can't complete without Pass 2, so mark it complete if we missed the message
                                     if not pass2_complete:
                                         pass2_complete = True
-                                        print(f"    ✓ Indexing Pass 2 complete")
-                                    pass3_complete = True
-                                    print(f"    ✓ Indexing Pass 3 detected")
-                                elif "creating index:" in line_lower or "creating seek table" in line_lower:
-                                    # Alternative format for Pass 3
+                                        print(f"    ✓ Indexing Pass 2 complete (inferred from Pass 3)")
+                                    # When Pass 3 completes, all indexing is done
+                                    if pass1_complete:
+                                        indexing_complete = True
+                                        print(f"  ✓ All indexing passes complete")
+                                        break
+                                elif "pass 3:" in line_lower and ("creating seek table" in line_lower or "creating index" in line_lower):
+                                    # Pass 3 started - Pass 2 must be complete by now
                                     if not pass2_complete:
                                         pass2_complete = True
-                                        print(f"    ✓ Indexing Pass 2 complete")
-                                    pass3_complete = True
-                                    print(f"    ✓ Indexing Pass 3 detected")
+                                        print(f"    ✓ Indexing Pass 2 complete (inferred from Pass 3 start)")
+                                    print(f"    Indexing Pass 3 started...")
                                 
-                                # Check for scan complete or indexing complete messages
+                                # Check for scan complete or indexing complete messages (fallback)
                                 if any(phrase in line_lower for phrase in [
                                     "scan complete",
                                     "indexing complete",
@@ -555,6 +560,12 @@ class CodecFormatTest:
                                         indexing_complete = True
                                         print(f"  ✓ Indexing complete")
                                         break
+                                
+                                # If Pass 3 is complete, indexing is done (even if we missed some messages)
+                                if pass3_complete and pass1_complete:
+                                    indexing_complete = True
+                                    print(f"  ✓ All indexing passes complete")
+                                    break
                                 
                                 # If no indexing messages after a short time, assume no indexing needed
                                 if time.time() - indexing_start_time > 3.0:
