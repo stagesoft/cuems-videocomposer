@@ -1,6 +1,7 @@
 #include "FrameBuffer.h"
 #include <cstdlib>
 #include <cstring>
+#include <utility>  // for std::swap
 
 extern "C" {
 #include <libavutil/avutil.h>
@@ -41,6 +42,34 @@ FrameBuffer& FrameBuffer::operator=(const FrameBuffer& other) {
         }
     }
     return *this;
+}
+
+FrameBuffer::FrameBuffer(FrameBuffer&& other) noexcept
+    : buffer_(other.buffer_), size_(other.size_), info_(other.info_) {
+    // Take ownership, leave other in valid empty state
+    other.buffer_ = nullptr;
+    other.size_ = 0;
+    other.info_ = {};
+}
+
+FrameBuffer& FrameBuffer::operator=(FrameBuffer&& other) noexcept {
+    if (this != &other) {
+        release();
+        buffer_ = other.buffer_;
+        size_ = other.size_;
+        info_ = other.info_;
+        // Leave other in valid empty state
+        other.buffer_ = nullptr;
+        other.size_ = 0;
+        other.info_ = {};
+    }
+    return *this;
+}
+
+void FrameBuffer::swap(FrameBuffer& other) noexcept {
+    std::swap(buffer_, other.buffer_);
+    std::swap(size_, other.size_);
+    std::swap(info_, other.info_);
 }
 
 FrameBuffer::~FrameBuffer() {

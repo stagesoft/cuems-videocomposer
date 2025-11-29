@@ -569,6 +569,8 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
     src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
     src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
+    src/cuems_videocomposer/cpp/input/LiveInputSource.cpp
+    src/cuems_videocomposer/cpp/input/FFmpegLiveInput.cpp
     src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
     src/cuems_videocomposer/cpp/video/GPUTextureFrameBuffer.cpp
     src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
@@ -691,6 +693,52 @@ endif()
 # Add Wayland protocol sources if Wayland is enabled
 if(HAVE_WAYLAND AND WAYLAND_PROTOCOL_SOURCES)
     list(APPEND CPP_SOURCES ${WAYLAND_PROTOCOL_SOURCES})
+endif()
+
+# NDI SDK detection
+option(ENABLE_NDI "Enable NDI input/output support" ON)
+
+if(ENABLE_NDI)
+    # Find NDI SDK
+    find_path(NDI_INCLUDE_DIR Processing.NDI.Lib.h
+        PATHS 
+            /usr/include
+            /usr/local/include
+            "/opt/NDI SDK for Linux/include"
+            $ENV{NDI_SDK_DIR}/include
+        PATH_SUFFIXES ndi)
+    
+    find_library(NDI_LIBRARY 
+        NAMES ndi ProcessingNDI
+        PATHS
+            /usr/lib
+            /usr/local/lib
+            /usr/lib/x86_64-linux-gnu
+            /usr/local/lib/x86_64-linux-gnu
+            "/opt/NDI SDK for Linux/lib/x86_64-linux-gnu"
+            "/opt/NDI SDK for Linux/lib"
+            $ENV{NDI_SDK_DIR}/lib/x86_64-linux-gnu
+            $ENV{NDI_SDK_DIR}/lib)
+    
+    if(NDI_INCLUDE_DIR AND NDI_LIBRARY)
+        set(NDI_FOUND TRUE)
+        add_definitions(-DHAVE_NDI_SDK)
+        include_directories(${NDI_INCLUDE_DIR})
+        message(STATUS "NDI SDK found: ${NDI_LIBRARY}")
+        message(STATUS "  Include: ${NDI_INCLUDE_DIR}")
+    else()
+        set(NDI_FOUND FALSE)
+        message(WARNING "NDI SDK not found - NDI support disabled")
+        message(STATUS "  Set NDI_SDK_DIR environment variable to NDI SDK location")
+        message(STATUS "  Or install NDI SDK to system paths")
+    endif()
+endif()
+
+# Add NDI input source if NDI SDK is available
+if(NDI_FOUND)
+    list(APPEND CPP_SOURCES
+        src/cuems_videocomposer/cpp/input/NDIVideoInput.cpp
+    )
 endif()
 
 # Create executable
@@ -889,6 +937,18 @@ if(ENABLE_MIDI AND RTMIDI_FOUND)
         src/mtcreceiver
         src/cuemslogger
         ${RTMIDI_INCLUDE_DIRS}
+    )
+endif()
+
+# Link NDI SDK if available
+if(NDI_FOUND)
+    target_link_libraries(cuems-videocomposer ${NDI_LIBRARY})
+    # Set rpath for NDI libraries when installed to private directory
+    # This allows the application to find NDI libraries in /usr/lib/cuems-videocomposer/
+    # at runtime without requiring LD_LIBRARY_PATH
+    set_target_properties(cuems-videocomposer PROPERTIES
+        INSTALL_RPATH "/usr/lib/cuems-videocomposer"
+        BUILD_WITH_INSTALL_RPATH TRUE
     )
 endif()
 

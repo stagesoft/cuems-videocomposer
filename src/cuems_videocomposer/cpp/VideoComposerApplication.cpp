@@ -33,6 +33,10 @@
 #include "display/WaylandDisplay.h"
 #endif
 #include "input/HAPVideoInput.h"
+#include "input/FFmpegLiveInput.h"
+#ifdef HAVE_NDI_SDK
+#include "input/NDIVideoInput.h"
+#endif
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
 #include "layer/LayerManager.h"
@@ -48,6 +52,7 @@
 #include "utils/SMPTEUtils.h"
 #include <iostream>
 #include <chrono>
+#include <algorithm>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -244,7 +249,7 @@ bool VideoComposerApplication::createInitialLayer() {
     }
 
     // Use common method to create input source
-    auto inputSource = createInputSourceFromFile(movieFile);
+    auto inputSource = createInputSource(movieFile);
     if (!inputSource) {
         return false;
     }
@@ -533,6 +538,85 @@ bool VideoComposerApplication::initializeGlobalSyncSource() {
     return true;
 }
 
+std::unique_ptr<InputSource> VideoComposerApplication::createInputSource(const std::string& source) {
+    // Detect source type and create appropriate input
+    
+    // NDI source (ndi://source_name or just source_name for NDI)
+    if (isNDISource(source)) {
+#ifdef HAVE_NDI_SDK
+        auto ndiInput = std::make_unique<NDIVideoInput>();
+        std::string ndiName = source;
+        if (ndiName.find("ndi://") == 0) {
+            ndiName = ndiName.substr(6);  // Remove prefix
+        }
+        if (ndiInput->open(ndiName)) {
+            return ndiInput;
+        }
+        LOG_WARNING << "Failed to open NDI source: " << ndiName;
+        return nullptr;
+#else
+        LOG_ERROR << "NDI SDK not available (compiled without HAVE_NDI_SDK)";
+        return nullptr;
+#endif
+    }
+    
+    // V4L2 device (/dev/video*)
+    if (isV4L2Source(source)) {
+        auto v4l2Input = std::make_unique<FFmpegLiveInput>();
+        v4l2Input->setFormat("v4l2");
+        if (v4l2Input->open(source)) {
+            return v4l2Input;
+        }
+        LOG_WARNING << "Failed to open V4L2 source: " << source;
+        return nullptr;
+    }
+    
+    // Network stream (rtsp://, http://, udp://)
+    if (isNetworkStream(source)) {
+        auto streamInput = std::make_unique<FFmpegLiveInput>();
+        if (streamInput->open(source)) {
+            return streamInput;
+        }
+        LOG_WARNING << "Failed to open network stream: " << source;
+        return nullptr;
+    }
+    
+    // File path - use existing createInputSourceFromFile logic
+    return createInputSourceFromFile(source);
+}
+
+bool VideoComposerApplication::isNDISource(const std::string& source) {
+    // Check if source matches NDI naming pattern or has ndi:// prefix
+    if (source.find("ndi://") == 0) {
+        return true;
+    }
+    
+    // Check if source matches NDI naming pattern: "HOSTNAME (Source Name)"
+    // Or query NDI SDK to see if it's a known source
+#ifdef HAVE_NDI_SDK
+    auto ndiSources = NDIVideoInput::discoverSources(1000);
+    for (const auto& s : ndiSources) {
+        if (s == source) {
+            return true;
+        }
+    }
+#endif
+    
+    return false;
+}
+
+bool VideoComposerApplication::isV4L2Source(const std::string& source) {
+    return source.find("/dev/video") == 0;
+}
+
+bool VideoComposerApplication::isNetworkStream(const std::string& source) {
+    return source.find("rtsp://") == 0 || 
+           source.find("http://") == 0 || 
+           source.find("https://") == 0 ||
+           source.find("udp://") == 0 ||
+           source.find("tcp://") == 0;
+}
+
 std::unique_ptr<InputSource> VideoComposerApplication::createInputSourceFromFile(const std::string& filepath) {
     // Create input source with codec-aware routing
     // Set no-index option before opening (to avoid reopening)
@@ -639,7 +723,7 @@ void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std:
 
 bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, const std::string& filepath) {
     // Create input source
-    auto inputSource = createInputSourceFromFile(filepath);
+    auto inputSource = createInputSource(filepath);
     if (!inputSource) {
         LOG_ERROR << "Failed to create input source from file: " << filepath;
         return false;
@@ -675,7 +759,7 @@ bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const
     }
     
     // Layer exists - load file into it
-    auto inputSource = createInputSourceFromFile(filepath);
+    auto inputSource = createInputSource(filepath);
     if (!inputSource) {
         LOG_ERROR << "Failed to create input source from file: " << filepath;
         return false;

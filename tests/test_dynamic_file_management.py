@@ -37,8 +37,9 @@ except ImportError:
 class DynamicFileManagementTest:
     def __init__(self, videocomposer_bin, video_file1=None, video_file2=None, osc_port=7770, fps=25.0, mtc_port=0, enable_loop=False):
         self.videocomposer_bin = Path(videocomposer_bin)
-        self.video_file1 = Path(video_file1) if video_file1 else None
-        self.video_file2 = Path(video_file2) if video_file2 else None
+        # Store as strings to support NDI sources (not file paths)
+        self.video_file1 = video_file1
+        self.video_file2 = video_file2
         self.osc_port = osc_port
         self.fps = fps
         self.mtc_port = mtc_port
@@ -182,15 +183,41 @@ class DynamicFileManagementTest:
                 print(f"ERROR: Failed to send OSC message: {e}")
             return False
     
+    def is_ndi_source(self, source):
+        """Check if source is an NDI source or other live source (not a file path)."""
+        if not source:
+            return False
+        source_str = str(source)
+        # Check for known live source prefixes
+        if (source_str.startswith("ndi://") or 
+            source_str.startswith("rtsp://") or 
+            source_str.startswith("http://") or 
+            source_str.startswith("https://") or
+            source_str.startswith("udp://") or
+            source_str.startswith("tcp://") or
+            source_str.startswith("/dev/video")):
+            return True
+        # If it's a file that exists, it's definitely a file (not a live source)
+        if Path(source_str).exists() and Path(source_str).is_file():
+            return False
+        # If it doesn't exist as a file, it might be:
+        # - An NDI source name (without ndi:// prefix)
+        # - A network stream URL
+        # - A non-existent file (will be caught by videocomposer)
+        # In any case, skip the file existence check and let videocomposer handle it
+        return True
+    
     def test_layer_load(self, cue_id, video_file):
         """Test /videocomposer/layer/load s s"""
         print(f"\n=== Test: Load layer with file ===")
         print(f"Cue ID: {cue_id}")
         print(f"File: {video_file}")
         
-        if not Path(video_file).exists():
-            print(f"WARNING: Video file not found: {video_file}")
-            return False
+        # Skip file existence check for NDI sources and other live sources
+        if not self.is_ndi_source(video_file):
+            if not Path(video_file).exists():
+                print(f"WARNING: Video file not found: {video_file}")
+                return False
         
         return self.send_osc("/videocomposer/layer/load", video_file, cue_id)
     
@@ -200,9 +227,11 @@ class DynamicFileManagementTest:
         print(f"Cue ID: {cue_id}")
         print(f"File: {video_file}")
         
-        if not Path(video_file).exists():
-            print(f"WARNING: Video file not found: {video_file}")
-            return False
+        # Skip file existence check for NDI sources and other live sources
+        if not self.is_ndi_source(video_file):
+            if not Path(video_file).exists():
+                print(f"WARNING: Video file not found: {video_file}")
+                return False
         
         return self.send_osc(f"/videocomposer/layer/{cue_id}/file", video_file)
     
@@ -253,19 +282,21 @@ class DynamicFileManagementTest:
         """Progressively adjust image controls over time - continuous and smooth."""
         print(f"\n=== Progressive Image Adjustments ({duration} seconds) ===")
         print("Making continuous smooth adjustments to position, scale, rotation, and opacity...")
+        print(f"Update rate: ~60 updates/second for ultra-smooth animation")
         
         start_time = time.time()
-        interval = 0.2  # Adjust every 200ms for smoother animation (~5 updates per second)
+        interval = 0.016  # ~60 FPS (16.67ms) for very smooth animation
         last_log_time = start_time
         log_interval = 2.0  # Log progress every 2 seconds
         
         # Track previous values to only send when changed (reduces OSC traffic)
+        # But use very small thresholds for smoothness
         prev_values = {
             'x1': None, 'y1': None, 'opacity1': None, 'scale1': None, 'rotation1': None,
             'x2': None, 'y2': None, 'opacity2': None, 'scale2': None, 'rotation2': None
         }
         
-        # Counter to alternate which layer we update each frame (reduces simultaneous updates)
+        # Don't alternate layers - update both every frame for maximum smoothness
         frame_counter = 0
         
         while time.time() - start_time < duration:
@@ -278,68 +309,80 @@ class DynamicFileManagementTest:
             cos_val = math.cos(progress * 2 * math.pi)
             sin_val2 = math.sin(progress * 3 * math.pi)  # Different frequency for variety
             cos_val2 = math.cos(progress * 1.5 * math.pi)
+            sin_val3 = math.sin(progress * 1.2 * math.pi)  # Additional frequency for opacity
+            cos_val3 = math.cos(progress * 2.3 * math.pi)
             
-            # Alternate between layers to reduce simultaneous OSC messages
-            update_layer1 = (frame_counter % 2 == 0)
-            update_layer2 = (frame_counter % 2 == 1)
+            # Update both layers every frame for maximum smoothness
+            # Use very small thresholds to allow smooth interpolation
             
-            if update_layer1:
-                # Layer 1 adjustments
-                # Position: move in a circular pattern
-                radius = 100
-                x1 = 200 + int(radius * cos_val)
-                y1 = 150 + int(radius * sin_val)
-                if x1 != prev_values['x1'] or y1 != prev_values['y1']:
-                    self.send_osc(f"/videocomposer/layer/{cue_id_1}/position", x1, y1, verbose=False)
-                    prev_values['x1'] = x1
-                    prev_values['y1'] = y1
-                
-                # Opacity: pulse between 0.5 and 1.0 using sin
-                opacity1 = 0.5 + 0.5 * (0.5 + 0.5 * sin_val)
-                if abs(opacity1 - (prev_values['opacity1'] or 0)) > 0.05:  # Increased threshold
-                    self.send_osc(f"/videocomposer/layer/{cue_id_1}/opacity", opacity1, verbose=False)
-                    prev_values['opacity1'] = opacity1
-                
-                # Scale: oscillate between 0.6 and 1.0 using sin2 for different phase
-                scale1 = 0.6 + 0.4 * (0.5 + 0.5 * sin_val2)
-                if abs(scale1 - (prev_values['scale1'] or 0)) > 0.05:  # Increased threshold
-                    self.send_osc(f"/videocomposer/layer/{cue_id_1}/scale", scale1, scale1, verbose=False)
-                    prev_values['scale1'] = scale1
-                
-                # Rotation: continuous rotation (full 360 degrees over duration)
-                rotation1 = 15.0 + progress * 360.0
-                if abs(rotation1 - (prev_values['rotation1'] or 0)) > 5.0:  # Increased threshold to 5 degrees
-                    self.send_osc(f"/videocomposer/layer/{cue_id_1}/rotation", rotation1, verbose=False)
-                    prev_values['rotation1'] = rotation1
+            # Layer 1 adjustments
+            # Position: move in a smooth circular pattern (use float for precision)
+            radius = 100
+            x1 = 200 + radius * cos_val
+            y1 = 150 + radius * sin_val
+            # Send position every frame for maximum smoothness (OSC uses integers, but frequent updates minimize jumps)
+            # Only skip if position hasn't changed at all (same integer value)
+            x1_int = int(round(x1))
+            y1_int = int(round(y1))
+            if prev_values['x1'] is None or x1_int != int(round(prev_values['x1'])) or y1_int != int(round(prev_values['y1'])):
+                self.send_osc(f"/videocomposer/layer/{cue_id_1}/position", x1_int, y1_int, verbose=False)
+                prev_values['x1'] = x1
+                prev_values['y1'] = y1
             
-            if update_layer2:
-                # Layer 2 adjustments
-                # Position: move in opposite circular pattern with different phase
-                radius2 = 150
-                x2 = 400 + int(radius2 * -cos_val2)
-                y2 = 300 + int(radius2 * -sin_val2)
-                if x2 != prev_values['x2'] or y2 != prev_values['y2']:
-                    self.send_osc(f"/videocomposer/layer/{cue_id_2}/position", x2, y2, verbose=False)
-                    prev_values['x2'] = x2
-                    prev_values['y2'] = y2
-                
-                # Opacity: opposite pulse (between 0.7 and 1.0)
-                opacity2 = 0.7 + 0.3 * (0.5 + 0.5 * -sin_val)
-                if abs(opacity2 - (prev_values['opacity2'] or 0)) > 0.05:  # Increased threshold
-                    self.send_osc(f"/videocomposer/layer/{cue_id_2}/opacity", opacity2, verbose=False)
-                    prev_values['opacity2'] = opacity2
-                
-                # Scale: opposite oscillation (between 1.0 and 1.4)
-                scale2 = 1.0 + 0.4 * (0.5 + 0.5 * -sin_val2)
-                if abs(scale2 - (prev_values['scale2'] or 0)) > 0.05:  # Increased threshold
-                    self.send_osc(f"/videocomposer/layer/{cue_id_2}/scale", scale2, scale2, verbose=False)
-                    prev_values['scale2'] = scale2
-                
-                # Rotation: opposite rotation
-                rotation2 = -10.0 - progress * 360.0
-                if abs(rotation2 - (prev_values['rotation2'] or 0)) > 5.0:  # Increased threshold to 5 degrees
-                    self.send_osc(f"/videocomposer/layer/{cue_id_2}/rotation", rotation2, verbose=False)
-                    prev_values['rotation2'] = rotation2
+            # Opacity: smooth pulse between 0.4 and 1.0 using sin (very smooth transitions)
+            opacity1 = 0.4 + 0.6 * (0.5 + 0.5 * sin_val3)
+            # Send every frame for maximum smoothness (very small threshold)
+            if prev_values['opacity1'] is None or abs(opacity1 - prev_values['opacity1']) >= 0.0001:
+                self.send_osc(f"/videocomposer/layer/{cue_id_1}/opacity", opacity1, verbose=False)
+                prev_values['opacity1'] = opacity1
+            
+            # Scale: smooth oscillation between 0.5 and 1.2 using sin2
+            scale1 = 0.5 + 0.7 * (0.5 + 0.5 * sin_val2)
+            # Send every frame for maximum smoothness (very small threshold)
+            if prev_values['scale1'] is None or abs(scale1 - prev_values['scale1']) >= 0.0001:
+                self.send_osc(f"/videocomposer/layer/{cue_id_1}/scale", scale1, scale1, verbose=False)
+                prev_values['scale1'] = scale1
+            
+            # Rotation: continuous smooth rotation (full 360 degrees over duration)
+            rotation1 = 15.0 + progress * 360.0
+            # Send every frame for maximum smoothness (very small threshold)
+            if prev_values['rotation1'] is None or abs(rotation1 - prev_values['rotation1']) >= 0.01:
+                self.send_osc(f"/videocomposer/layer/{cue_id_1}/rotation", rotation1, verbose=False)
+                prev_values['rotation1'] = rotation1
+            
+            # Layer 2 adjustments
+            # Position: move in opposite circular pattern with different phase
+            radius2 = 150
+            x2 = 400 + radius2 * -cos_val2
+            y2 = 300 + radius2 * -sin_val2
+            # Send position every frame for maximum smoothness
+            x2_int = int(round(x2))
+            y2_int = int(round(y2))
+            if prev_values['x2'] is None or x2_int != int(round(prev_values['x2'])) or y2_int != int(round(prev_values['y2'])):
+                self.send_osc(f"/videocomposer/layer/{cue_id_2}/position", x2_int, y2_int, verbose=False)
+                prev_values['x2'] = x2
+                prev_values['y2'] = y2
+            
+            # Opacity: smooth opposite pulse (between 0.6 and 1.0)
+            opacity2 = 0.6 + 0.4 * (0.5 + 0.5 * -sin_val3)
+            # Send every frame for maximum smoothness (very small threshold)
+            if prev_values['opacity2'] is None or abs(opacity2 - prev_values['opacity2']) >= 0.0001:
+                self.send_osc(f"/videocomposer/layer/{cue_id_2}/opacity", opacity2, verbose=False)
+                prev_values['opacity2'] = opacity2
+            
+            # Scale: smooth opposite oscillation (between 0.8 and 1.5)
+            scale2 = 0.8 + 0.7 * (0.5 + 0.5 * -sin_val2)
+            # Send every frame for maximum smoothness (very small threshold)
+            if prev_values['scale2'] is None or abs(scale2 - prev_values['scale2']) >= 0.0001:
+                self.send_osc(f"/videocomposer/layer/{cue_id_2}/scale", scale2, scale2, verbose=False)
+                prev_values['scale2'] = scale2
+            
+            # Rotation: smooth opposite rotation
+            rotation2 = -10.0 - progress * 360.0
+            # Send every frame for maximum smoothness (very small threshold)
+            if prev_values['rotation2'] is None or abs(rotation2 - prev_values['rotation2']) >= 0.01:
+                self.send_osc(f"/videocomposer/layer/{cue_id_2}/rotation", rotation2, verbose=False)
+                prev_values['rotation2'] = rotation2
             
             frame_counter += 1
             
@@ -356,10 +399,17 @@ class DynamicFileManagementTest:
             # Log progress every 2 seconds (not every frame to avoid spam)
             current_time = time.time()
             if current_time - last_log_time >= log_interval:
-                print(f"  {elapsed:.1f}s / {duration}s - Progress: {progress*100:.1f}%")
+                updates_per_sec = frame_counter / elapsed if elapsed > 0 else 0
+                print(f"  {elapsed:.1f}s / {duration}s - Progress: {progress*100:.1f}% - Updates: {updates_per_sec:.1f}/s")
                 last_log_time = current_time
             
-            time.sleep(interval)
+            # Use precise sleep for smooth timing
+            elapsed_loop = time.time() - start_time
+            next_frame_time = frame_counter * interval
+            sleep_time = next_frame_time - elapsed_loop
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            # If we're behind schedule, don't sleep (catch up)
         
         print("Progressive adjustments completed!")
         return True
@@ -461,24 +511,36 @@ class DynamicFileManagementTest:
         
         # Step 3: Load two files
         print("\n--- Step 3: Load Two Video Files ---")
-        if not self.video_file1 or not self.video_file1.exists():
-            print(f"ERROR: First video file not found: {self.video_file1}")
+        if not self.video_file1:
+            print(f"ERROR: First video file/source not provided")
             self.stop()
             return False
         
-        if not self.video_file2 or not self.video_file2.exists():
-            print(f"WARNING: Second video file not found: {self.video_file2}")
-            print("Using first video file for both layers")
+        # Check file existence only for file paths (not NDI sources)
+        if not self.is_ndi_source(self.video_file1):
+            if not Path(self.video_file1).exists():
+                print(f"ERROR: First video file not found: {self.video_file1}")
+                self.stop()
+                return False
+        
+        if not self.video_file2:
+            print(f"WARNING: Second video file/source not provided")
+            print("Using first video file/source for both layers")
             self.video_file2 = self.video_file1
+        elif not self.is_ndi_source(self.video_file2):
+            if not Path(self.video_file2).exists():
+                print(f"WARNING: Second video file not found: {self.video_file2}")
+                print("Using first video file/source for both layers")
+                self.video_file2 = self.video_file1
         
         # Load first layer
         print(f"Loading layer 1: {self.video_file1}")
-        self.test_layer_load(cue_id_1, str(self.video_file1))
+        self.test_layer_load(cue_id_1, self.video_file1)
         time.sleep(2)
         
         # Load second layer
         print(f"Loading layer 2: {self.video_file2}")
-        self.test_layer_load(cue_id_2, str(self.video_file2))
+        self.test_layer_load(cue_id_2, self.video_file2)
         time.sleep(2)
         
         # Step 4: Set mtcfollow on both layers (if not default enabled)
@@ -565,11 +627,11 @@ class DynamicFileManagementTest:
 def main():
     parser = argparse.ArgumentParser(description="Test dynamic file management system")
     parser.add_argument("--videocomposer", default="build/cuems-videocomposer",
-                       help="Path to videocomposer executable")
+                       help="Path to videocomposer executable (or use wrapper script)")
     parser.add_argument("--video1", required=True,
-                       help="Path to first test video file")
+                       help="Path to first test video file or NDI source (e.g., 'ndi://Source Name')")
     parser.add_argument("--video2", 
-                       help="Path to second test video file (defaults to video1 if not provided)")
+                       help="Path to second test video file or NDI source (defaults to video1 if not provided)")
     parser.add_argument("--osc-port", type=int, default=7770,
                        help="OSC port (default: 7770)")
     parser.add_argument("--fps", type=float, default=25.0,
@@ -584,8 +646,17 @@ def main():
     # Use video1 for video2 if not provided
     video2 = args.video2 if args.video2 else args.video1
     
+    # Support wrapper script for NDI library path
+    videocomposer_bin = args.videocomposer
+    if not Path(videocomposer_bin).exists():
+        # Try wrapper script
+        wrapper = Path(__file__).parent.parent / "cuems-videocomposer.sh"
+        if wrapper.exists():
+            videocomposer_bin = str(wrapper)
+            print(f"Using wrapper script: {videocomposer_bin}")
+    
     test = DynamicFileManagementTest(
-        args.videocomposer,
+        videocomposer_bin,
         args.video1,
         video2,
         args.osc_port,

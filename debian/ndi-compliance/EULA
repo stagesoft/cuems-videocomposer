@@ -1,0 +1,98 @@
+CUEMS VIDEO COMPOSER - END USER LICENSE AGREEMENT
+
+IMPORTANT - READ CAREFULLY: This End User License Agreement ("EULA") is a legal
+agreement between you (either an individual or a single entity) and CUEMS Team
+for the CUEMS Video Composer software product, which includes computer software
+and may include associated media, printed materials, and "online" or electronic
+documentation ("SOFTWARE PRODUCT").
+
+By installing, copying, or otherwise using the SOFTWARE PRODUCT, you agree to be
+bound by the terms of this EULA. If you do not agree to the terms of this EULA,
+do not install or use the SOFTWARE PRODUCT.
+
+1. GRANT OF LICENSE
+Subject to the terms and conditions of this EULA, CUEMS Team grants you a
+limited, non-exclusive, non-transferable license to use the SOFTWARE PRODUCT.
+
+2. RESTRICTIONS ON USE
+You may NOT:
+- Modify, reverse engineer, decompile, or disassemble the SOFTWARE PRODUCT
+- Remove any proprietary notices or labels on the SOFTWARE PRODUCT
+- Rent, lease, or lend the SOFTWARE PRODUCT
+
+3. NDI SDK COMPONENT
+This SOFTWARE PRODUCT includes the NDI® SDK, which is proprietary software
+owned by NewTek, Inc. (now Vizrt NDI AB). The NDI SDK is subject to the
+following additional restrictions:
+
+3.1 PROHIBITED ACTIONS
+You are expressly PROHIBITED from:
+(i) Modifying the NDI SDK, Specific SDK, NDI Products, or any part thereof
+(ii) Reverse engineering, disassembling, or recompiling the NDI SDK, Specific
+    SDK, or NDI Products, or any part thereof, or any protocols used by the
+    NDI SDK, whether transmitted or received over a network or used internally
+    or externally to the machine, physical or virtual, it is operating on, and
+    further prohibited from any attempt to do so
+(iii) Circumventing any technical limitations in the NDI SDK, Specific SDK, or
+     NDI Products, or any part thereof
+(iv) Removing, obscuring, or altering any proprietary notices or labels
+    contained on or within the NDI SDK, Specific SDK, or NDI Products, or any
+    part thereof
+
+3.2 WARRANTY DISCLAIMER FOR NDI SDK
+THE NDI SDK IS PROVIDED "AS IS" AND "WITH ALL FAULTS", WITHOUT ANY TECHNICAL
+SUPPORT OR WARRANTY OF ANY KIND FROM NEWTEK, INC., VIZRT NDI AB, OR THEIR
+LICENSORS. NEWTEK, INC., VIZRT NDI AB, AND THEIR LICENSORS DISCLAIM ALL
+EXPRESS AND IMPLIED WARRANTIES FOR THE NDI SDK INCLUDING, WITHOUT LIMITATION,
+ANY WARRANTY OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. ALSO,
+THERE IS NO WARRANTY OF NON-INFRINGEMENT, TITLE OR QUIET ENJOYMENT.
+
+3.3 LIMITATION OF LIABILITY FOR NDI SDK
+NEITHER NEWTEK, INC., VIZRT NDI AB, NOR THEIR SUPPLIERS OR LICENSORS SHALL BE
+LIABLE FOR ANY INDIRECT, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES OR LOSS
+(INCLUDING DAMAGES FOR LOSS OF BUSINESS, LOSS OF PROFITS, OR THE LIKE),
+ARISING OUT OF THE USE OF THE NDI SDK, WHETHER BASED ON BREACH OF CONTRACT,
+TORT (INCLUDING NEGLIGENCE), STRICT LIABILITY, PRODUCT LIABILITY OR OTHERWISE,
+EVEN IF NEWTEK, INC., VIZRT NDI AB, OR THEIR REPRESENTATIVES HAVE BEEN ADVISED
+OF THE POSSIBILITY OF SUCH DAMAGES.
+
+3.4 EXPORT COMPLIANCE
+You agree to comply with applicable export control and trade sanctions laws,
+rules, regulations and licenses and will not export or re-export, directly or
+indirectly, the SOFTWARE PRODUCT or any part thereof (including the NDI SDK)
+into any country, to any organization or individual prohibited by the United
+States Export Administration Act and the regulations thereunder.
+
+3.5 COPYRIGHT NOTICE
+The NDI SDK is Copyright (C) NewTek, Inc. All rights reserved. NDI® is a
+registered trademark of Vizrt NDI AB.
+
+4. TRADEMARKS
+NDI® is a registered trademark of Vizrt NDI AB. This SOFTWARE PRODUCT is not
+sponsored or endorsed by Vizrt NDI AB. CUEMS Video Composer is a product of
+CUEMS Team and is not affiliated with Vizrt NDI AB.
+
+5. NO WARRANTY
+THE SOFTWARE PRODUCT IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER
+EXPRESS OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+6. LIMITATION OF LIABILITY
+IN NO EVENT SHALL CUEMS TEAM BE LIABLE FOR ANY DAMAGES WHATSOEVER (INCLUDING,
+WITHOUT LIMITATION, DAMAGES FOR LOSS OF BUSINESS PROFITS, BUSINESS
+INTERRUPTION, LOSS OF BUSINESS INFORMATION, OR ANY OTHER PECUNIARY LOSS) ARISING
+OUT OF THE USE OF OR INABILITY TO USE THE SOFTWARE PRODUCT.
+
+7. TERMINATION
+Without prejudice to any other rights, CUEMS Team may terminate this EULA if
+you fail to comply with the terms and conditions of this EULA. In such event,
+you must destroy all copies of the SOFTWARE PRODUCT and all of its component
+parts.
+
+8. GOVERNING LAW
+This EULA shall be governed by the laws of the jurisdiction in which CUEMS
+Team operates, without regard to its conflict of law provisions.
+
+For more information about NDI, please visit: https://ndi.video/
+For NDI tools, please visit: https://ndi.video/tools
+

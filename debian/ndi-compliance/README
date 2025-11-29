@@ -1,0 +1,60 @@
+NDI SDK COMPLIANCE INFORMATION
+==============================
+
+CUEMS Video Composer includes the NDI® SDK libraries in compliance with the
+NDI SDK License Agreement. This document provides important information about
+NDI and the bundled SDK.
+
+ABOUT NDI
+---------
+NDI® (Network Device Interface) is a technology that enables video production
+workflows over standard IP networks. NDI allows multiple video systems to
+communicate with one another over IP, making it easy to share video sources
+across a network.
+
+NDI® is a registered trademark of Vizrt NDI AB.
+
+For more information about NDI, please visit:
+  https://ndi.video/
+
+NDI TOOLS
+---------
+This package does NOT include NDI Tools. If you need NDI Tools (such as NDI
+Test Patterns, NDI Studio Monitor, etc.), please download them from:
+  https://ndi.video/tools
+
+NDI SDK LICENSE COMPLIANCE
+--------------------------
+This package includes NDI SDK libraries bundled in compliance with the NDI
+SDK License Agreement. The libraries are installed to a private directory
+(/usr/lib/cuems-videocomposer/) to avoid conflicts with other applications.
+
+The full NDI SDK License Agreement (EULA) is available at:
+  /usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE/EULA
+
+IMPORTANT RESTRICTIONS
+----------------------
+The NDI SDK is proprietary software. By using CUEMS Video Composer, you agree
+to the following restrictions:
+
+1. You may NOT modify, reverse engineer, or disassemble the NDI SDK
+2. You may NOT remove or alter any proprietary notices or labels
+3. You may NOT circumvent any technical limitations in the NDI SDK
+4. Export compliance: You must comply with all applicable export laws
+
+COPYRIGHT
+---------
+The NDI SDK is Copyright (C) NewTek, Inc. All rights reserved.
+
+NDI® is a registered trademark of Vizrt NDI AB.
+
+CUEMS Video Composer is not sponsored or endorsed by Vizrt NDI AB.
+
+SUPPORT
+-------
+For NDI SDK support, please visit:
+  https://ndi.video/sdk/
+
+For CUEMS Video Composer support, please visit:
+  https://github.com/cuems/cuems-videocomposer
+

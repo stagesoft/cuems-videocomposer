@@ -72,11 +72,17 @@ private:
     bool initializeGlobalSyncSource();
     
     // Common helper methods
+    std::unique_ptr<InputSource> createInputSource(const std::string& source);
     std::unique_ptr<InputSource> createInputSourceFromFile(const std::string& filepath);
     std::unique_ptr<VideoLayer> createEmptyLayer(const std::string& cueId);
     std::unique_ptr<SyncSource> createLayerSyncSource(InputSource* inputSource);
     void configureMIDISyncSource(MIDISyncSource* midiSync);
     void setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource);
+    
+    // Source detection helpers
+    bool isNDISource(const std::string& source);
+    bool isV4L2Source(const std::string& source);
+    bool isNetworkStream(const std::string& source);
 
     // Event loop
     void processEvents();

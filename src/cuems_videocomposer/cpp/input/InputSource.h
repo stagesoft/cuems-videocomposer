@@ -111,6 +111,22 @@ public:
      * @return DecodeBackend enum value indicating best decoding method
      */
     virtual DecodeBackend getOptimalBackend() const = 0;
+
+    /**
+     * Check if this is a live stream (no seeking, continuous reading)
+     * @return true for live streams (NDI, V4L2, RTSP), false for files
+     */
+    virtual bool isLiveStream() const { return false; }  // Default: not live
+
+    /**
+     * For live streams: get the latest available frame
+     * Default implementation calls readFrame(0, buffer)
+     * @param buffer FrameBuffer to store the decoded frame
+     * @return true on success, false on failure
+     */
+    virtual bool readLatestFrame(FrameBuffer& buffer) {
+        return readFrame(0, buffer);
+    }
 };
 
 } // namespace videocomposer

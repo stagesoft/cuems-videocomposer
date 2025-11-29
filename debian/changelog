@@ -1,0 +1,11 @@
+cuems-videocomposer (0.1.0-1) unstable; urgency=medium
+
+  * Initial Debian package release
+  * NDI input support with bundled NDI SDK libraries
+  * Hardware-accelerated video decoding (VAAPI, CUDA, QSV)
+  * Multi-layer video composition
+  * MTC/LTC timecode synchronization
+  * HAP codec support
+
+ -- CUEMS Team <team@cuems.org>  Mon, 01 Jan 2024 12:00:00 +0000
+

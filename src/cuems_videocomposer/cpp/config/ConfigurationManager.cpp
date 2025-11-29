@@ -137,6 +137,12 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
                 std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
                 setString("hardware_decoder", value);
             }
+        } else if (arg == "--discover-ndi" || arg == "--list-ndi") {
+            setBool("discover_ndi", true);
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                // Optional timeout argument
+                setInt("ndi_discovery_timeout", std::atoi(argv[++i]));
+            }
         } else if (arg[0] != '-') {
             // Assume it's a movie file
             if (movieFile_.empty()) {
@@ -226,6 +232,9 @@ void ConfigurationManager::printUsage() const {
     printf("  -s, --fullscreen        start in fullscreen mode\n");
     printf("  -a, --ontop             start window on top\n");
     printf("  --hw-decode MODE      select hardware decoder: auto (default), software, vaapi, cuda\n");
+#ifdef HAVE_NDI_SDK
+    printf("  --discover-ndi [SEC]  discover and list available NDI sources (optional timeout in seconds)\n");
+#endif
     printf("\n");
     printf("MIDI Sync:\n");
     printf("  The application uses ALSA Sequencer for MIDI Time Code (MTC) synchronization.\n");

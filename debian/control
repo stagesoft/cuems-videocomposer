@@ -1,0 +1,80 @@
+Source: cuems-videocomposer
+Section: video
+Priority: optional
+Maintainer: CUEMS Team <team@cuems.org>
+Build-Depends: debhelper (>= 13),
+               cmake (>= 3.10),
+               pkg-config,
+               libavformat-dev,
+               libavcodec-dev,
+               libavutil-dev,
+               libswscale-dev,
+               libx11-dev,
+               libxext-dev,
+               libxfixes-dev,
+               libgl1-mesa-dev,
+               libglew-dev,
+               libfreetype6-dev,
+               libfontconfig1-dev,
+               libasound2-dev,
+               librtmidi-dev,
+               libsnappy-dev,
+               libopenmp-dev,
+               libwayland-dev,
+               wayland-protocols,
+               libdrm-dev,
+               libva-dev,
+               libva-drm2-dev,
+               libva-x11-2-dev,
+               libegl1-mesa-dev,
+               libgbm-dev
+Standards-Version: 4.6.0
+Homepage: https://github.com/cuems/cuems-videocomposer
+Vcs-Browser: https://github.com/cuems/cuems-videocomposer
+Vcs-Git: https://github.com/cuems/cuems-videocomposer.git
+
+Package: cuems-videocomposer
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends},
+         libavformat60,
+         libavcodec60,
+         libavutil58,
+         libswscale7,
+         libx11-6,
+         libxext6,
+         libxfixes3,
+         libgl1,
+         libglew2.2,
+         libfreetype6,
+         libfontconfig1,
+         libasound2,
+         librtmidi1,
+         libsnappy1v5,
+         libwayland-client0,
+         libdrm2,
+         libva2,
+         libva-drm2,
+         libva-x11-2,
+         libegl1,
+         libgbm1
+Description: Professional video compositor with multi-layer support
+ CUEMS Video Composer is a high-performance video compositor designed
+ for live video production and playback. It supports multiple video layers,
+ hardware-accelerated decoding (VAAPI, CUDA, QSV), HAP codec support,
+ MTC/LTC timecode synchronization, and live input sources including NDI.
+ .
+ Features:
+  * Multi-layer video composition
+  * Hardware-accelerated video decoding (Intel, NVIDIA, AMD)
+  * HAP codec support with direct GPU texture upload
+  * MTC/LTC timecode synchronization
+  * NDI input support (requires NDI SDK)
+  * V4L2 and network stream support
+  * OpenGL-based rendering with shader effects
+  * On-screen display (OSD) support
+  * Remote control via OSC, IPC, and message queues
+ .
+ This package includes NDI SDK libraries bundled in compliance with
+ the NDI SDK license agreement. See /usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE
+ for details.
+

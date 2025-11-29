@@ -283,6 +283,17 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         return false;
     }
 
+    // Check if this is a live stream (NDI, V4L2, RTSP, etc.)
+    if (inputSource_->isLiveStream()) {
+        // Live streams: get latest available frame (ignore frameNumber)
+        // The async buffer in LiveInputSource keeps frames ready
+        if (inputSource_->readLatestFrame(cpuFrameBuffer_)) {
+            frameOnGPU_ = false;
+            return true;
+        }
+        return false;
+    }
+
     // Check if this is a HAP codec
     HAPVideoInput* hapInput = dynamic_cast<HAPVideoInput*>(inputSource_.get());
     if (hapInput) {

@@ -13,7 +13,12 @@ public:
     FrameBuffer();
     FrameBuffer(const FrameBuffer& other);  // Copy constructor
     FrameBuffer& operator=(const FrameBuffer& other);  // Copy assignment
+    FrameBuffer(FrameBuffer&& other) noexcept;  // Move constructor
+    FrameBuffer& operator=(FrameBuffer&& other) noexcept;  // Move assignment
     ~FrameBuffer();
+    
+    // Swap contents with another buffer (for efficient buffer swapping)
+    void swap(FrameBuffer& other) noexcept;
 
     // Allocate buffer for given format and dimensions
     bool allocate(const FrameInfo& info);

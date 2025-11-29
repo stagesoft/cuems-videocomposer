@@ -1,0 +1,41 @@
+cuems-videocomposer for Debian
+===============================
+
+NDI SUPPORT
+-----------
+This package includes NDI® SDK libraries bundled in compliance with the NDI SDK
+License Agreement. The NDI libraries are installed to a private directory
+(/usr/lib/cuems-videocomposer/) to avoid conflicts with other applications.
+
+NDI® is a registered trademark of Vizrt NDI AB.
+
+For more information about NDI, please visit:
+  https://ndi.video/
+
+For NDI tools (not included in this package), please visit:
+  https://ndi.video/tools
+
+For NDI SDK compliance information, see:
+  /usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE/
+
+LICENSE COMPLIANCE
+------------------
+This package complies with:
+- LGPL v3 for CUEMS Video Composer code
+- NDI SDK License Agreement for bundled NDI SDK libraries
+
+See /usr/share/doc/cuems-videocomposer/copyright for full copyright information.
+
+HARDWARE ACCELERATION
+---------------------
+CUEMS Video Composer supports hardware-accelerated video decoding via:
+- VAAPI (Intel/AMD GPUs on Linux)
+- CUDA (NVIDIA GPUs)
+- QSV (Intel Quick Sync Video)
+
+Hardware acceleration is automatically detected and used when available.
+
+REPORTING BUGS
+--------------
+Please report bugs to:
+  https://github.com/cuems/cuems-videocomposer/issues
