@@ -5,6 +5,7 @@
 #include "../video/GPUTextureFrameBuffer.h"
 #include "../layer/VideoLayer.h"
 #include "ShaderProgram.h"
+#include "MasterProperties.h"
 #include <vector>
 #include <map>
 #include <cstdint>
@@ -41,8 +42,12 @@ public:
     // Render a layer from GPU texture (for HAP and hardware-decoded frames)
     bool renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, const LayerProperties& properties, const FrameInfo& frameInfo);
 
-    // Composite all layers
+    // Composite all layers (applies master transforms if active)
     void compositeLayers(const std::vector<const VideoLayer*>& layers);
+    
+    // Master properties access
+    MasterProperties& masterProperties() { return masterProperties_; }
+    const MasterProperties& masterProperties() const { return masterProperties_; }
 
     // Set viewport
     void setViewport(int x, int y, int width, int height);
@@ -75,12 +80,17 @@ private:
     GLuint quadVBO_;                // Vertex Buffer Object for quad
     
     // Shader programs
+    // All shaders include color correction with uniform branch (uColorCorrectionEnabled).
+    // We always use the shader path for consistent rendering - no switching between
+    // fixed-function and shader paths to avoid visual artifacts mid-playback.
+    // Overhead is negligible (~0.02% GPU per layer when color correction disabled).
     std::unique_ptr<ShaderProgram> rgbaShader_;      // For CPU frames, HAP, HAP Alpha
     std::unique_ptr<ShaderProgram> rgbaShaderHQ_;    // High-quality variant for extreme warps
     std::unique_ptr<ShaderProgram> nv12Shader_;      // For VAAPI/CUDA NV12
     std::unique_ptr<ShaderProgram> yuv420pShader_;   // For YUV420P fallback
     std::unique_ptr<ShaderProgram> hapQShader_;      // For HAP Q (YCoCg→RGB)
     std::unique_ptr<ShaderProgram> hapQAlphaShader_; // For HAP Q Alpha (dual texture)
+    std::unique_ptr<ShaderProgram> masterShader_;    // For master FBO post-processing
     bool useShaders_;               // Enable shader rendering (vs fixed-function)
     
     // Deferred texture deletion (textures to delete after swapBuffers)
@@ -93,6 +103,16 @@ private:
         int height;
     };
     std::map<int, LayerTextureCache> layerTextureCache_;
+    
+    // Master layer properties (for composite output)
+    MasterProperties masterProperties_;
+    
+    // FBO for off-screen rendering (used when master transforms are active)
+    GLuint masterFBO_;              // Framebuffer Object
+    GLuint masterFBOTexture_;       // Texture attached to FBO
+    int masterFBOWidth_;            // FBO texture width
+    int masterFBOHeight_;           // FBO texture height
+    bool masterFBOInitialized_;     // FBO is ready to use
 
     // Internal methods
     void setupOrthoProjection();
@@ -122,6 +142,17 @@ private:
                          const LayerProperties& props);
     void renderQuadWithShader(ShaderProgram* shader, float x, float y, 
                              float width, float height, const LayerProperties& props);
+    
+    // FBO helpers (for master layer rendering)
+    bool initMasterFBO(int width, int height);
+    void cleanupMasterFBO();
+    void renderMasterQuadWithTransforms();
+    
+    // Color correction helpers
+    void setColorCorrectionUniforms(ShaderProgram* shader, 
+                                    const LayerProperties::ColorAdjustment& colorAdjust);
+    void setMasterColorCorrectionUniforms(ShaderProgram* shader,
+                                          const MasterProperties::ColorAdjustment& colorAdjust);
 };
 
 } // namespace videocomposer

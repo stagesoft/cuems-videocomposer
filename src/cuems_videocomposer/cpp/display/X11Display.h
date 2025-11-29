@@ -69,6 +69,9 @@ public:
     void makeCurrent() override;
     void clearCurrent() override;
 
+    // Get renderer access
+    OpenGLRenderer* getRenderer() override { return renderer_.get(); }
+
 #ifdef HAVE_EGL
     // EGL context access (for VAAPI zero-copy interop) - override DisplayBackend interface
     EGLDisplay getEGLDisplay() const override { return eglDisplay_; }

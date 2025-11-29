@@ -123,6 +123,36 @@ bool OSCRemoteControl::initialize(int port) {
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/crop/disable", "", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/panorama", "i", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/pan", "i", handleOSCMessage, userData_);
+    
+    // Layer color correction commands
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/brightness", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/contrast", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/saturation", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/hue", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/gamma", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/color/reset", "", handleOSCMessage, userData_);
+    
+    // Master layer commands (applied to composite before OSD)
+    lo_server_add_method(oscServer_, "/videocomposer/master/opacity", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/position", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/scale", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/xscale", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/yscale", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/rotation", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/corners", "ffffffff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/corner1", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/corner2", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/corner3", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/corner4", "ff", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/reset", "", handleOSCMessage, userData_);
+    
+    // Master color correction commands
+    lo_server_add_method(oscServer_, "/videocomposer/master/brightness", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/contrast", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/saturation", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/hue", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/gamma", "f", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/master/color/reset", "", handleOSCMessage, userData_);
 
     active_ = true;
     return true;

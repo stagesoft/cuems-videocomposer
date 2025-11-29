@@ -51,6 +51,31 @@ struct LayerProperties {
         bool highQuality = false;  // Enable anisotropic filtering for extreme warps
     } cornerDeform;
     
+    // Color adjustment controls
+    struct ColorAdjustment {
+        float brightness = 0.0f;   // -1.0 to 1.0 (0 = no change)
+        float contrast = 1.0f;     // 0.0 to 2.0 (1 = no change)
+        float saturation = 1.0f;   // 0.0 to 2.0 (1 = no change, 0 = grayscale)
+        float hue = 0.0f;          // -180 to 180 degrees
+        float gamma = 1.0f;        // 0.1 to 3.0 (1 = no change)
+        
+        // Check if any adjustments are active (non-default)
+        bool isActive() const {
+            return brightness != 0.0f || contrast != 1.0f || 
+                   saturation != 1.0f || hue != 0.0f || gamma != 1.0f;
+        }
+        
+        // Reset all to defaults
+        void reset() {
+            brightness = 0.0f;
+            contrast = 1.0f;
+            saturation = 1.0f;
+            hue = 0.0f;
+            gamma = 1.0f;
+        }
+    };
+    ColorAdjustment colorAdjust;
+    
     // Auto-unload: automatically unload file when playback ends
     bool autoUnload = false;
     

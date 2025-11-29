@@ -128,6 +128,36 @@ private:
     
     // Blend mode handler
     bool handleLayerBlendMode(VideoLayer* layer, const std::vector<std::string>& args);
+    
+    // Layer color correction handlers
+    bool handleLayerBrightness(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerContrast(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerSaturation(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerHue(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerGamma(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerColorReset(VideoLayer* layer, const std::vector<std::string>& args);
+    
+    // Master layer handlers (composite transforms)
+    bool handleMasterOpacity(const std::vector<std::string>& args);
+    bool handleMasterPosition(const std::vector<std::string>& args);
+    bool handleMasterScale(const std::vector<std::string>& args);
+    bool handleMasterXScale(const std::vector<std::string>& args);
+    bool handleMasterYScale(const std::vector<std::string>& args);
+    bool handleMasterRotation(const std::vector<std::string>& args);
+    bool handleMasterCorners(const std::vector<std::string>& args);
+    bool handleMasterCorner1(const std::vector<std::string>& args);
+    bool handleMasterCorner2(const std::vector<std::string>& args);
+    bool handleMasterCorner3(const std::vector<std::string>& args);
+    bool handleMasterCorner4(const std::vector<std::string>& args);
+    bool handleMasterReset(const std::vector<std::string>& args);
+    
+    // Master color correction handlers
+    bool handleMasterBrightness(const std::vector<std::string>& args);
+    bool handleMasterContrast(const std::vector<std::string>& args);
+    bool handleMasterSaturation(const std::vector<std::string>& args);
+    bool handleMasterHue(const std::vector<std::string>& args);
+    bool handleMasterGamma(const std::vector<std::string>& args);
+    bool handleMasterColorReset(const std::vector<std::string>& args);
 };
 
 } // namespace videocomposer

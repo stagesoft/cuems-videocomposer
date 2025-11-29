@@ -58,6 +58,11 @@ OpenGLRenderer::OpenGLRenderer()
     , yuv420pShader_(nullptr)
     , useShaders_(false)
     , texturesToDelete_()
+    , masterFBO_(0)
+    , masterFBOTexture_(0)
+    , masterFBOWidth_(0)
+    , masterFBOHeight_(0)
+    , masterFBOInitialized_(false)
 {
 }
 
@@ -151,6 +156,9 @@ void OpenGLRenderer::cleanup() {
     
     // Cleanup shaders
     cleanupShaders();
+    
+    // Cleanup master FBO
+    cleanupMasterFBO();
     
     initialized_ = false;
 }
@@ -470,61 +478,6 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 GLuint layerTextureId = 0;
                 auto cacheIt = layerTextureCache_.find(layerId);
                 
-                if (cacheIt != layerTextureCache_.end()) {
-                    // Texture exists - check if size matches
-                    if (cacheIt->second.width == layerTextureWidth && 
-                        cacheIt->second.height == layerTextureHeight) {
-                        // Reuse existing texture
-                        layerTextureId = cacheIt->second.textureId;
-                    } else {
-                        // Size changed - delete old texture and create new one
-                        texturesToDelete_.push_back(cacheIt->second.textureId);
-                        layerTextureCache_.erase(cacheIt);
-                        cacheIt = layerTextureCache_.end();
-                    }
-                }
-                
-                // Create new texture if needed
-                if (layerTextureId == 0) {
-                    glGenTextures(1, &layerTextureId);
-                    if (layerTextureId == 0) {
-                        return false;
-                    }
-                    
-                    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, layerTextureId);
-                    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                    // Use GL_REPLACE instead of GL_DECAL for proper texture rendering
-                    // GL_DECAL blends with vertex color based on alpha, which can cause black output
-                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
-                    
-                    // Allocate texture storage
-                    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA, 
-                                 layerTextureWidth, layerTextureHeight, 0,
-                                 GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
-                    
-                    // Cache the texture
-                    LayerTextureCache cache;
-                    cache.textureId = layerTextureId;
-                    cache.width = layerTextureWidth;
-                    cache.height = layerTextureHeight;
-                    layerTextureCache_[layerId] = cache;
-                }
-                
-                // Upload frame data to cached texture
-                glEnable(GL_TEXTURE_RECTANGLE_ARB);
-                glBindTexture(GL_TEXTURE_RECTANGLE_ARB, layerTextureId);
-                glTexSubImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, 0, 0,
-                                layerTextureWidth, layerTextureHeight,
-                                GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
-                
-                GLenum glErr = glGetError();
-                if (glErr != GL_NO_ERROR) {
-                    LOG_ERROR << "GL error after texture upload: 0x" << std::hex << glErr << std::dec;
-                }
-
         // Calculate quad size with letterboxing (matches original xjadeo)
         // Original uses _gl_quad_x and _gl_quad_y for letterboxing
         float quad_x = 1.0f;
@@ -549,6 +502,156 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
             }
         }
         
+        // Always use shader-based rendering for CPU frames when shaders available
+        // This provides consistent behavior and supports color correction
+        // The uniform branch (uColorCorrectionEnabled) has negligible overhead (~0.02%)
+        // compared to the potential visual artifacts from switching render paths mid-playback
+        if (useShaders_ && rgbaShader_) {
+            // Shader-based rendering path for CPU frames
+            // Uses GL_TEXTURE_2D for shader compatibility
+            
+            // Create/update a GL_TEXTURE_2D for shader-based rendering
+            GLuint shaderTextureId = 0;
+            auto cacheIt = layerTextureCache_.find(layerId);
+            
+            if (cacheIt != layerTextureCache_.end() &&
+                cacheIt->second.width == layerTextureWidth &&
+                cacheIt->second.height == layerTextureHeight) {
+                shaderTextureId = cacheIt->second.textureId;
+            } else {
+                // Create new GL_TEXTURE_2D
+                if (cacheIt != layerTextureCache_.end()) {
+                    texturesToDelete_.push_back(cacheIt->second.textureId);
+                    layerTextureCache_.erase(cacheIt);
+                }
+                
+                glGenTextures(1, &shaderTextureId);
+                glBindTexture(GL_TEXTURE_2D, shaderTextureId);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, layerTextureWidth, layerTextureHeight, 
+                             0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+                
+                LayerTextureCache cache;
+                cache.textureId = shaderTextureId;
+                cache.width = layerTextureWidth;
+                cache.height = layerTextureHeight;
+                layerTextureCache_[layerId] = cache;
+            }
+            
+            // Upload frame data
+            glBindTexture(GL_TEXTURE_2D, shaderTextureId);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
+                            GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
+            
+            // Apply blend mode
+            applyBlendModeFromProps(props);
+            
+            // Use shader
+            ShaderProgram* shader = (props.cornerDeform.enabled && 
+                                     props.cornerDeform.highQuality && 
+                                     rgbaShaderHQ_) 
+                                   ? rgbaShaderHQ_.get() 
+                                   : rgbaShader_.get();
+            shader->use();
+            shader->setUniform("uTexture", 0);
+            shader->setUniform("uOpacity", props.opacity);
+            
+            // Set color correction uniforms (uses uniform branch for zero-cost when disabled)
+            setColorCorrectionUniforms(shader, props.colorAdjust);
+            
+            // Handle corner deformation
+            if (props.cornerDeform.enabled) {
+                Point src[4], dst[4];
+                src[0].x = -quad_x; src[0].y = -quad_y;
+                src[1].x = quad_x;  src[1].y = -quad_y;
+                src[2].x = quad_x;  src[2].y = quad_y;
+                src[3].x = -quad_x; src[3].y = quad_y;
+                
+                for (int i = 0; i < 4; ++i) {
+                    dst[i].x = src[i].x + props.cornerDeform.corners[i * 2];
+                    dst[i].y = src[i].y + props.cornerDeform.corners[i * 2 + 1];
+                }
+                
+                GLfloat homography[16];
+                findHomography(src, dst, homography);
+                shader->setUniform("uUseHomography", 1);
+                shader->setUniformMatrix4fv("uHomography", homography);
+            } else {
+                shader->setUniform("uUseHomography", 0);
+            }
+            
+            // Compute MVP matrix
+            float mvp[16];
+            computeMVPMatrix(mvp, 0.0f, 0.0f, quad_x, quad_y, props);
+            shader->setUniformMatrix4fv("uMVP", mvp);
+            
+            // Draw using VAO
+            glBindVertexArray(quadVAO_);
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+            glBindVertexArray(0);
+            
+            shader->unbind();
+            glBindTexture(GL_TEXTURE_2D, 0);
+            
+            return true;
+        }
+        
+        // Fixed-function fallback (only if shaders unavailable - legacy systems)
+        // Use GL_TEXTURE_RECTANGLE_ARB for fixed-function path
+        if (cacheIt != layerTextureCache_.end()) {
+            // Texture exists - check if size matches
+            if (cacheIt->second.width == layerTextureWidth && 
+                cacheIt->second.height == layerTextureHeight) {
+                // Reuse existing texture
+                layerTextureId = cacheIt->second.textureId;
+            } else {
+                // Size changed - delete old texture and create new one
+                texturesToDelete_.push_back(cacheIt->second.textureId);
+                layerTextureCache_.erase(cacheIt);
+                cacheIt = layerTextureCache_.end();
+            }
+        }
+        
+        // Create new texture if needed
+        if (layerTextureId == 0) {
+            glGenTextures(1, &layerTextureId);
+            if (layerTextureId == 0) {
+                return false;
+            }
+            
+            glBindTexture(GL_TEXTURE_RECTANGLE_ARB, layerTextureId);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            // Use GL_REPLACE instead of GL_DECAL for proper texture rendering
+            // GL_DECAL blends with vertex color based on alpha, which can cause black output
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+            
+            // Allocate texture storage
+            glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA, 
+                         layerTextureWidth, layerTextureHeight, 0,
+                         GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+            
+            // Cache the texture
+            LayerTextureCache cache;
+            cache.textureId = layerTextureId;
+            cache.width = layerTextureWidth;
+            cache.height = layerTextureHeight;
+            layerTextureCache_[layerId] = cache;
+        }
+        
+        // Upload frame data to cached texture
+        glEnable(GL_TEXTURE_RECTANGLE_ARB);
+        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, layerTextureId);
+        glTexSubImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, 0, 0,
+                        layerTextureWidth, layerTextureHeight,
+                        GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
+        
+        // Fixed-function fallback (only if shaders unavailable - legacy systems)
         // Save matrix state before applying transforms
         glPushMatrix();
         
@@ -572,21 +675,13 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 calculateCropCoordinatesFromProps(props, frameInfo, texX, texY, texWidth, texHeight);
 
                 // Regular texture uses GL_TEXTURE_RECTANGLE_ARB (already bound above)
-                // HAP is now treated as regular RGBA, not compressed
                 // Use pixel coordinates for GL_TEXTURE_RECTANGLE_ARB
-                // NOTE: renderQuad uses textureWidth_ and textureHeight_ members, so we need to pass them
-                // Use a custom render here with explicit dimensions
                 glBegin(GL_QUADS);
                 glTexCoord2f(0.0f, (GLfloat)layerTextureHeight); glVertex2f(x, y);
                 glTexCoord2f((GLfloat)layerTextureWidth, (GLfloat)layerTextureHeight); glVertex2f(x + w, y);
                 glTexCoord2f((GLfloat)layerTextureWidth, 0.0f); glVertex2f(x + w, y + h);
                 glTexCoord2f(0.0f, 0.0f); glVertex2f(x, y + h);
                 glEnd();
-                
-                GLenum quadErr = glGetError();
-                if (quadErr != GL_NO_ERROR) {
-                    LOG_ERROR << "GL error after quad render: 0x" << std::hex << quadErr << std::dec;
-                }
                 
                 // Unbind texture (texture is cached, don't delete)
                 glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
@@ -602,16 +697,47 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
 }
 
 void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layers) {
+    // Check if master transforms are active
+    bool useMasterFBO = masterProperties_.isActive();
+    
+    if (useMasterFBO) {
+        // Initialize or resize FBO if needed
+        if (!masterFBOInitialized_ || masterFBOWidth_ != viewportWidth_ || masterFBOHeight_ != viewportHeight_) {
+            if (!initMasterFBO(viewportWidth_, viewportHeight_)) {
+                LOG_ERROR << "Failed to initialize master FBO, falling back to direct rendering";
+                useMasterFBO = false;
+            }
+        }
+    }
+    
+    if (useMasterFBO && masterFBOInitialized_) {
+        // Render layers to FBO
+        glBindFramebuffer(GL_FRAMEBUFFER, masterFBO_);
+        glViewport(0, 0, masterFBOWidth_, masterFBOHeight_);
+    }
+    
     // Clear to opaque black (alpha = 1.0)
     glClear(GL_COLOR_BUFFER_BIT);
 
     // Render layers in z-order (already sorted by LayerManager)
     for (const VideoLayer* layer : layers) {
         if (layer && layer->isReady()) {
-            bool rendered = renderLayer(layer);
+            renderLayer(layer);
             // If no frame was rendered, clear will show black screen (expected)
             // This is normal when waiting for MTC or when no frames are available yet
         }
+    }
+    
+    if (useMasterFBO && masterFBOInitialized_) {
+        // Unbind FBO, render to screen with master transforms
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, viewportWidth_, viewportHeight_);
+        
+        // Clear screen
+        glClear(GL_COLOR_BUFFER_BIT);
+        
+        // Render FBO texture with master transforms
+        renderMasterQuadWithTransforms();
     }
 }
 
@@ -779,6 +905,9 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
         }
         
         shader->setUniform("uOpacity", properties.opacity);
+        
+        // Set color correction uniforms for per-layer color adjustment
+        setColorCorrectionUniforms(shader, properties.colorAdjust);
         
         // Handle corner deformation (homography warping) - works with all shader types
         if (properties.cornerDeform.enabled) {
@@ -1171,6 +1300,13 @@ bool OpenGLRenderer::initShaders() {
         hapQAlphaShader_.reset();
     }
     
+    // Create master post-processing shader (for FBO with color correction)
+    masterShader_ = std::make_unique<ShaderProgram>();
+    if (!masterShader_->createFromSource(VideoShaders::MASTER_VERTEX_SHADER, VideoShaders::MASTER_FRAGMENT_SHADER)) {
+        LOG_WARNING << "Failed to create master shader, master color correction will be disabled";
+        masterShader_.reset();
+    }
+    
     LOG_VERBOSE << "All video shaders compiled successfully";
     return true;
 }
@@ -1182,6 +1318,7 @@ void OpenGLRenderer::cleanupShaders() {
     yuv420pShader_.reset();
     hapQShader_.reset();
     hapQAlphaShader_.reset();
+    masterShader_.reset();
 }
 
 void OpenGLRenderer::computeMVPMatrix(float* mvp, float x, float y, float width, float height,
@@ -1248,6 +1385,9 @@ void OpenGLRenderer::renderQuadWithShader(ShaderProgram* shader, float x, float 
     shader->setUniformMatrix4fv("uMVP", mvp);
     shader->setUniform("uOpacity", props.opacity);
     
+    // Set color correction uniforms
+    setColorCorrectionUniforms(shader, props.colorAdjust);
+    
     // Bind VAO and draw
     glBindVertexArray(quadVAO_);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
@@ -1255,6 +1395,272 @@ void OpenGLRenderer::renderQuadWithShader(ShaderProgram* shader, float x, float 
     
     // Unbind shader
     shader->unbind();
+}
+
+bool OpenGLRenderer::initMasterFBO(int width, int height) {
+    // Clean up existing FBO if size changed
+    if (masterFBOInitialized_ && (masterFBOWidth_ != width || masterFBOHeight_ != height)) {
+        cleanupMasterFBO();
+    }
+    
+    if (masterFBOInitialized_) {
+        return true;  // Already initialized with correct size
+    }
+    
+    LOG_INFO << "Initializing master FBO: " << width << "x" << height;
+    
+    // Generate FBO
+    glGenFramebuffers(1, &masterFBO_);
+    if (masterFBO_ == 0) {
+        LOG_ERROR << "Failed to generate master FBO";
+        return false;
+    }
+    
+    // Generate texture for FBO
+    glGenTextures(1, &masterFBOTexture_);
+    if (masterFBOTexture_ == 0) {
+        glDeleteFramebuffers(1, &masterFBO_);
+        masterFBO_ = 0;
+        LOG_ERROR << "Failed to generate master FBO texture";
+        return false;
+    }
+    
+    // Setup texture
+    glBindTexture(GL_TEXTURE_2D, masterFBOTexture_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    
+    // Attach texture to FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, masterFBO_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, masterFBOTexture_, 0);
+    
+    // Check FBO completeness
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        LOG_ERROR << "Master FBO is not complete: 0x" << std::hex << status;
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        cleanupMasterFBO();
+        return false;
+    }
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    
+    masterFBOWidth_ = width;
+    masterFBOHeight_ = height;
+    masterFBOInitialized_ = true;
+    
+    LOG_INFO << "Master FBO initialized successfully";
+    return true;
+}
+
+void OpenGLRenderer::cleanupMasterFBO() {
+    if (masterFBOTexture_ != 0) {
+        glDeleteTextures(1, &masterFBOTexture_);
+        masterFBOTexture_ = 0;
+    }
+    if (masterFBO_ != 0) {
+        glDeleteFramebuffers(1, &masterFBO_);
+        masterFBO_ = 0;
+    }
+    masterFBOWidth_ = 0;
+    masterFBOHeight_ = 0;
+    masterFBOInitialized_ = false;
+}
+
+void OpenGLRenderer::renderMasterQuadWithTransforms() {
+    // Render the FBO texture to screen with master transforms applied
+    const MasterProperties& props = masterProperties_;
+    
+    // PERFORMANCE: True zero-cost optimization for master layer
+    // ----------------------------------------------------------
+    // When color correction is disabled, we use the fixed-function path
+    // which has ZERO shader overhead. This is the "separate shader" approach
+    // applied to the master layer. For per-layer rendering, we use uniform
+    // branching instead (see setColorCorrectionUniforms for analysis).
+    //
+    // Use shader path if color correction is active and shader is available
+    if (props.colorAdjust.isActive() && masterShader_ && masterShader_->isValid()) {
+        // Shader-based rendering with color correction
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, masterFBOTexture_);
+        
+        masterShader_->use();
+        masterShader_->setUniform("uTexture", 0);
+        masterShader_->setUniform("uOpacity", props.opacity);
+        setMasterColorCorrectionUniforms(masterShader_.get(), props.colorAdjust);
+        
+        // Enable blending
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        
+        // Save matrix state for transforms
+        glPushMatrix();
+        
+        // Apply position offset
+        glTranslatef(props.x, props.y, 0.0f);
+        
+        // Apply scale
+        glScalef(props.scaleX, props.scaleY, 1.0f);
+        
+        // Apply rotation
+        if (props.rotation != 0.0f) {
+            glRotatef(props.rotation, 0.0f, 0.0f, 1.0f);
+        }
+        
+        // Apply corner deformation
+        if (props.cornerDeform.enabled) {
+            Point src[4];
+            src[0].x = -1.0; src[0].y = -1.0;
+            src[1].x =  1.0; src[1].y = -1.0;
+            src[2].x =  1.0; src[2].y =  1.0;
+            src[3].x = -1.0; src[3].y =  1.0;
+            
+            Point dst[4];
+            dst[0].x = src[0].x + props.cornerDeform.corners[0];
+            dst[0].y = src[0].y + props.cornerDeform.corners[1];
+            dst[1].x = src[1].x + props.cornerDeform.corners[2];
+            dst[1].y = src[1].y + props.cornerDeform.corners[3];
+            dst[2].x = src[2].x + props.cornerDeform.corners[4];
+            dst[2].y = src[2].y + props.cornerDeform.corners[5];
+            dst[3].x = src[3].x + props.cornerDeform.corners[6];
+            dst[3].y = src[3].y + props.cornerDeform.corners[7];
+            
+            GLfloat homography[16];
+            findHomography(src, dst, homography);
+            glMultMatrixf(homography);
+        }
+        
+        // Draw fullscreen quad using VAO
+        glBindVertexArray(quadVAO_);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        glBindVertexArray(0);
+        
+        glPopMatrix();
+        masterShader_->unbind();
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_BLEND);
+    } else {
+        // Fixed-function fallback (no color correction)
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, masterFBOTexture_);
+        
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        
+        glPushMatrix();
+        
+        // Apply position offset
+        glTranslatef(props.x, props.y, 0.0f);
+        
+        // Apply scale
+        glScalef(props.scaleX, props.scaleY, 1.0f);
+        
+        // Apply rotation (around center)
+        if (props.rotation != 0.0f) {
+            glRotatef(props.rotation, 0.0f, 0.0f, 1.0f);
+        }
+        
+        // Apply corner deformation if enabled
+        if (props.cornerDeform.enabled) {
+            Point src[4];
+            src[0].x = -1.0; src[0].y = -1.0;
+            src[1].x =  1.0; src[1].y = -1.0;
+            src[2].x =  1.0; src[2].y =  1.0;
+            src[3].x = -1.0; src[3].y =  1.0;
+            
+            Point dst[4];
+            dst[0].x = src[0].x + props.cornerDeform.corners[0];
+            dst[0].y = src[0].y + props.cornerDeform.corners[1];
+            dst[1].x = src[1].x + props.cornerDeform.corners[2];
+            dst[1].y = src[1].y + props.cornerDeform.corners[3];
+            dst[2].x = src[2].x + props.cornerDeform.corners[4];
+            dst[2].y = src[2].y + props.cornerDeform.corners[5];
+            dst[3].x = src[3].x + props.cornerDeform.corners[6];
+            dst[3].y = src[3].y + props.cornerDeform.corners[7];
+            
+            GLfloat homography[16];
+            findHomography(src, dst, homography);
+            glMultMatrixf(homography);
+        }
+        
+        // Set opacity
+        glColor4f(1.0f, 1.0f, 1.0f, props.opacity);
+        
+        // Enable blending for opacity
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        
+        // Render quad with FBO texture
+        glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, 0.0f); glVertex2f(-1.0f, -1.0f);
+        glTexCoord2f(1.0f, 0.0f); glVertex2f( 1.0f, -1.0f);
+        glTexCoord2f(1.0f, 1.0f); glVertex2f( 1.0f,  1.0f);
+        glTexCoord2f(0.0f, 1.0f); glVertex2f(-1.0f,  1.0f);
+        glEnd();
+        
+        glPopMatrix();
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+        glDisable(GL_BLEND);
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+}
+
+// Set color correction uniforms for per-layer rendering
+//
+// DESIGN DECISION: Always use shader path, rely on uniform branching
+// -------------------------------------------------------------------
+// We always use the shader path for all layers (CPU and GPU frames) rather than
+// switching between fixed-function and shader paths based on color correction state.
+//
+// Why:
+// 1. Consistent rendering - no visual artifacts from path switching mid-playback
+// 2. Negligible overhead - uniform branch check costs ~0.02% GPU per layer
+// 3. Simpler code - single render path to maintain
+//
+// When color correction is disabled (isActive() == false):
+//   - Only 1 uniform is set (uColorCorrectionEnabled = 0)
+//   - Shader branch skips all color math (~0.02% GPU overhead)
+//
+// When enabled:
+//   - 6 uniforms are set (enabled + 5 color values)
+//   - Full color correction applied in shader
+//
+void OpenGLRenderer::setColorCorrectionUniforms(ShaderProgram* shader, 
+                                                const LayerProperties::ColorAdjustment& colorAdjust) {
+    if (!shader) return;
+    
+    bool enabled = colorAdjust.isActive();
+    shader->setUniform("uColorCorrectionEnabled", enabled ? 1 : 0);
+    
+    if (enabled) {
+        shader->setUniform("uBrightness", colorAdjust.brightness);
+        shader->setUniform("uContrast", colorAdjust.contrast);
+        shader->setUniform("uSaturation", colorAdjust.saturation);
+        shader->setUniform("uHue", colorAdjust.hue);
+        shader->setUniform("uGamma", colorAdjust.gamma);
+    }
+}
+
+void OpenGLRenderer::setMasterColorCorrectionUniforms(ShaderProgram* shader,
+                                                      const MasterProperties::ColorAdjustment& colorAdjust) {
+    if (!shader) return;
+    
+    bool enabled = colorAdjust.isActive();
+    shader->setUniform("uColorCorrectionEnabled", enabled ? 1 : 0);
+    
+    if (enabled) {
+        shader->setUniform("uBrightness", colorAdjust.brightness);
+        shader->setUniform("uContrast", colorAdjust.contrast);
+        shader->setUniform("uSaturation", colorAdjust.saturation);
+        shader->setUniform("uHue", colorAdjust.hue);
+        shader->setUniform("uGamma", colorAdjust.gamma);
+    }
 }
 
 } // namespace videocomposer

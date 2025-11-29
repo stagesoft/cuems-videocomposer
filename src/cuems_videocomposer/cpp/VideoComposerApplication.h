@@ -17,6 +17,7 @@ class LayerManager;
 class VideoLayer;
 class DisplayManager;
 class OSDManager;
+class OpenGLRenderer;
 
 #ifdef HAVE_VAAPI_INTEROP
 class VaapiInterop;
@@ -56,6 +57,9 @@ public:
     ConfigurationManager* getConfig() { return config_.get(); }
     LayerManager* getLayerManager() { return layerManager_.get(); }
     OSDManager* getOSDManager() { return osdManager_.get(); }
+    
+    // Get renderer access (for master layer controls)
+    OpenGLRenderer& renderer();
     
     // File loading methods (called from RemoteCommandRouter)
     bool createLayerWithFile(const std::string& cueId, const std::string& filepath);

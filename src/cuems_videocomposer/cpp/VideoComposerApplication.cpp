@@ -43,6 +43,7 @@
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
 #include "display/DisplayManager.h"
+#include "display/OpenGLRenderer.h"
 #include "remote/OSCRemoteControl.h"
 
 #ifdef HAVE_VAAPI_INTEROP
@@ -464,6 +465,18 @@ bool VideoComposerApplication::setTimeOffset(int64_t offset) {
     }
     
     return true;
+}
+
+OpenGLRenderer& VideoComposerApplication::renderer() {
+    // Get renderer from display backend
+    OpenGLRenderer* renderer = displayBackend_ ? displayBackend_->getRenderer() : nullptr;
+    if (!renderer) {
+        // This should never happen if display is properly initialized
+        static OpenGLRenderer dummyRenderer;
+        LOG_ERROR << "renderer() called but display backend or renderer is null!";
+        return dummyRenderer;
+    }
+    return *renderer;
 }
 
 void VideoComposerApplication::shutdown() {

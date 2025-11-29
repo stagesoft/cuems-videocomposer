@@ -65,6 +65,9 @@ public:
     // OpenGL context management (override DisplayBackend interface)
     void makeCurrent() override;
     void clearCurrent() override;
+    
+    // Get renderer access
+    OpenGLRenderer* getRenderer() override { return renderer_.get(); }
 
 #ifdef HAVE_EGL
     // EGL context access (for VAAPI zero-copy interop) - override DisplayBackend interface

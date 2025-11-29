@@ -1882,11 +1882,7 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
                     return true;
                 }
             } else {
-                // EGL images created but texture binding failed (probably wrong thread)
-                // The images are still valid - they can be bound later from the GL thread
-                // For now, fall back to CPU path but keep the EGL images
-                LOG_VERBOSE << "transferHardwareFrameToGPU: VAAPI EGL images created, but GL binding deferred (wrong thread)";
-                // Release EGL images since we can't use them from this thread
+                // Texture binding failed - release EGL images and fall back to CPU path
                 vaapiInterop_->releaseFrame();
             }
         } else {

@@ -23,6 +23,7 @@ namespace videocomposer {
 // Forward declarations
 class LayerManager;
 class OSDManager;
+class OpenGLRenderer;
 
 /**
  * DisplayBackend - Abstract base class for display backends
@@ -140,6 +141,12 @@ public:
      * Clear the current OpenGL context
      */
     virtual void clearCurrent() {}
+    
+    /**
+     * Get the OpenGL renderer
+     * @return Reference to the renderer, or nullptr if not initialized
+     */
+    virtual OpenGLRenderer* getRenderer() { return nullptr; }
 
 #ifdef HAVE_EGL
     /**

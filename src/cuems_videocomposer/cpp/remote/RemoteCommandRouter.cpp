@@ -5,6 +5,7 @@
 #include "../input/VideoFileInput.h"
 #include "../sync/MIDISyncSource.h"
 #include "../osd/OSDManager.h"
+#include "../display/OpenGLRenderer.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
 #include "../utils/SMPTEUtils.h"
 #include <sstream>
@@ -187,6 +188,84 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     });
     registerLayerCommand("blendmode", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerBlendMode(layer, args);
+    });
+    
+    // Layer color correction commands
+    registerLayerCommand("brightness", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerBrightness(layer, args);
+    });
+    registerLayerCommand("contrast", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerContrast(layer, args);
+    });
+    registerLayerCommand("saturation", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerSaturation(layer, args);
+    });
+    registerLayerCommand("hue", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerHue(layer, args);
+    });
+    registerLayerCommand("gamma", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerGamma(layer, args);
+    });
+    registerLayerCommand("color/reset", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerColorReset(layer, args);
+    });
+    
+    // Register master layer commands (composite transforms)
+    registerAppCommand("master/opacity", [this](const std::vector<std::string>& args) {
+        return handleMasterOpacity(args);
+    });
+    registerAppCommand("master/position", [this](const std::vector<std::string>& args) {
+        return handleMasterPosition(args);
+    });
+    registerAppCommand("master/scale", [this](const std::vector<std::string>& args) {
+        return handleMasterScale(args);
+    });
+    registerAppCommand("master/xscale", [this](const std::vector<std::string>& args) {
+        return handleMasterXScale(args);
+    });
+    registerAppCommand("master/yscale", [this](const std::vector<std::string>& args) {
+        return handleMasterYScale(args);
+    });
+    registerAppCommand("master/rotation", [this](const std::vector<std::string>& args) {
+        return handleMasterRotation(args);
+    });
+    registerAppCommand("master/corners", [this](const std::vector<std::string>& args) {
+        return handleMasterCorners(args);
+    });
+    registerAppCommand("master/corner1", [this](const std::vector<std::string>& args) {
+        return handleMasterCorner1(args);
+    });
+    registerAppCommand("master/corner2", [this](const std::vector<std::string>& args) {
+        return handleMasterCorner2(args);
+    });
+    registerAppCommand("master/corner3", [this](const std::vector<std::string>& args) {
+        return handleMasterCorner3(args);
+    });
+    registerAppCommand("master/corner4", [this](const std::vector<std::string>& args) {
+        return handleMasterCorner4(args);
+    });
+    registerAppCommand("master/reset", [this](const std::vector<std::string>& args) {
+        return handleMasterReset(args);
+    });
+    
+    // Master color correction commands
+    registerAppCommand("master/brightness", [this](const std::vector<std::string>& args) {
+        return handleMasterBrightness(args);
+    });
+    registerAppCommand("master/contrast", [this](const std::vector<std::string>& args) {
+        return handleMasterContrast(args);
+    });
+    registerAppCommand("master/saturation", [this](const std::vector<std::string>& args) {
+        return handleMasterSaturation(args);
+    });
+    registerAppCommand("master/hue", [this](const std::vector<std::string>& args) {
+        return handleMasterHue(args);
+    });
+    registerAppCommand("master/gamma", [this](const std::vector<std::string>& args) {
+        return handleMasterGamma(args);
+    });
+    registerAppCommand("master/color/reset", [this](const std::vector<std::string>& args) {
+        return handleMasterColorReset(args);
     });
 }
 
@@ -1196,6 +1275,269 @@ bool RemoteCommandRouter::handleLayerBlendMode(VideoLayer* layer, const std::vec
             return false;
     }
     
+    return true;
+}
+
+// Master layer handlers (composite transforms)
+bool RemoteCommandRouter::handleMasterOpacity(const std::vector<std::string>& args) {
+    if (args.empty() || !app_) {
+        return false;
+    }
+    
+    float opacity = std::atof(args[0].c_str());
+    app_->renderer().masterProperties().opacity = std::max(0.0f, std::min(1.0f, opacity));
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterPosition(const std::vector<std::string>& args) {
+    if (args.size() < 2 || !app_) {
+        return false;
+    }
+    
+    auto& props = app_->renderer().masterProperties();
+    props.x = std::atof(args[0].c_str());
+    props.y = std::atof(args[1].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterScale(const std::vector<std::string>& args) {
+    if (args.size() < 2 || !app_) {
+        return false;
+    }
+    
+    auto& props = app_->renderer().masterProperties();
+    props.scaleX = std::atof(args[0].c_str());
+    props.scaleY = std::atof(args[1].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterXScale(const std::vector<std::string>& args) {
+    if (args.empty() || !app_) {
+        return false;
+    }
+    
+    app_->renderer().masterProperties().scaleX = std::atof(args[0].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterYScale(const std::vector<std::string>& args) {
+    if (args.empty() || !app_) {
+        return false;
+    }
+    
+    app_->renderer().masterProperties().scaleY = std::atof(args[0].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterRotation(const std::vector<std::string>& args) {
+    if (args.empty() || !app_) {
+        return false;
+    }
+    
+    app_->renderer().masterProperties().rotation = std::atof(args[0].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterCorners(const std::vector<std::string>& args) {
+    if (args.size() < 8 || !app_) {
+        return false;
+    }
+    
+    auto& props = app_->renderer().masterProperties();
+    for (int i = 0; i < 8; ++i) {
+        props.cornerDeform.corners[i] = std::atof(args[i].c_str());
+    }
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterCorner1(const std::vector<std::string>& args) {
+    if (args.size() < 2 || !app_) {
+        return false;
+    }
+    
+    auto& props = app_->renderer().masterProperties();
+    props.cornerDeform.corners[0] = std::atof(args[0].c_str());
+    props.cornerDeform.corners[1] = std::atof(args[1].c_str());
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterCorner2(const std::vector<std::string>& args) {
+    if (args.size() < 2 || !app_) {
+        return false;
+    }
+    
+    auto& props = app_->renderer().masterProperties();
+    props.cornerDeform.corners[2] = std::atof(args[0].c_str());
+    props.cornerDeform.corners[3] = std::atof(args[1].c_str());
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterCorner3(const std::vector<std::string>& args) {
+    if (args.size() < 2 || !app_) {
+        return false;
+    }
+    
+    auto& props = app_->renderer().masterProperties();
+    props.cornerDeform.corners[4] = std::atof(args[0].c_str());
+    props.cornerDeform.corners[5] = std::atof(args[1].c_str());
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterCorner4(const std::vector<std::string>& args) {
+    if (args.size() < 2 || !app_) {
+        return false;
+    }
+    
+    auto& props = app_->renderer().masterProperties();
+    props.cornerDeform.corners[6] = std::atof(args[0].c_str());
+    props.cornerDeform.corners[7] = std::atof(args[1].c_str());
+    props.cornerDeform.enabled = true;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterReset(const std::vector<std::string>& args) {
+    if (!app_) {
+        return false;
+    }
+    
+    app_->renderer().masterProperties().reset();
+    return true;
+}
+
+// Layer color correction handlers
+bool RemoteCommandRouter::handleLayerBrightness(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    float brightness = std::atof(args[0].c_str());
+    brightness = std::max(-1.0f, std::min(1.0f, brightness));  // Clamp to -1 to 1
+    layer->properties().colorAdjust.brightness = brightness;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerContrast(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    float contrast = std::atof(args[0].c_str());
+    contrast = std::max(0.0f, std::min(2.0f, contrast));  // Clamp to 0 to 2
+    layer->properties().colorAdjust.contrast = contrast;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerSaturation(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    float saturation = std::atof(args[0].c_str());
+    saturation = std::max(0.0f, std::min(2.0f, saturation));  // Clamp to 0 to 2
+    layer->properties().colorAdjust.saturation = saturation;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerHue(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    float hue = std::atof(args[0].c_str());
+    // Wrap hue to -180 to 180
+    while (hue > 180.0f) hue -= 360.0f;
+    while (hue < -180.0f) hue += 360.0f;
+    layer->properties().colorAdjust.hue = hue;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerGamma(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
+    }
+    
+    float gamma = std::atof(args[0].c_str());
+    gamma = std::max(0.1f, std::min(3.0f, gamma));  // Clamp to 0.1 to 3
+    layer->properties().colorAdjust.gamma = gamma;
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerColorReset(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer) {
+        return false;
+    }
+    
+    layer->properties().colorAdjust.reset();
+    return true;
+}
+
+// Master color correction handlers
+bool RemoteCommandRouter::handleMasterBrightness(const std::vector<std::string>& args) {
+    if (args.empty() || !app_) {
+        return false;
+    }
+    
+    float brightness = std::atof(args[0].c_str());
+    brightness = std::max(-1.0f, std::min(1.0f, brightness));
+    app_->renderer().masterProperties().colorAdjust.brightness = brightness;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterContrast(const std::vector<std::string>& args) {
+    if (args.empty() || !app_) {
+        return false;
+    }
+    
+    float contrast = std::atof(args[0].c_str());
+    contrast = std::max(0.0f, std::min(2.0f, contrast));
+    app_->renderer().masterProperties().colorAdjust.contrast = contrast;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterSaturation(const std::vector<std::string>& args) {
+    if (args.empty() || !app_) {
+        return false;
+    }
+    
+    float saturation = std::atof(args[0].c_str());
+    saturation = std::max(0.0f, std::min(2.0f, saturation));
+    app_->renderer().masterProperties().colorAdjust.saturation = saturation;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterHue(const std::vector<std::string>& args) {
+    if (args.empty() || !app_) {
+        return false;
+    }
+    
+    float hue = std::atof(args[0].c_str());
+    while (hue > 180.0f) hue -= 360.0f;
+    while (hue < -180.0f) hue += 360.0f;
+    app_->renderer().masterProperties().colorAdjust.hue = hue;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterGamma(const std::vector<std::string>& args) {
+    if (args.empty() || !app_) {
+        return false;
+    }
+    
+    float gamma = std::atof(args[0].c_str());
+    gamma = std::max(0.1f, std::min(3.0f, gamma));
+    app_->renderer().masterProperties().colorAdjust.gamma = gamma;
+    return true;
+}
+
+bool RemoteCommandRouter::handleMasterColorReset(const std::vector<std::string>& args) {
+    if (!app_) {
+        return false;
+    }
+    
+    app_->renderer().masterProperties().colorAdjust.reset();
     return true;
 }
 
