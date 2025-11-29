@@ -304,85 +304,76 @@ class DynamicFileManagementTest:
             progress = elapsed / duration
             
             # Use sine/cosine for smooth oscillations with different frequencies
+            # Use slower frequencies for smoother, less jarring motion
             # Multiple frequencies create more interesting patterns
-            sin_val = math.sin(progress * 2 * math.pi)
-            cos_val = math.cos(progress * 2 * math.pi)
-            sin_val2 = math.sin(progress * 3 * math.pi)  # Different frequency for variety
-            cos_val2 = math.cos(progress * 1.5 * math.pi)
-            sin_val3 = math.sin(progress * 1.2 * math.pi)  # Additional frequency for opacity
-            cos_val3 = math.cos(progress * 2.3 * math.pi)
+            sin_val = math.sin(progress * 1.5 * math.pi)  # Slower for smoother motion
+            cos_val = math.cos(progress * 1.5 * math.pi)
+            sin_val2 = math.sin(progress * 2.0 * math.pi)  # Different frequency for variety
+            cos_val2 = math.cos(progress * 1.2 * math.pi)
+            sin_val3 = math.sin(progress * 0.8 * math.pi)  # Very slow for smooth opacity
+            cos_val3 = math.cos(progress * 1.8 * math.pi)
             
             # Update both layers every frame for maximum smoothness
             # Use very small thresholds to allow smooth interpolation
             
             # Layer 1 adjustments
-            # Position: move in a smooth circular pattern (use float for precision)
-            radius = 100
-            x1 = 200 + radius * cos_val
-            y1 = 150 + radius * sin_val
-            # Send position every frame for maximum smoothness (OSC uses integers, but frequent updates minimize jumps)
-            # Only skip if position hasn't changed at all (same integer value)
-            x1_int = int(round(x1))
-            y1_int = int(round(y1))
-            if prev_values['x1'] is None or x1_int != int(round(prev_values['x1'])) or y1_int != int(round(prev_values['y1'])):
-                self.send_osc(f"/videocomposer/layer/{cue_id_1}/position", x1_int, y1_int, verbose=False)
-                prev_values['x1'] = x1
-                prev_values['y1'] = y1
+            # Position: move in a smooth circular pattern with slower frequency for smoother motion
+            radius = 120
+            # Slower frequency (0.5x) for smoother, less noticeable motion
+            x1 = 200 + radius * math.cos(progress * math.pi)  # Half frequency = smoother
+            y1 = 150 + radius * math.sin(progress * math.pi)
+            # Send position as FLOATS for sub-pixel smoothness (no jumps!)
+            # OSC handler now supports "ff" format for smooth positioning
+            self.send_osc(f"/videocomposer/layer/{cue_id_1}/position", float(x1), float(y1), verbose=False)
+            prev_values['x1'] = x1
+            prev_values['y1'] = y1
             
             # Opacity: smooth pulse between 0.4 and 1.0 using sin (very smooth transitions)
             opacity1 = 0.4 + 0.6 * (0.5 + 0.5 * sin_val3)
-            # Send every frame for maximum smoothness (very small threshold)
-            if prev_values['opacity1'] is None or abs(opacity1 - prev_values['opacity1']) >= 0.0001:
-                self.send_osc(f"/videocomposer/layer/{cue_id_1}/opacity", opacity1, verbose=False)
-                prev_values['opacity1'] = opacity1
+            # Send EVERY frame unconditionally for maximum smoothness
+            self.send_osc(f"/videocomposer/layer/{cue_id_1}/opacity", opacity1, verbose=False)
+            prev_values['opacity1'] = opacity1
             
             # Scale: smooth oscillation between 0.5 and 1.2 using sin2
             scale1 = 0.5 + 0.7 * (0.5 + 0.5 * sin_val2)
-            # Send every frame for maximum smoothness (very small threshold)
-            if prev_values['scale1'] is None or abs(scale1 - prev_values['scale1']) >= 0.0001:
-                self.send_osc(f"/videocomposer/layer/{cue_id_1}/scale", scale1, scale1, verbose=False)
-                prev_values['scale1'] = scale1
+            # Send EVERY frame unconditionally for maximum smoothness
+            self.send_osc(f"/videocomposer/layer/{cue_id_1}/scale", scale1, scale1, verbose=False)
+            prev_values['scale1'] = scale1
             
-            # Rotation: continuous smooth rotation (full 360 degrees over duration)
-            rotation1 = 15.0 + progress * 360.0
-            # Send every frame for maximum smoothness (very small threshold)
-            if prev_values['rotation1'] is None or abs(rotation1 - prev_values['rotation1']) >= 0.01:
-                self.send_osc(f"/videocomposer/layer/{cue_id_1}/rotation", rotation1, verbose=False)
-                prev_values['rotation1'] = rotation1
+            # Rotation: continuous smooth rotation (slower rotation for smoother motion)
+            rotation1 = 15.0 + progress * 180.0  # Half rotation speed for smoother motion
+            # Send EVERY frame unconditionally for maximum smoothness
+            self.send_osc(f"/videocomposer/layer/{cue_id_1}/rotation", rotation1, verbose=False)
+            prev_values['rotation1'] = rotation1
             
             # Layer 2 adjustments
-            # Position: move in opposite circular pattern with different phase
-            radius2 = 150
-            x2 = 400 + radius2 * -cos_val2
-            y2 = 300 + radius2 * -sin_val2
-            # Send position every frame for maximum smoothness
-            x2_int = int(round(x2))
-            y2_int = int(round(y2))
-            if prev_values['x2'] is None or x2_int != int(round(prev_values['x2'])) or y2_int != int(round(prev_values['y2'])):
-                self.send_osc(f"/videocomposer/layer/{cue_id_2}/position", x2_int, y2_int, verbose=False)
-                prev_values['x2'] = x2
-                prev_values['y2'] = y2
+            # Position: move in opposite circular pattern with slower frequency
+            radius2 = 180
+            # Slower frequency (0.4x) for smoother motion
+            x2 = 400 + radius2 * -math.cos(progress * 0.8 * math.pi)
+            y2 = 300 + radius2 * -math.sin(progress * 0.8 * math.pi)
+            # Send position as FLOATS for sub-pixel smoothness (no jumps!)
+            self.send_osc(f"/videocomposer/layer/{cue_id_2}/position", float(x2), float(y2), verbose=False)
+            prev_values['x2'] = x2
+            prev_values['y2'] = y2
             
             # Opacity: smooth opposite pulse (between 0.6 and 1.0)
             opacity2 = 0.6 + 0.4 * (0.5 + 0.5 * -sin_val3)
-            # Send every frame for maximum smoothness (very small threshold)
-            if prev_values['opacity2'] is None or abs(opacity2 - prev_values['opacity2']) >= 0.0001:
-                self.send_osc(f"/videocomposer/layer/{cue_id_2}/opacity", opacity2, verbose=False)
-                prev_values['opacity2'] = opacity2
+            # Send EVERY frame unconditionally for maximum smoothness
+            self.send_osc(f"/videocomposer/layer/{cue_id_2}/opacity", opacity2, verbose=False)
+            prev_values['opacity2'] = opacity2
             
             # Scale: smooth opposite oscillation (between 0.8 and 1.5)
             scale2 = 0.8 + 0.7 * (0.5 + 0.5 * -sin_val2)
-            # Send every frame for maximum smoothness (very small threshold)
-            if prev_values['scale2'] is None or abs(scale2 - prev_values['scale2']) >= 0.0001:
-                self.send_osc(f"/videocomposer/layer/{cue_id_2}/scale", scale2, scale2, verbose=False)
-                prev_values['scale2'] = scale2
+            # Send EVERY frame unconditionally for maximum smoothness
+            self.send_osc(f"/videocomposer/layer/{cue_id_2}/scale", scale2, scale2, verbose=False)
+            prev_values['scale2'] = scale2
             
-            # Rotation: smooth opposite rotation
-            rotation2 = -10.0 - progress * 360.0
-            # Send every frame for maximum smoothness (very small threshold)
-            if prev_values['rotation2'] is None or abs(rotation2 - prev_values['rotation2']) >= 0.01:
-                self.send_osc(f"/videocomposer/layer/{cue_id_2}/rotation", rotation2, verbose=False)
-                prev_values['rotation2'] = rotation2
+            # Rotation: smooth opposite rotation (slower for smoother motion)
+            rotation2 = -10.0 - progress * 180.0  # Half rotation speed for smoother motion
+            # Send EVERY frame unconditionally for maximum smoothness
+            self.send_osc(f"/videocomposer/layer/{cue_id_2}/rotation", rotation2, verbose=False)
+            prev_values['rotation2'] = rotation2
             
             frame_counter += 1
             

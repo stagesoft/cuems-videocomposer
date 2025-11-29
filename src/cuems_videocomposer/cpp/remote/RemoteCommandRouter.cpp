@@ -473,8 +473,14 @@ bool RemoteCommandRouter::handleLayerPosition(VideoLayer* layer, const std::vect
     }
 
     auto& props = layer->properties();
-    props.x = std::atoi(args[0].c_str());
-    props.y = std::atoi(args[1].c_str());
+    // Support both integer and float positions for smooth movement
+    // Try parsing as float first (for smooth sub-pixel positioning)
+    float x = std::atof(args[0].c_str());
+    float y = std::atof(args[1].c_str());
+    props.x = static_cast<int>(x);
+    props.y = static_cast<int>(y);
+    // Store sub-pixel precision if needed (for future interpolation)
+    // For now, we use integer positions but accept float input for smooth updates
     return true;
 }
 

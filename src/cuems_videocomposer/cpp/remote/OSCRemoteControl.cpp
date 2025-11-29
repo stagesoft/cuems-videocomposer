@@ -78,7 +78,8 @@ bool OSCRemoteControl::initialize(int port) {
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/seek", "i", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/play", "", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/pause", "", handleOSCMessage, userData_);
-    lo_server_add_method(oscServer_, "/videocomposer/layer/*/position", "ii", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/position", "ii", handleOSCMessage, userData_);  // Integer position
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/position", "ff", handleOSCMessage, userData_);  // Float position (smooth)
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/opacity", "f", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/visible", "i", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/zorder", "i", handleOSCMessage, userData_);
@@ -133,11 +134,11 @@ int OSCRemoteControl::process() {
     }
 
     // Use time-based budget to ensure video playback always has priority
-    // Only spend a maximum of 1ms processing OSC messages per frame
+    // Spend up to 2ms processing OSC messages per frame
     // This ensures video rendering (60fps = 16.67ms per frame) is never blocked
     // Video playback has absolute priority - OSC processing is secondary
-    const auto MAX_TIME_BUDGET = std::chrono::microseconds(1000); // 1ms max per frame (6% of frame time)
-    const int MAX_MESSAGES_PER_FRAME = 5; // Additional safety limit - process very few messages per frame
+    const auto MAX_TIME_BUDGET = std::chrono::microseconds(2000); // 2ms max per frame (12% of frame time)
+    const int MAX_MESSAGES_PER_FRAME = 50; // Process enough messages for smooth animation (8+ per frame typical)
     
     auto startTime = std::chrono::high_resolution_clock::now();
     int count = 0;
