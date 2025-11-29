@@ -30,16 +30,19 @@ LGPL v3 is designed to allow linking with proprietary libraries, making it compa
 1. **Trademark Attribution**: Use "NDI®" with registered trademark symbol and include statement: "NDI® is a registered trademark of Vizrt NDI AB" near first usage or in footnotes
 2. **Website Link**: Include link to [https://ndi.video/](https://ndi.video/) near all instances where NDI is used/selected in the product, on website, and in documentation
 3. **EULA Terms**: Application's EULA must include:
+
    - Prohibition on modifying the NDI SDK
    - Prohibition on reverse engineering/disassembly
    - Warranty disclaimers on behalf of NewTek/Vizrt
    - Liability disclaimers for NewTek/Vizrt
    - Export compliance requirements
    - Copyright notice showing NewTek, Inc. as copyright owner
+
 4. **DLL Management**: Include NDI DLLs in application directories (not system path)
 5. **No Tool Distribution**: Do not distribute NDI tools; provide link to [ndi.video/tools](https://ndi.video/tools) instead
 
 **Implementation Notes**:
+
 - NDI SDK header files can be distributed under MIT license (already compatible)
 - Binary libraries can be bundled with the application
 - All NDI SDK license requirements must be met in the application's UI, documentation, and EULA
@@ -388,6 +391,7 @@ endif()
 To comply with NDI SDK license requirements, the following must be implemented:
 
 ### 1. UI Attribution
+
 - Add "NDI®" trademark symbol and attribution statement in:
   - About dialog
   - NDI output configuration UI
@@ -398,17 +402,20 @@ To comply with NDI SDK license requirements, the following must be implemented:
   - About dialog
 
 ### 2. Documentation
+
 - Add NDI SDK license section to README
 - Include NDI® trademark attribution
 - Link to [ndi.video/tools](https://ndi.video/tools) for NDI tools
 - Document NDI SDK requirements in build instructions
 
 ### 3. EULA/License File
+
 - Include NDI SDK license terms in application's license file
 - Add required disclaimers and restrictions
 - Include copyright notice for NewTek, Inc.
 
 ### 4. Build System
+
 - Ensure NDI SDK DLLs are copied to application directory (not system path)
 - Include NDI SDK license file in distribution
 - Document NDI SDK version and source in build output
