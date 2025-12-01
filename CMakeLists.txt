@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 project(cuems-videocomposer VERSION 0.1.0 LANGUAGES C CXX)
 
 # Set C++ standard
-set(CMAKE_CXX_STANDARD 17)
+# libossia requires C++20 for concepts and std::span
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Build type
@@ -355,6 +356,43 @@ if(ENABLE_OSC)
     endif()
 endif()
 
+# OSCQuery (libossia)
+option(ENABLE_OSCQUERY "Enable OSCQuery protocol support" ON)
+
+if(ENABLE_OSCQUERY)
+    # Check if libossia directory exists
+    set(LIBOSSIA_DIR "${CMAKE_SOURCE_DIR}/../libossia")
+    if(EXISTS "${LIBOSSIA_DIR}/CMakeLists.txt")
+        # Configure libossia build options
+        set(OSSIA_STATIC ON CACHE BOOL "" FORCE)
+        set(OSSIA_NO_QT ON CACHE BOOL "" FORCE)
+        set(OSSIA_NO_INSTALL ON CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_OSCQUERY ON CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_OSC ON CACHE BOOL "" FORCE)
+        # Disable unused protocols
+        set(OSSIA_PROTOCOL_MIDI OFF CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_MINUIT OFF CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_HTTP OFF CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_WEBSOCKETS OFF CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_SERIAL OFF CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_PHIDGETS OFF CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_JOYSTICK OFF CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_WIIMOTE OFF CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_ARTNET OFF CACHE BOOL "" FORCE)
+        set(OSSIA_PROTOCOL_OPENTRACK OFF CACHE BOOL "" FORCE)
+        
+        # Add libossia as subdirectory
+        add_subdirectory(${LIBOSSIA_DIR} ${CMAKE_BINARY_DIR}/libossia)
+        
+        add_definitions(-DHAVE_OSCQUERY)
+        set(OSSIA_FOUND TRUE)
+        message(STATUS "OSCQuery support enabled (libossia)")
+    else()
+        message(WARNING "libossia not found at ${LIBOSSIA_DIR} - OSCQuery support disabled")
+        set(OSSIA_FOUND FALSE)
+    endif()
+endif()
+
 # LTC
 if(ENABLE_LTC)
     pkg_check_modules(LTC libltc)
@@ -594,6 +632,17 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/display/XineramaHelper.cpp
     src/cuems_videocomposer/cpp/remote/OSCRemoteControl.cpp
     src/cuems_videocomposer/cpp/remote/RemoteCommandRouter.cpp
+)
+
+# Add OSCQueryServer source file conditionally
+if(ENABLE_OSCQUERY AND OSSIA_FOUND)
+    list(APPEND CPP_SOURCES
+        src/cuems_videocomposer/cpp/remote/OSCQueryServer.cpp
+    )
+endif()
+
+# Continue with remaining sources
+list(APPEND CPP_SOURCES
     src/cuems_videocomposer/cpp/osd/OSDManager.cpp
     src/cuems_videocomposer/cpp/osd/OSDRenderer.cpp
     src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
@@ -925,6 +974,11 @@ target_link_libraries(cuems-videocomposer
     m
     pthread
 )
+
+# Link ossia if OSCQuery is enabled
+if(ENABLE_OSCQUERY AND OSSIA_FOUND)
+    target_link_libraries(cuems-videocomposer ossia)
+endif()
 
 # Link cuems-mediadecoder (always available)
 target_link_libraries(cuems-videocomposer cuems-mediadecoder)

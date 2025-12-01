@@ -45,6 +45,9 @@
 #include "display/DisplayManager.h"
 #include "display/OpenGLRenderer.h"
 #include "remote/OSCRemoteControl.h"
+#ifdef HAVE_OSCQUERY
+#include "remote/OSCQueryServer.h"
+#endif
 
 #ifdef HAVE_VAAPI_INTEROP
 #endif
@@ -234,6 +237,16 @@ bool VideoComposerApplication::initializeRemoteControl() {
         std::cerr << "Failed to initialize OSC remote control on port " << oscPort << std::endl;
         return false;
     }
+    
+#ifdef HAVE_OSCQUERY
+    // Initialize OSCQuery server (optional - runs alongside OSC)
+    int wsPort = config_->getInt("oscquery_ws_port", 7001);
+    oscQueryServer_ = std::make_unique<OSCQueryServer>(this, layerManager_.get());
+    if (!oscQueryServer_->initialize(oscPort, wsPort)) {
+        LOG_WARNING << "Failed to initialize OSCQuery server (continuing without it)";
+        oscQueryServer_.reset();
+    }
+#endif
     
     return true;
 }
@@ -491,6 +504,13 @@ void VideoComposerApplication::shutdown() {
         remoteControl_->shutdown();
         remoteControl_.reset();
     }
+    
+#ifdef HAVE_OSCQUERY
+    if (oscQueryServer_) {
+        oscQueryServer_->shutdown();
+        oscQueryServer_.reset();
+    }
+#endif
     
     if (displayBackend_) {
         displayBackend_->closeWindow();
@@ -758,6 +778,16 @@ bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, con
         return false;
     }
     
+    // Notify OSCQueryServer of new layer
+#ifdef HAVE_OSCQUERY
+    if (oscQueryServer_ && oscQueryServer_->isActive()) {
+        VideoLayer* addedLayer = layerManager_->getLayerByCueId(cueId);
+        if (addedLayer) {
+            oscQueryServer_->onLayerAdded(addedLayer->getLayerId());
+        }
+    }
+#endif
+    
     LOG_INFO << "Created layer with file: " << filepath << " (cue ID: " << cueId << ")";
     return true;
 }
@@ -782,6 +812,14 @@ bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const
     setupLayerWithInputSource(layer, std::move(inputSource));
     
     LOG_INFO << "Loaded file into layer: " << filepath << " (cue ID: " << cueId << ")";
+    
+    // Notify OSCQueryServer of file update
+#ifdef HAVE_OSCQUERY
+    if (oscQueryServer_ && oscQueryServer_->isActive() && layer) {
+        oscQueryServer_->updateLayerFile(layer->getLayerId(), filepath);
+    }
+#endif
+    
     return true;
 }
 
@@ -795,11 +833,26 @@ bool VideoComposerApplication::unloadFileFromLayer(const std::string& cueId) {
     // Clear input source (unloads file but keeps layer)
     layer->setInputSource(nullptr);
     
+    // Notify OSCQueryServer of file unload
+#ifdef HAVE_OSCQUERY
+    if (oscQueryServer_ && oscQueryServer_->isActive()) {
+        oscQueryServer_->updateLayerFile(layer->getLayerId(), "");
+    }
+#endif
+    
     // Clear sync source
     layer->setSyncSource(nullptr);
     
     LOG_INFO << "Unloaded file from layer (cue ID: " << cueId << ")";
     return true;
+}
+
+void VideoComposerApplication::notifyLayerRemoved(int layerId) {
+#ifdef HAVE_OSCQUERY
+    if (oscQueryServer_ && oscQueryServer_->isActive()) {
+        oscQueryServer_->onLayerRemoved(layerId);
+    }
+#endif
 }
 
 } // namespace videocomposer

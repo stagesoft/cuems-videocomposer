@@ -23,6 +23,10 @@ class OpenGLRenderer;
 class VaapiInterop;
 #endif
 
+#ifdef HAVE_OSCQUERY
+class OSCQueryServer;
+#endif
+
 /**
  * VideoComposerApplication - Main application orchestrator
  * 
@@ -65,6 +69,9 @@ public:
     bool createLayerWithFile(const std::string& cueId, const std::string& filepath);
     bool loadFileIntoLayer(const std::string& cueId, const std::string& filepath);
     bool unloadFileFromLayer(const std::string& cueId);
+    
+    // OSCQuery notifications (called from RemoteCommandRouter)
+    void notifyLayerRemoved(int layerId);
 
 private:
     // Component initialization
@@ -96,6 +103,9 @@ private:
     // Component pointers
     std::unique_ptr<ConfigurationManager> config_;
     std::unique_ptr<RemoteControl> remoteControl_;
+#ifdef HAVE_OSCQUERY
+    std::unique_ptr<OSCQueryServer> oscQueryServer_;
+#endif
     std::unique_ptr<DisplayBackend> displayBackend_;
     std::unique_ptr<DisplayManager> displayManager_;
     std::unique_ptr<LayerManager> layerManager_;

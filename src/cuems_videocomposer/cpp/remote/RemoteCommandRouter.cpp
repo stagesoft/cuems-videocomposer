@@ -460,7 +460,11 @@ bool RemoteCommandRouter::handleLayerRemove(const std::vector<std::string>& args
 
     int layerId = std::atoi(args[0].c_str());
     if (layerManager_) {
-        return layerManager_->removeLayer(layerId);
+        bool result = layerManager_->removeLayer(layerId);
+        if (result && app_) {
+            app_->notifyLayerRemoved(layerId);
+        }
+        return result;
     }
     return false;
 }

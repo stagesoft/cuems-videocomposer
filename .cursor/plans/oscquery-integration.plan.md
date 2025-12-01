@@ -11,6 +11,7 @@ Add OSCQuery protocol support to cuems-videocomposer using libossia, enabling au
 ### What is OSCQuery?
 
 OSCQuery extends OSC by adding:
+
 1. **HTTP/JSON Server** - Exposes the OSC address space as a queryable JSON tree
 2. **Zeroconf/mDNS Discovery** - Automatic service advertisement on the network
 3. **Parameter Metadata** - Types, ranges, descriptions, current values for each endpoint
@@ -44,29 +45,39 @@ cuems-engine (Python/pyossia) ──OSCQuery──> cuems-videocomposer (C++/lib
 ## Benefits
 
 | Benefit | Description |
+
 |---------|-------------|
+
 | **Auto-Discovery** | Control apps (cuems-engine, QLab, TouchOSC) can find cuems-videocomposer on the network automatically |
+
 | **Parameter Introspection** | Clients can discover all ~80 OSC endpoints programmatically without documentation |
+
 | **State Queries** | Clients can GET current values (opacity=0.5, visible=true, etc.) |
+
 | **Metadata** | Expose parameter types, ranges, descriptions (e.g., "opacity: FLOAT [0.0-1.0]") |
+
 | **Tool Compatibility** | Works with OSCQuery browsers in VDMX, Score (ossia), TouchOSC Pro, etc. |
+
 | **Ecosystem Consistency** | Aligns with cuems-engine/cuems-utils which already use libossia |
 
 ## Implementation Plan
 
 ### Phase 1: Build System Integration
+
 - [ ] Add libossia as a CMake subdirectory or find_package
 - [ ] Configure libossia build options (disable unused features)
 - [ ] Verify compilation with existing codebase
 - [ ] Update debian/control for new dependencies
 
 ### Phase 2: OSCQueryServer Class
+
 - [ ] Create `src/cuems_videocomposer/cpp/remote/OSCQueryServer.h`
 - [ ] Create `src/cuems_videocomposer/cpp/remote/OSCQueryServer.cpp`
 - [ ] Initialize libossia device with OSCQuery protocol
 - [ ] Integrate with VideoComposerApplication startup/shutdown
 
 ### Phase 3: Parameter Registration
+
 - [ ] Register application-level parameters (/videocomposer/quit, /fps, /offset)
 - [ ] Register layer parameters (opacity, position, scale, rotation, etc.)
 - [ ] Register master layer parameters
@@ -75,17 +86,20 @@ cuems-engine (Python/pyossia) ──OSCQuery──> cuems-videocomposer (C++/lib
 - [ ] Add parameter metadata (ranges, descriptions, access modes)
 
 ### Phase 4: Value Callbacks & State Sync
+
 - [ ] Connect libossia callbacks to existing RemoteCommandRouter handlers
 - [ ] Implement value push for state changes (update clients when values change)
 - [ ] Handle dynamic layer creation/removal
 
 ### Phase 5: Testing & Integration
+
 - [ ] Test with cuems-engine using ClientDevices.OSCQUERY
 - [ ] Test with Score (ossia) for parameter browsing
 - [ ] Test mDNS discovery on local network
 - [ ] Performance testing (ensure no frame drops)
 
 ### Phase 6: cuems-engine Updates
+
 - [ ] Update VideoClient to use OSCQUERY instead of OSC
 - [ ] Remove manual endpoint definitions (auto-discovered)
 - [ ] Add state query on connect
@@ -239,11 +253,15 @@ endif()
 ### Ports Configuration
 
 | Port | Protocol | Purpose |
+
 |------|----------|---------|
+
 | 7000 | OSC (UDP) | OSC message reception (same as current) |
+
 | 7001 | WebSocket | OSCQuery HTTP/WebSocket server |
 
 The OSCQuery server advertises both ports via mDNS:
+
 - `_osc._udp` → port 7000
 - `_oscjson._tcp` → port 7001
 
@@ -252,11 +270,13 @@ The OSCQuery server advertises both ports via mDNS:
 Full list of parameters to expose via OSCQuery:
 
 **Application Level:**
+
 - `/videocomposer/quit` - Impulse
 - `/videocomposer/fps` - Float [1.0-120.0]
 - `/videocomposer/offset` - Int64 (frames)
 
 **Per-Layer (`/videocomposer/layer/{id}/`):**
+
 - `opacity` - Float [0.0-1.0]
 - `visible` - Bool
 - `position` - Vec2f
@@ -283,10 +303,12 @@ Full list of parameters to expose via OSCQuery:
 - `pan` - Int
 
 **Master Level (`/videocomposer/master/`):**
+
 - Same transform parameters as per-layer
 - Same color correction parameters
 
 **OSD (`/videocomposer/osd/`):**
+
 - `frame` - Bool/Int
 - `smpte` - Bool/Int
 - `text` - String
@@ -297,6 +319,7 @@ Full list of parameters to expose via OSCQuery:
 ## Dependencies
 
 libossia brings bundled dependencies:
+
 - WebSocket++ (WebSocket server)
 - Avahi client (mDNS on Linux) - system package: `libavahi-client-dev`
 - RapidJSON (JSON serialization)
@@ -310,11 +333,13 @@ libavahi-client-dev
 ## Compatibility
 
 ### Option A: Replace liblo with libossia (Recommended)
+
 - libossia includes full OSC support
 - Simpler codebase, single protocol stack
 - cuems-engine can use `ClientDevices.OSCQUERY`
 
 ### Option B: Run both in parallel
+
 - Keep liblo for backwards compatibility
 - Add libossia OSCQuery on different ports
 - More complex but preserves legacy client support
@@ -324,12 +349,19 @@ libavahi-client-dev
 ## Effort Estimate
 
 | Task | Time |
+
 |------|------|
+
 | Add libossia to CMake build | 2-4 hours |
+
 | Create OSCQueryServer class | 1-2 days |
+
 | Register all ~80 parameters | 1-2 days |
+
 | Add value callbacks | 1 day |
+
 | Testing with cuems-engine | 1 day |
+
 | **Total** | **~1 week** |
 
 ## cuems-engine Changes
@@ -374,4 +406,3 @@ class VideoClient(OssiaClient):
 - OSCQuery specification: https://github.com/Vidvox/OSCQueryProposal
 - cuems-engine OSCQuery usage: `/home/ion/src/cuems/cuems-engine/src/cuemsengine/osc/`
 - libossia C++ examples: `/home/ion/src/cuems/libossia/examples/Network/`
-
