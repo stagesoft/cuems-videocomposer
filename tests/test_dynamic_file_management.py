@@ -1237,8 +1237,8 @@ class DynamicFileManagementTest:
 
 def main():
     parser = argparse.ArgumentParser(description="Test dynamic file management system")
-    parser.add_argument("--videocomposer", default="build/cuems-videocomposer",
-                       help="Path to videocomposer executable (or use wrapper script)")
+    parser.add_argument("--videocomposer", default="scripts/cuems-videocomposer-wrapper.sh",
+                       help="Path to videocomposer wrapper script")
     parser.add_argument("--video1", required=True,
                        help="Path to first test video file or NDI source (e.g., 'ndi://Source Name')")
     parser.add_argument("--video2", 
@@ -1260,14 +1260,17 @@ def main():
     video2 = args.video2 if args.video2 else args.video1
     video3 = args.video3  # Only set if explicitly provided (None otherwise)
     
-    # Support wrapper script for NDI library path
+    # Use wrapper script
     videocomposer_bin = args.videocomposer
     if not Path(videocomposer_bin).exists():
-        # Try wrapper script
-        wrapper = Path(__file__).parent.parent / "cuems-videocomposer.sh"
+        # Try wrapper script in scripts directory
+        wrapper = Path(__file__).parent.parent / "scripts" / "cuems-videocomposer-wrapper.sh"
         if wrapper.exists():
             videocomposer_bin = str(wrapper)
             print(f"Using wrapper script: {videocomposer_bin}")
+        else:
+            print(f"ERROR: videocomposer wrapper script not found at {wrapper}")
+            sys.exit(1)
     
     test = DynamicFileManagementTest(
         videocomposer_bin,

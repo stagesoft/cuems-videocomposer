@@ -375,8 +375,8 @@ class H264HardwareDecodingTest:
 
 def main():
     parser = argparse.ArgumentParser(description="Test H.264 hardware decoding")
-    parser.add_argument("--videocomposer", default="build/cuems-videocomposer",
-                       help="Path to videocomposer executable")
+    parser.add_argument("--videocomposer", default="scripts/cuems-videocomposer-wrapper.sh",
+                       help="Path to videocomposer wrapper script")
     parser.add_argument("--video", required=True,
                        help="Path to H.264 test video file")
     parser.add_argument("--osc-port", type=int, default=7770,

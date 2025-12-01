@@ -23,16 +23,16 @@ def discover_ndi_sources(timeout_seconds=5):
     """
     Discover NDI sources using videocomposer's --discover-ndi flag.
     """
-    videocomposer_bin = Path(__file__).parent.parent / "build" / "cuems-videocomposer"
+    videocomposer_bin = Path(__file__).parent.parent / "scripts" / "cuems-videocomposer-wrapper.sh"
     
-    # Try system path if build directory doesn't exist
+    # Try system path if wrapper script doesn't exist
     if not videocomposer_bin.exists():
         import shutil
         bin_path = shutil.which("cuems-videocomposer")
         if bin_path:
             videocomposer_bin = Path(bin_path)
         else:
-            print("ERROR: videocomposer not found. Build the application first.")
+            print("ERROR: videocomposer wrapper script not found.")
             print(f"  Expected at: {videocomposer_bin}")
             return []
     
@@ -115,7 +115,7 @@ Examples:
             print(f"  {i}. {source}")
         print()
         print("To use with videocomposer:")
-        print(f'  ./build/cuems-videocomposer --layer 1 --file "ndi://{sources[0]}"')
+        print(f'  ./scripts/cuems-videocomposer-wrapper.sh --layer 1 --file "ndi://{sources[0]}"')
     else:
         print("No NDI sources found.")
         print()

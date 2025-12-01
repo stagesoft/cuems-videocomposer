@@ -141,14 +141,12 @@ if __name__ == "__main__":
     script_dir = Path(__file__).parent
     project_root = script_dir.parent
     
-    videocomposer_bin = project_root / "build" / "cuems-videocomposer"
-    if not videocomposer_bin.exists():
-        videocomposer_bin = project_root / "cuems-videocomposer"
+    videocomposer_bin = project_root / "scripts" / "cuems-videocomposer-wrapper.sh"
     
     video_path = project_root / "video_test_files" / "test_playback_patterns.mov"
     
     if not videocomposer_bin.exists():
-        print(f"Error: videocomposer binary not found at {videocomposer_bin}")
+        print(f"Error: videocomposer wrapper script not found at {videocomposer_bin}")
         sys.exit(1)
     
     if not video_path.exists():

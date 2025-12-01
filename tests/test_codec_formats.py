@@ -43,11 +43,12 @@ class CodecFormatTest:
         signal.signal(signal.SIGINT, self._signal_handler)
         
     def _find_videocomposer(self) -> Path:
-        """Find videocomposer binary."""
-        # Try build directory first
-        build_dir = Path(__file__).parent.parent / "build"
-        if (build_dir / "cuems-videocomposer").exists():
-            return build_dir / "cuems-videocomposer"
+        """Find videocomposer wrapper script."""
+        # Try scripts directory first
+        scripts_dir = Path(__file__).parent.parent / "scripts"
+        wrapper_script = scripts_dir / "cuems-videocomposer-wrapper.sh"
+        if wrapper_script.exists():
+            return wrapper_script
         
         # Try system path
         import shutil
@@ -55,7 +56,7 @@ class CodecFormatTest:
         if bin_path:
             return Path(bin_path)
         
-        raise FileNotFoundError("Could not find cuems-videocomposer binary")
+        raise FileNotFoundError("Could not find cuems-videocomposer wrapper script")
     
     def _signal_handler(self, signum, frame):
         """Handle Ctrl-C (SIGINT) to stop tests gracefully."""

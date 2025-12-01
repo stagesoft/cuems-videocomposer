@@ -43,9 +43,12 @@ def test_corner_deformation(video_path, duration=30):
     
     # Start videocomposer
     print("\n[1/6] Starting videocomposer...")
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent
+    wrapper_script = project_root / "scripts" / "cuems-videocomposer-wrapper.sh"
     proc = subprocess.Popen(
-        ["./cuems-videocomposer", "--osc", "7700"],
-        cwd="/home/ion/src/cuems/cuems-videocomposer/build",
+        [str(wrapper_script), "--osc", "7700"],
+        cwd=str(project_root),
         stdout=None,
         stderr=None
     )
@@ -161,9 +164,12 @@ def test_multi_layer_warping(video1, video2, duration=30):
     print("="*70)
     
     print("\n[1/4] Starting videocomposer...")
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent
+    wrapper_script = project_root / "scripts" / "cuems-videocomposer-wrapper.sh"
     proc = subprocess.Popen(
-        ["./cuems-videocomposer", "--osc", "7700"],
-        cwd="/home/ion/src/cuems/cuems-videocomposer/build",
+        [str(wrapper_script), "--osc", "7700"],
+        cwd=str(project_root),
         stdout=None,
         stderr=None
     )

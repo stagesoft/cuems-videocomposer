@@ -56,9 +56,9 @@ class NDITest:
         signal.signal(signal.SIGINT, self._signal_handler)
     
     def _find_videocomposer(self) -> Path:
-        """Find videocomposer executable."""
+        """Find videocomposer wrapper script."""
         possible_paths = [
-            Path(__file__).parent.parent / "build" / "cuems-videocomposer",
+            Path(__file__).parent.parent / "scripts" / "cuems-videocomposer-wrapper.sh",
             Path("/usr/bin/cuems-videocomposer"),
             Path("/usr/local/bin/cuems-videocomposer"),
         ]

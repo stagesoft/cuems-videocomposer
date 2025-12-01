@@ -95,11 +95,11 @@ class MTCIntegrationTest:
     
     def launch_videocomposer(self):
         """Launch the videocomposer application with the test video."""
-        videocomposer_path = Path(__file__).parent.parent / "build" / "cuems-videocomposer"
+        videocomposer_path = Path(__file__).parent.parent / "scripts" / "cuems-videocomposer-wrapper.sh"
         
         if not videocomposer_path.exists():
-            print(f"ERROR: videocomposer executable not found at {videocomposer_path}")
-            print("Please build the project first: cd build && cmake .. && make")
+            print(f"ERROR: videocomposer wrapper script not found at {videocomposer_path}")
+            print("Make sure scripts/cuems-videocomposer-wrapper.sh exists")
             return False
         
         # Build command - include video file only if it exists

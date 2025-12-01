@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 # Test configuration
-VIDEOCOMPOSER_BIN = "./build/cuems-videocomposer"
+VIDEOCOMPOSER_BIN = "./scripts/cuems-videocomposer-wrapper.sh"
 VIDEO_TEST_DIR = "video_test_files"
 TEST_DURATION = 3  # seconds per test
 
@@ -49,10 +49,10 @@ def log_info(msg):
     print(f"{Colors.OKCYAN}ℹ {msg}{Colors.ENDC}")
 
 def check_binary():
-    """Check if videocomposer binary exists"""
+    """Check if videocomposer wrapper script exists"""
     if not os.path.exists(VIDEOCOMPOSER_BIN):
-        log_error(f"Videocomposer binary not found: {VIDEOCOMPOSER_BIN}")
-        log_info("Build with: cd build && make")
+        log_error(f"Videocomposer wrapper script not found: {VIDEOCOMPOSER_BIN}")
+        log_info("Make sure scripts/cuems-videocomposer-wrapper.sh exists")
         return False
     return True
 
