@@ -56,18 +56,31 @@ bool FFmpegLiveInput::open(const std::string& source) {
         return false;
     }
 
+    // Get stream for framerate
+    AVStream* avStream = mediaReader_.getStream(videoStream);
+    if (!avStream) {
+        LOG_ERROR << "Failed to get stream";
+        mediaReader_.close();
+        return false;
+    }
+
     // Get frame info
     frameInfo_.width = codecParams->width;
     frameInfo_.height = codecParams->height;
     frameInfo_.aspect = static_cast<float>(codecParams->width) / static_cast<float>(codecParams->height);
     
-    // Try to get framerate from codec parameters
-    AVRational frameRate = codecParams->framerate;
-    if (frameRate.num > 0 && frameRate.den > 0) {
-        frameInfo_.framerate = static_cast<double>(frameRate.num) / static_cast<double>(frameRate.den);
-    } else {
-        frameInfo_.framerate = 25.0;  // Default
+    // Try to get framerate from stream (r_frame_rate is preferred over avg_frame_rate)
+    double framerate = 0.0;
+    if (avStream->r_frame_rate.den > 0 && avStream->r_frame_rate.num > 0) {
+        framerate = av_q2d(avStream->r_frame_rate);
     }
+    if (framerate <= 0.0 && avStream->avg_frame_rate.den > 0 && avStream->avg_frame_rate.num > 0) {
+        framerate = av_q2d(avStream->avg_frame_rate);
+    }
+    if (framerate <= 0.0) {
+        framerate = 25.0;  // Default
+    }
+    frameInfo_.framerate = framerate;
 
     frameInfo_.format = PixelFormat::RGBA32;
     frameInfo_.totalFrames = 0;  // Live stream
