@@ -32,6 +32,10 @@
 #ifdef HAVE_WAYLAND
 #include "display/WaylandDisplay.h"
 #endif
+#ifdef HAVE_DRM_BACKEND
+#include "display/drm/DRMBackend.h"
+#include "display/HeadlessDisplay.h"
+#endif
 #include "input/HAPVideoInput.h"
 #include "input/FFmpegLiveInput.h"
 #ifdef HAVE_NDI_SDK
@@ -164,16 +168,13 @@ bool VideoComposerApplication::initializeConfiguration(int argc, char** argv) {
 bool VideoComposerApplication::initializeDisplay() {
     // Create display manager
     displayManager_ = std::make_unique<DisplayManager>();
-    if (!displayManager_->detectDisplays()) {
-        std::cerr << "Failed to detect displays" << std::endl;
-        return false;
-    }
-
-    // Auto-detect and create display backend (prefer Wayland over X11)
+    
+    // Auto-detect and create display backend (prefer Wayland over X11, then DRM)
     const char* waylandDisplay = getenv("WAYLAND_DISPLAY");
     const char* x11Display = getenv("DISPLAY");
     
     bool waylandAttempted = false;
+    bool needsDisplayManager = true;
     
 #ifdef HAVE_WAYLAND
     if (waylandDisplay) {
@@ -185,30 +186,68 @@ bool VideoComposerApplication::initializeDisplay() {
     if (x11Display) {
         LOG_INFO << "Using X11 display backend (DISPLAY=" << x11Display << ")";
         displayBackend_ = std::make_unique<X11Display>();
-    } else {
-        LOG_ERROR << "No display server detected (neither WAYLAND_DISPLAY nor DISPLAY set)";
-        return false;
     }
-
-    // Create window (single window mode for now)
-    if (!displayManager_->createWindows(displayBackend_.get(), 0)) {
-#ifdef HAVE_WAYLAND
-        // If Wayland failed but X11 is available, try falling back
-        if (waylandAttempted && x11Display) {
-            LOG_WARNING << "Wayland backend failed - falling back to X11";
-            displayBackend_.reset();
-            displayBackend_ = std::make_unique<X11Display>();
+#ifdef HAVE_DRM_BACKEND
+    else {
+        // No display server - try DRM/KMS direct rendering
+        LOG_INFO << "No display server detected - attempting DRM/KMS direct rendering";
+        auto drmBackend = std::make_unique<DRMBackend>();
+        
+        if (drmBackend->openWindow()) {
+            LOG_INFO << "DRM/KMS backend initialized with " << drmBackend->getOutputCount() << " output(s)";
+            displayBackend_ = std::move(drmBackend);
+            needsDisplayManager = false;  // DRM manages its own outputs
+        } else {
+            // DRM failed - try headless as last resort
+            LOG_WARNING << "DRM backend failed - attempting headless mode";
+            auto headless = std::make_unique<HeadlessDisplay>();
+            headless->setDimensions(1920, 1080);  // Default resolution
             
-            if (!displayManager_->createWindows(displayBackend_.get(), 0)) {
-                LOG_ERROR << "X11 fallback also failed";
+            if (headless->openWindow()) {
+                LOG_INFO << "Headless display backend initialized (1920x1080)";
+                displayBackend_ = std::move(headless);
+                needsDisplayManager = false;
+            } else {
+                LOG_ERROR << "All display backends failed (X11, Wayland, DRM, Headless)";
                 return false;
             }
-            LOG_INFO << "Successfully fell back to X11 display backend";
-        } else
+        }
+    }
+#else
+    else {
+        LOG_ERROR << "No display server detected (neither WAYLAND_DISPLAY nor DISPLAY set)";
+        LOG_ERROR << "DRM backend not available - rebuild with libgbm-dev installed";
+        return false;
+    }
 #endif
-        {
-            LOG_ERROR << "Failed to create display window";
+
+    // Only use DisplayManager for X11/Wayland backends
+    if (needsDisplayManager) {
+        if (!displayManager_->detectDisplays()) {
+            std::cerr << "Failed to detect displays" << std::endl;
             return false;
+        }
+        
+        // Create window (single window mode for now)
+        if (!displayManager_->createWindows(displayBackend_.get(), 0)) {
+#ifdef HAVE_WAYLAND
+            // If Wayland failed but X11 is available, try falling back
+            if (waylandAttempted && x11Display) {
+                LOG_WARNING << "Wayland backend failed - falling back to X11";
+                displayBackend_.reset();
+                displayBackend_ = std::make_unique<X11Display>();
+                
+                if (!displayManager_->createWindows(displayBackend_.get(), 0)) {
+                    LOG_ERROR << "X11 fallback also failed";
+                    return false;
+                }
+                LOG_INFO << "Successfully fell back to X11 display backend";
+            } else
+#endif
+            {
+                LOG_ERROR << "Failed to create display window";
+                return false;
+            }
         }
     }
 

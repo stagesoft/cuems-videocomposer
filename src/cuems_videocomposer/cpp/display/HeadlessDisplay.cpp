@@ -60,12 +60,19 @@ bool HeadlessDisplay::openWindow() {
     makeCurrent();
     
     // Initialize GLEW
+    // Note: On EGL without X11, GLEW may report errors about missing GLX
+    // but OpenGL functions should still work
     glewExperimental = GL_TRUE;
     GLenum glewErr = glewInit();
-    if (glewErr != GLEW_OK) {
-        LOG_ERROR << "HeadlessDisplay: GLEW init failed: " << glewGetErrorString(glewErr);
+    if (glewErr != GLEW_OK && glewErr != GLEW_ERROR_NO_GLX_DISPLAY) {
+        // GLEW_ERROR_NO_GLX_DISPLAY (4) is expected on EGL-only systems
+        LOG_ERROR << "HeadlessDisplay: GLEW init failed: " << glewGetErrorString(glewErr)
+                  << " (error code: " << glewErr << ")";
         closeWindow();
         return false;
+    }
+    if (glewErr == GLEW_ERROR_NO_GLX_DISPLAY) {
+        LOG_INFO << "HeadlessDisplay: GLEW: No GLX display (EGL mode) - continuing";
     }
     
     // Create offscreen surface

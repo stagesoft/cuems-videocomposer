@@ -155,7 +155,10 @@ bool DRMSurface::init(EGLContext sharedContext) {
     eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
                                          (EGLNativeWindowType)gbmSurface_, nullptr);
     if (eglSurface_ == EGL_NO_SURFACE) {
-        LOG_ERROR << "DRMSurface: Failed to create EGL surface";
+        EGLint eglError = eglGetError();
+        LOG_ERROR << "DRMSurface: Failed to create EGL surface (EGL error: " << eglError << ")";
+        LOG_ERROR << "DRMSurface: This typically happens when the GPU is already in use by X11/Wayland";
+        LOG_ERROR << "DRMSurface: For DRM direct rendering, run from a TTY (Ctrl+Alt+F2) without X/Wayland";
         cleanup();
         return false;
     }
