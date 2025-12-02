@@ -5,9 +5,13 @@
 ### Primary Focus (Development Priority)
 
 | Tier | Hardware | Priority | Use Case |
+
 |------|----------|----------|----------|
+
 | 🥇 **Low-End** | Intel N100/N101 | ⭐⭐⭐⭐⭐ | Embedded, signage, small shows |
+
 | 🥈 **Mid-Range** | Intel i5 / AMD Ryzen (iGPU) | ⭐⭐⭐⭐⭐ | Desktop, medium shows |
+
 | 🥉 **High-End** | NVIDIA Discrete | ⭐⭐⭐ | Large shows, complex effects |
 
 **Development Strategy:** Optimize for low-end first, then scale up. If it runs well on N100, it will fly on NVIDIA.
@@ -19,12 +23,19 @@
 ### Intel N100/N101 (Low-End)
 
 | Spec | Value | Implications |
+
 |------|-------|--------------|
+
 | CPU | 4 E-cores @ 3.4GHz | Single-threaded tasks only |
+
 | GPU | Intel UHD (24 EUs) | Limited shader performance |
+
 | Memory BW | ~51 GB/s | Texture upload bottleneck |
+
 | OpenGL | 4.6 | All features available |
+
 | VAAPI | Full H.264/H.265/AV1 | Excellent HW decode |
+
 | TDP | 6-12W | Thermal throttling possible |
 
 **N100 Sweet Spot:** 2-3 VAAPI layers @ 1080p, or 2 HAP layers
@@ -32,11 +43,17 @@
 ### Intel i5 / AMD Ryzen iGPU (Mid-Range)
 
 | Spec | Intel i5 (12th+) | AMD Ryzen (7000+) |
+
 |------|------------------|-------------------|
+
 | CPU | 6P+4E cores | 6-8 cores |
+
 | GPU | Iris Xe (96 EUs) | RDNA 3 (4-12 CUs) |
+
 | Memory BW | 76-89 GB/s | 89 GB/s (DDR5) |
+
 | OpenGL | 4.6 | 4.6 |
+
 | VAAPI | Full | Full |
 
 **Mid-Range Sweet Spot:** 4-5 layers @ 1080p, 2-3 @ 4K
@@ -44,10 +61,15 @@
 ### NVIDIA Discrete (High-End)
 
 | Spec | GTX 16xx | RTX 30xx/40xx |
+
 |------|----------|---------------|
+
 | Memory BW | 192-336 GB/s | 448-1008 GB/s |
+
 | Shader cores | 1280-1536 | 5888-16384 |
+
 | NVDEC | Yes | Yes (AV1 on 30xx+) |
+
 | OpenGL | 4.6 | 4.6 |
 
 **NVIDIA Sweet Spot:** 6+ layers, complex effects, 4K content
@@ -59,24 +81,35 @@
 ### Intel N100/N101
 
 | Goal | Layers | Resolution | Status |
+
 |------|--------|------------|--------|
+
 | Minimum | 2 VAAPI | 1080p @ 60fps | Must achieve |
+
 | Target | 3 VAAPI | 1080p @ 60fps | Should achieve |
+
 | Stretch | 2 HAP + 1 VAAPI | 1080p @ 60fps | Nice to have |
 
 ### Intel i5 / AMD Ryzen
 
 | Goal | Layers | Resolution | Status |
+
 |------|--------|------------|--------|
+
 | Minimum | 4 VAAPI | 1080p @ 60fps | Must achieve |
+
 | Target | 4-5 mixed | 1080p @ 60fps | Should achieve |
+
 | Stretch | 3 layers | 4K @ 60fps | Nice to have |
 
 ### NVIDIA Discrete
 
 | Goal | Layers | Resolution | Status |
+
 |------|--------|------------|--------|
+
 | Target | 6 HAP/VAAPI | 1080p @ 60fps | Should achieve |
+
 | Stretch | 6 layers | 4K @ 60fps | Nice to have |
 
 ---
@@ -86,20 +119,31 @@
 ### Per-Platform Measurements
 
 | Component | N100 | i5/Ryzen | NVIDIA |
+
 |-----------|------|----------|--------|
+
 | VAAPI decode (per layer) | ~0.5ms | ~0.3ms | N/A (NVDEC) |
+
 | NVDEC decode (per layer) | N/A | N/A | ~0.2ms |
+
 | HAP read + upload | ~2-3ms | ~1-2ms | ~0.5-1ms |
+
 | CPU frame upload | ~1-1.5ms | ~0.5-1ms | ~0.3ms |
+
 | Layer render | ~0.5-0.8ms | ~0.3-0.5ms | ~0.1-0.2ms |
+
 | Compositing | ~2-3ms | ~1-2ms | ~0.5-1ms |
 
 ### Frame Budget (16.67ms @ 60fps)
 
 | Platform | 2 Layers | 3 Layers | 4 Layers | 6 Layers |
+
 |----------|----------|----------|----------|----------|
+
 | N100 | ~8ms ✅ | ~12ms ⚠️ | ~16ms ❌ | N/A |
+
 | i5/Ryzen | ~4ms ✅ | ~6ms ✅ | ~8ms ✅ | ~12ms ⚠️ |
+
 | NVIDIA | ~2ms ✅ | ~3ms ✅ | ~4ms ✅ | ~6ms ✅ |
 
 ---
@@ -107,16 +151,27 @@
 ## Optimization Summary (Platform-Prioritized)
 
 | # | Optimization | N100 Impact | i5/Ryzen Impact | NVIDIA Impact | Status |
+
 |---|--------------|-------------|-----------------|---------------|--------|
+
 | 1 | HAP Async I/O | ⚠️ Limited | ✅ High | ✅ High | 📋 TODO |
+
 | 2 | PBO Double-Buffer | ✅ **Critical** | ✅ High | ✅ Medium | 📋 TODO |
+
 | 3 | VAAPI Zero-Copy | ✅ **Critical** | ✅ High | N/A | ✅ **DONE** (needs testing) |
+
 | 4 | Reduced Draw Calls | ✅ High | ✅ Medium | 🟡 Low | 📋 TODO |
+
 | 5 | UBO | ✅ Medium | 🟡 Low | 🟡 Low | 📋 TODO |
+
 | 6 | Instanced Rendering | 🟡 Medium | ✅ High | ✅ Medium | 📋 TODO |
+
 | 7 | Persistent Mapped | 🟡 Medium | ✅ Medium | 🟡 Low | 📋 TODO |
+
 | 8 | Compute Composite | ❌ Skip | 🟡 Optional | ✅ Good | ❌ Skip |
+
 | 9 | Texture Arrays | ❌ Skip | 🟡 Optional | 🟡 Optional | ❌ Skip |
+
 | 10 | Vulkan Backend | ❌ Skip | ❌ Skip | ❌ Skip | ❌ Skip |
 
 **Key Insight:** For N100, reducing CPU overhead and memory bandwidth is more important than GPU optimizations.
@@ -130,9 +185,13 @@
 ### Platform Relevance
 
 | Platform | Relevance | Notes |
+
 |----------|-----------|-------|
+
 | N100 | ⚠️ Limited | HAP is CPU-limited; prefer VAAPI |
+
 | i5/Ryzen | ✅ High | Good HAP performance with pre-buffer |
+
 | NVIDIA | ✅ High | Excellent HAP performance |
 
 ### Summary
@@ -144,9 +203,13 @@
 ### Metrics by Platform
 
 | Platform | HAP Layers | Before | After |
+
 |----------|------------|--------|-------|
+
 | N100 | 2 | ~6ms | ~3ms (still CPU limited) |
+
 | i5/Ryzen | 4 | ~6ms | ~2ms |
+
 | NVIDIA | 6 | ~6ms | ~1ms |
 
 ### Complexity: Medium (15-22 hours with platform detection)
@@ -213,9 +276,13 @@ public:
 ### Metrics by Platform
 
 | Platform | Before | After | Improvement |
+
 |----------|--------|-------|-------------|
+
 | N100 | 1.5ms | 0.3ms | **80%** ⭐ |
+
 | i5/Ryzen | 0.8ms | 0.15ms | **80%** |
+
 | NVIDIA | 0.3ms | 0.05ms | **80%** |
 
 ### Priority: ⭐⭐⭐⭐⭐ (Critical for N100)
@@ -223,6 +290,7 @@ public:
 ### Complexity: Medium (6-8 hours)
 
 ### Files to Modify
+
 - `OpenGLRenderer.h/cpp` - Add PBO management
 - `LayerTextureCache` - Store PBO per layer
 
@@ -232,17 +300,24 @@ public:
 
 ### ✅ ALREADY IMPLEMENTED - Needs Testing Only
 
-**Status:** Code complete, compiles successfully.  
-**Reference:** See `vaapi.plan.md` for full implementation details.  
+**Status:** Code complete, compiles successfully.
+
+**Reference:** See `vaapi.plan.md` for full implementation details.
+
 **Testing Required:** Needs verification on Intel/AMD hardware (developed on NVIDIA system).
 
 ### Implementation Files (Complete)
 
 | File | Description |
+
 |------|-------------|
+
 | `src/cuems_videocomposer/cpp/hwdec/VaapiInterop.h/cpp` | Complete zero-copy pipeline |
+
 | `src/cuems_videocomposer/cpp/input/VideoFileInput.cpp` | Integration with decoder |
+
 | `src/cuems_videocomposer/cpp/display/X11Display.cpp` | EGL context + VAAPI support |
+
 | `src/cuems_videocomposer/cpp/display/WaylandDisplay.cpp` | EGL context + VAAPI support |
 
 ### Pipeline (Fully Implemented)
@@ -267,9 +342,13 @@ VAAPI decode → VASurface → vaExportSurfaceHandle() → DMA-BUF FD
 ### Expected Metrics by Platform
 
 | Platform | Without Zero-Copy | With Zero-Copy | Improvement |
+
 |----------|------------------|----------------|-------------|
+
 | N100 | ~2ms/frame | ~0.1ms/frame | **95%** |
+
 | i5/Ryzen | ~1ms/frame | ~0.05ms/frame | **95%** |
+
 | NVIDIA | N/A | N/A | (Uses NVDEC) |
 
 ### Action Required: Testing Only
@@ -340,9 +419,13 @@ for (int i = 0; i < layerCount; i++) {
 ### Metrics by Platform
 
 | Platform | Before | After | Improvement |
+
 |----------|--------|-------|-------------|
+
 | N100 | 0.3ms overhead | 0.1ms | **65%** |
+
 | i5/Ryzen | 0.15ms overhead | 0.05ms | **65%** |
+
 | NVIDIA | 0.05ms overhead | 0.02ms | **60%** |
 
 ### Priority: ⭐⭐⭐⭐ (Important for N100)
@@ -381,9 +464,13 @@ glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(uniforms), &uniforms);
 ### Metrics
 
 | Platform | Before | After | Improvement |
+
 |----------|--------|-------|-------------|
+
 | N100 | 0.1ms | 0.03ms | **70%** |
+
 | i5/Ryzen | 0.05ms | 0.01ms | **80%** |
+
 | NVIDIA | 0.02ms | 0.005ms | **75%** |
 
 ### Priority: ⭐⭐⭐
@@ -401,6 +488,7 @@ Instanced rendering shines when rendering many similar objects. For layers with 
 ### Limitation for Video Compositor
 
 Each layer typically has:
+
 - Different texture
 - Different transform
 - Potentially different blend mode
@@ -413,7 +501,6 @@ This limits instancing benefits, but we can still batch same-blend-mode layers.
 // For layers with same blend mode
 glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, layerCount);
 ```
-
 ```glsl
 // Vertex shader
 layout(std430, binding = 0) buffer LayerData {
@@ -429,9 +516,13 @@ void main() {
 ### Platform Considerations
 
 | Platform | Benefit | Notes |
+
 |----------|---------|-------|
+
 | N100 | Medium | Reduces draw calls, but shader may be slower |
+
 | i5/Ryzen | High | Good balance |
+
 | NVIDIA | High | Excels at instancing |
 
 ### Priority: ⭐⭐⭐
@@ -464,9 +555,13 @@ glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
 ### Metrics
 
 | Platform | Additional Improvement (over PBO) |
+
 |----------|-----------------------------------|
+
 | N100 | 10-15% |
+
 | i5/Ryzen | 10-15% |
+
 | NVIDIA | 5-10% |
 
 ### Priority: ⭐⭐
@@ -516,9 +611,13 @@ glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
 ### Phase 1: N100 Critical Path (Week 1-2)
 
 | Optimization | Hours | Impact on N100 | Status |
+
 |--------------|-------|----------------|--------|
+
 | #3 VAAPI Zero-Copy | 2-4 (testing only) | ⭐⭐⭐⭐⭐ | ✅ Code complete |
+
 | #2 PBO Double-Buffer | 6-8 | ⭐⭐⭐⭐⭐ | 📋 TODO |
+
 | **Total** | 8-12 | - | - |
 
 **Expected N100 Result:** 3 VAAPI layers @ 60fps achievable
@@ -526,24 +625,35 @@ glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
 ### Phase 2: General Optimizations (Week 3)
 
 | Optimization | Hours | Impact |
+
 |--------------|-------|--------|
+
 | #4 Reduced Draw Calls | 4-6 | High |
+
 | #5 UBO | 3-4 | Medium |
+
 | **Total** | 7-10 | - |
 
 ### Phase 3: HAP Support (Week 4-5)
 
 | Optimization | Hours | Impact |
+
 |--------------|-------|--------|
+
 | #1 HAP Async I/O | 15-22 | High for i5/NVIDIA |
+
 | **Total** | 15-22 | - |
 
 ### Phase 4: Advanced (Week 6+)
 
 | Optimization | Hours | Impact |
+
 |--------------|-------|--------|
+
 | #6 Instanced Rendering | 8-10 | Medium |
+
 | #7 Persistent Mapped | 2-3 | Low |
+
 | **Total** | 10-13 | - |
 
 ---
@@ -553,27 +663,41 @@ glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
 ### Intel N100 (3 VAAPI Layers @ 1080p)
 
 | Stage | Frame Time | Status |
+
 |-------|------------|--------|
+
 | Current | ~12ms | ⚠️ Dropping frames |
+
 | + VAAPI Zero-Copy | ~7ms | ✅ Stable |
+
 | + PBO | ~5ms | ✅ Headroom |
+
 | + Reduced Draws | ~4ms | ✅ Comfortable |
 
 ### Intel i5 / AMD Ryzen (4-5 Layers @ 1080p)
 
 | Stage | Frame Time | Status |
+
 |-------|------------|--------|
+
 | Current | ~8ms | ⚠️ Tight |
+
 | + VAAPI Zero-Copy | ~5ms | ✅ Good |
+
 | + PBO | ~4ms | ✅ Good |
+
 | + HAP Async | ~3ms | ✅ Excellent |
 
 ### NVIDIA (6 Layers @ 1080p)
 
 | Stage | Frame Time | Status |
+
 |-------|------------|--------|
+
 | Current | ~6ms | ✅ Good |
+
 | + HAP Async | ~3ms | ✅ Excellent |
+
 | + PBO | ~2.5ms | ✅ Excellent |
 
 ---
@@ -581,13 +705,21 @@ glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
 ## Hardware Requirements Matrix
 
 | Optimization | N100 | i5/Ryzen | NVIDIA | Min OpenGL |
+
 |--------------|------|----------|--------|------------|
+
 | PBO | ✅ | ✅ | ✅ | 2.1 |
+
 | VAAPI Zero-Copy | ✅ | ✅ | ❌ | EGL ext |
+
 | Reduced Draws | ✅ | ✅ | ✅ | 4.5 (DSA) |
+
 | UBO | ✅ | ✅ | ✅ | 3.1 |
+
 | Instanced | ✅ | ✅ | ✅ | 3.1 |
+
 | Persistent | ✅ | ✅ | ✅ | 4.4 |
+
 | HAP Async | ⚠️ | ✅ | ✅ | Any |
 
 ---
@@ -597,14 +729,23 @@ glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
 ### Required Test Configurations
 
 | Platform | Configuration | Layers | Resolution |
+
 |----------|---------------|--------|------------|
+
 | N100 | Mini PC (8GB RAM) | 2-3 VAAPI | 1080p |
+
 | N100 | Mini PC (16GB RAM) | 3 VAAPI | 1080p |
+
 | i5 | Desktop DDR4 | 4 VAAPI | 1080p |
+
 | i5 | Desktop DDR5 | 5 mixed | 1080p |
+
 | Ryzen | Laptop 780M | 4-5 mixed | 1080p |
+
 | Ryzen | Desktop | 2-3 layers | 4K |
+
 | GTX 1660 | Desktop | 6 HAP | 1080p |
+
 | RTX 3060 | Desktop | 6 layers | 4K |
 
 ---
@@ -631,17 +772,21 @@ Week 3-4:  HAP Async I/O     [15-22h]→ For i5/NVIDIA HAP users
 ### Intel N100/N101
 
 **Already Done:**
+
 1. ✅ VAAPI Zero-Copy - **IMPLEMENTED** (needs testing on N100)
 
 **Must Have (TODO):**
+
 2. 📋 PBO Double-Buffer - Critical
 3. 📋 Reduced Draw Calls - Important
 
 **Should Have:**
+
 4. ⚠️ UBO - Easy win
 5. ⚠️ Persistent Mapped - Small gain
 
 **Skip:**
+
 - HAP optimization (prefer VAAPI on this platform)
 - Compute shaders (GPU too weak)
 - Instancing (marginal benefit)
@@ -649,13 +794,16 @@ Week 3-4:  HAP Async I/O     [15-22h]→ For i5/NVIDIA HAP users
 ### Intel i5 / AMD Ryzen
 
 **Already Done:**
+
 1. ✅ VAAPI Zero-Copy - **IMPLEMENTED** (needs testing on i5/Ryzen)
 
 **Must Have (TODO):**
+
 2. 📋 PBO Double-Buffer - Important
 3. 📋 HAP Async I/O - For HAP content
 
 **Should Have:**
+
 4. ⚠️ Reduced Draw Calls
 5. ⚠️ UBO
 6. ⚠️ Instanced Rendering
@@ -663,9 +811,11 @@ Week 3-4:  HAP Async I/O     [15-22h]→ For i5/NVIDIA HAP users
 ### NVIDIA (Future)
 
 **Should Have:**
+
 1. ✅ HAP Async I/O - Main bottleneck
 2. ✅ PBO Double-Buffer - Still helps
 3. ⚠️ Instanced Rendering - Good for many layers
 
 **Nice to Have:**
+
 4. ❓ Compute Composite - When we need more power

@@ -158,6 +158,14 @@ private:
     bool handleMasterHue(const std::vector<std::string>& args);
     bool handleMasterGamma(const std::vector<std::string>& args);
     bool handleMasterColorReset(const std::vector<std::string>& args);
+    
+    // Display configuration handlers (Phase 4)
+    bool handleDisplayList(const std::vector<std::string>& args);
+    bool handleDisplayMode(const std::vector<std::string>& args);
+    bool handleDisplayAssign(const std::vector<std::string>& args);
+    bool handleDisplayBlend(const std::vector<std::string>& args);
+    bool handleDisplaySave(const std::vector<std::string>& args);
+    bool handleDisplayLoad(const std::vector<std::string>& args);
 };
 
 } // namespace videocomposer

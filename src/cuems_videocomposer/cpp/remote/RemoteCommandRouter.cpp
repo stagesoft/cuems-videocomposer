@@ -267,6 +267,26 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerAppCommand("master/color/reset", [this](const std::vector<std::string>& args) {
         return handleMasterColorReset(args);
     });
+    
+    // Display configuration commands (Phase 4)
+    registerAppCommand("display/list", [this](const std::vector<std::string>& args) {
+        return handleDisplayList(args);
+    });
+    registerAppCommand("display/mode", [this](const std::vector<std::string>& args) {
+        return handleDisplayMode(args);
+    });
+    registerAppCommand("display/assign", [this](const std::vector<std::string>& args) {
+        return handleDisplayAssign(args);
+    });
+    registerAppCommand("display/blend", [this](const std::vector<std::string>& args) {
+        return handleDisplayBlend(args);
+    });
+    registerAppCommand("display/save", [this](const std::vector<std::string>& args) {
+        return handleDisplaySave(args);
+    });
+    registerAppCommand("display/load", [this](const std::vector<std::string>& args) {
+        return handleDisplayLoad(args);
+    });
 }
 
 RemoteCommandRouter::~RemoteCommandRouter() {
@@ -1538,6 +1558,108 @@ bool RemoteCommandRouter::handleMasterColorReset(const std::vector<std::string>&
     }
     
     app_->renderer().masterProperties().colorAdjust.reset();
+    return true;
+}
+
+// ============================================================================
+// Display Configuration Handlers (Phase 4)
+// ============================================================================
+
+bool RemoteCommandRouter::handleDisplayList(const std::vector<std::string>& args) {
+    (void)args;  // No arguments needed
+    
+    // TODO: When DisplayConfiguration is integrated into VideoComposerApplication,
+    // this will return a JSON-formatted list of all outputs with their metadata.
+    // For now, log a message indicating the feature is available.
+    LOG_INFO << "Display list requested - feature pending full integration";
+    
+    // Return true to indicate command was recognized
+    return true;
+}
+
+bool RemoteCommandRouter::handleDisplayMode(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/display/mode <name> <width> <height> <refresh>
+    if (args.size() < 4) {
+        LOG_WARNING << "display/mode requires: <name> <width> <height> <refresh>";
+        return false;
+    }
+    
+    std::string name = args[0];
+    int width = std::atoi(args[1].c_str());
+    int height = std::atoi(args[2].c_str());
+    double refresh = std::atof(args[3].c_str());
+    
+    LOG_INFO << "Display mode change requested: " << name 
+             << " to " << width << "x" << height << "@" << refresh << "Hz"
+             << " - feature pending full integration";
+    
+    return true;
+}
+
+bool RemoteCommandRouter::handleDisplayAssign(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/display/assign <layerId> <outputName>
+    if (args.size() < 2) {
+        LOG_WARNING << "display/assign requires: <layerId> <outputName>";
+        return false;
+    }
+    
+    int layerId = std::atoi(args[0].c_str());
+    std::string outputName = args[1];
+    
+    LOG_INFO << "Layer " << layerId << " assigned to output " << outputName
+             << " - feature pending full integration";
+    
+    return true;
+}
+
+bool RemoteCommandRouter::handleDisplayBlend(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/display/blend <outputName> <left> <right> <top> <bottom>
+    if (args.size() < 5) {
+        LOG_WARNING << "display/blend requires: <outputName> <left> <right> <top> <bottom>";
+        return false;
+    }
+    
+    std::string outputName = args[0];
+    float left = std::atof(args[1].c_str());
+    float right = std::atof(args[2].c_str());
+    float top = std::atof(args[3].c_str());
+    float bottom = std::atof(args[4].c_str());
+    
+    LOG_INFO << "Blend region for " << outputName 
+             << ": L=" << left << " R=" << right 
+             << " T=" << top << " B=" << bottom
+             << " - feature pending full integration";
+    
+    return true;
+}
+
+bool RemoteCommandRouter::handleDisplaySave(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/display/save <path>
+    if (args.empty()) {
+        LOG_WARNING << "display/save requires: <path>";
+        return false;
+    }
+    
+    std::string path = args[0];
+    
+    LOG_INFO << "Display config save to " << path
+             << " - feature pending full integration";
+    
+    return true;
+}
+
+bool RemoteCommandRouter::handleDisplayLoad(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/display/load <path>
+    if (args.empty()) {
+        LOG_WARNING << "display/load requires: <path>";
+        return false;
+    }
+    
+    std::string path = args[0];
+    
+    LOG_INFO << "Display config load from " << path
+             << " - feature pending full integration";
+    
     return true;
 }
 

@@ -1,14 +1,30 @@
 # Multi-Display Implementation Plan
 
-## Wayland Multi-Monitor + DRM/KMS Backend
+## DRM/KMS Multi-Monitor Backend (Primary) + Wayland (Future)
 
-**Version:** 1.0
+**Version:** 1.1
 
 **Created:** November 2024
 
 **Status:** Planning
 
-**Estimated Total Effort:** 80-120 hours
+**Estimated Total Effort:** 60-80 hours (DRM/KMS only)
+
+---
+
+## Implementation Priority
+
+| Priority | Backend | Status | Notes |
+
+|----------|---------|--------|-------|
+
+| **1st** | DRM/KMS Direct | 🔴 To Implement | Lowest latency, production target |
+
+| **2nd** | X11 Xinerama | ✅ Implemented | Legacy fallback |
+
+| **Future** | Wayland layer-shell | ⏳ Deferred | For wlroots compositors |
+
+| **Future** | Wayland XDG | ⏳ Deferred | Fallback for GNOME/KDE |
 
 ---
 
@@ -18,14 +34,13 @@
 2. [Current State](#current-state)
 3. [Architecture Overview](#architecture-overview)
 4. [Phase 1: Display Configuration Manager](#phase-1-display-configuration-manager)
-5. [Phase 2: Wayland Output Enumeration](#phase-2-wayland-output-enumeration)
-6. [Phase 3: DRM/KMS Backend](#phase-3-drmkms-backend)
-7. [Phase 4: Wayland Layer-Shell](#phase-4-wayland-layer-shell)
-8. [Phase 5: Multi-Output Rendering](#phase-5-multi-output-rendering)
-9. [Phase 6: Configuration Persistence](#phase-6-configuration-persistence)
-10. [Testing Matrix](#testing-matrix)
-11. [Risk Assessment](#risk-assessment)
-12. [Shared Components with NDI Plan](#shared-components-with-ndi-plan)
+5. [Phase 2: DRM/KMS Backend](#phase-2-drmkms-backend)
+6. [Phase 3: Multi-Output Rendering](#phase-3-multi-output-rendering)
+7. [Phase 4: Configuration Persistence](#phase-4-configuration-persistence)
+8. [Testing Matrix](#testing-matrix)
+9. [Risk Assessment](#risk-assessment)
+10. [Shared Components with NDI Plan](#shared-components-with-ndi-plan)
+11. [Future: Wayland Support](#future-wayland-support)
 
 ---
 
@@ -43,10 +58,10 @@
 
 2. **Support multiple display backends:**
 
-   - DRM/KMS direct (production, lowest latency)
-   - Wayland layer-shell (wlroots compositors)
-   - Wayland XDG (fallback for GNOME/KDE)
+   - **DRM/KMS direct** (production, lowest latency) ← **PRIMARY TARGET**
    - X11 Xinerama (legacy, already implemented)
+   - Wayland layer-shell (future, for wlroots compositors)
+   - Wayland XDG (future, fallback for GNOME/KDE)
 
 3. **Per-output rendering:**
 
@@ -118,9 +133,13 @@ src/cuems_videocomposer/cpp/display/
 ### Related Plans
 
 | Plan | Status | Integration |
+
 |------|--------|-------------|
+
 | `ndi-output-support.plan.md` | Planning | OutputSink, FrameCapture, HeadlessDisplay |
+
 | `rendering-optimizations.plan.md` | In Progress | PBO, VAAPI zero-copy |
+
 | `vaapi.plan.md` | Completed | Hardware decoding |
 
 ---
@@ -303,11 +322,17 @@ private:
 The unified architecture supports multiple operating modes:
 
 | Mode | Physical Displays | Virtual Outputs | Use Case |
+
 |------|------------------|-----------------|----------|
+
 | **Standard** | 1+ outputs | None | Traditional playback |
+
 | **Multi-Display** | 2+ outputs | None | Multi-projector show |
+
 | **NDI Output** | 1 output | NDI | Preview + streaming |
+
 | **Headless NDI** | None | NDI | Server-side encoding |
+
 | **Multi + NDI** | 2+ outputs | NDI | Show + broadcast |
 
 ### Configuration Integration
@@ -728,7 +753,15 @@ bool DisplayConfiguration::loadFromFile(const std::string& path) {
 
 ---
 
-## Phase 2: Wayland Output Enumeration
+## Future: Wayland Support
+
+> ⏳ **DEFERRED** - The following Wayland phases are planned for future implementation after DRM/KMS is stable and tested. They provide an alternative display backend for systems running Wayland compositors.
+
+---
+
+## Future Phase A: Wayland Output Enumeration
+
+> ⏳ **DEFERRED** - This phase is planned for future implementation after DRM/KMS is stable.
 
 ### Goal
 
@@ -1306,11 +1339,11 @@ void WaylandOutputManager::setHotplugCallback(HotplugCallback callback) {
 
 ---
 
-## Phase 3: DRM/KMS Backend
+## Phase 2: DRM/KMS Backend
 
 ### Goal
 
-Implement direct DRM/KMS rendering for lowest-latency production use.
+Implement direct DRM/KMS rendering for lowest-latency production use. This is the **primary display backend** for cuems-videocomposer.
 
 ### Duration: 20-25 hours
 
@@ -1579,7 +1612,9 @@ private:
 
 ---
 
-## Phase 4: Wayland Layer-Shell
+## Future Phase B: Wayland Layer-Shell
+
+> ⏳ **DEFERRED** - This phase is planned for future implementation after DRM/KMS is stable.
 
 ### Goal
 
@@ -1793,7 +1828,7 @@ void WaylandSurface::onLayerSurfaceConfigure(uint32_t serial,
 
 ---
 
-## Phase 5: Multi-Output Rendering
+## Phase 3: Multi-Output Rendering
 
 ### Goal
 
@@ -2126,7 +2161,7 @@ void VideoComposerApplication::renderHeadless() {
 
 ---
 
-## Phase 6: Configuration Persistence
+## Phase 4: Configuration Persistence
 
 ### Goal
 
@@ -2254,7 +2289,33 @@ void handleDisplayBlend(const std::string& name, float l, float r, float t, floa
 
 | Layer routing | Layer 0→output 0, Layer 1→output 1 | Correct routing |
 
-### Compositor Testing (Wayland)
+### DRM/KMS Backend Testing
+
+| Test | Description | Expected |
+
+|------|-------------|----------|
+
+| DRM device open | Open /dev/dri/cardX | Success with video group |
+
+| Connector enumeration | Detect HDMI/DP/VGA | All connectors listed |
+
+| EDID parsing | Read monitor make/model | Correct identification |
+
+| Mode enumeration | List available modes | All modes per output |
+
+| Atomic modesetting | Set resolution | No flickering |
+
+| GBM surface creation | Create render target | Valid gbm_surface |
+
+| EGL context | Create GL context | OpenGL 3.3+ available |
+
+| Page flip | Double buffering | Vsync, no tearing |
+
+| Multi-CRTC | 2+ outputs same time | All outputs active |
+
+### Compositor Testing (Wayland) - FUTURE
+
+> ⏳ **DEFERRED** - Test after Wayland phases are implemented.
 
 | Compositor | Layer-Shell | XDG Fallback | Priority |
 
@@ -2272,6 +2333,8 @@ void handleDisplayBlend(const std::string& name, float l, float r, float t, floa
 
 ## Risk Assessment
 
+### DRM/KMS Risks (Current Focus)
+
 | Risk | Impact | Probability | Mitigation |
 
 |------|--------|-------------|------------|
@@ -2280,19 +2343,33 @@ void handleDisplayBlend(const std::string& name, float l, float r, float t, floa
 
 | VT switching issues | Black screen | Medium | Graceful fallback, logging |
 
-| Compositor differences | Inconsistent behavior | Medium | Test matrix, fallbacks |
-
-| NVIDIA driver quirks | DRM issues | Medium | Test specific versions |
+| NVIDIA driver quirks | DRM issues | Medium | Test specific versions, prefer Intel/AMD |
 
 | Memory leaks in hotplug | Stability | Low | Careful cleanup, valgrind |
 
 | EGL context sharing | Crashes | Medium | Per-output contexts |
 
+| CRTC allocation conflicts | Some outputs fail | Low | Proper CRTC selection algorithm |
+
+| Missing /dev/dri access | App won't start | High | Clear error messages, docs |
+
+### Wayland Risks (Future)
+
+| Risk | Impact | Probability | Mitigation |
+
+|------|--------|-------------|------------|
+
+| Compositor differences | Inconsistent behavior | Medium | Test matrix, fallbacks |
+
+| Layer-shell not supported | Limited to XDG | Medium | Automatic fallback |
+
+| GNOME/KDE restrictions | Can't go fullscreen properly | Medium | Use DRM/KMS for production |
+
 ---
 
-## Implementation Schedule
+## Implementation Schedule (DRM/KMS First)
 
-### Week 1-2: Foundation
+### Week 1-2: Foundation + DRM Output Manager
 
 | Task | Hours | Dependencies |
 
@@ -2300,48 +2377,63 @@ void handleDisplayBlend(const std::string& name, float l, float r, float t, floa
 
 | Phase 1: DisplayConfiguration | 8-10 | None |
 
-| Phase 2: Wayland Output Enumeration | 10-12 | Phase 1 |
+| Phase 2: DRM Output Manager | 8 | Phase 1 |
 
-### Week 3-4: DRM Backend
-
-| Task | Hours | Dependencies |
-
-|------|-------|--------------|
-
-| Phase 3: DRM/KMS Backend | 20-25 | Phase 1 |
-
-### Week 5-6: Wayland Layer-Shell
+### Week 3-4: DRM Backend Core
 
 | Task | Hours | Dependencies |
 
 |------|-------|--------------|
 
-| Phase 4: Layer-Shell Support | 12-15 | Phase 2 |
+| Phase 2: DRM Surface + EGL | 8 | DRM Output Manager |
 
-### Week 7-8: Multi-Output Rendering
+| Phase 2: DRM Backend class | 6 | DRM Surface |
+
+### Week 5-6: Multi-Output Rendering
 
 | Task | Hours | Dependencies |
 
 |------|-------|--------------|
 
-| Phase 5: Multi-Output Renderer | 15-20 | Phase 3, 4 |
+| Phase 3: Multi-Output Renderer | 15-20 | Phase 2 |
 
-| Phase 6: Configuration | 6-8 | Phase 5 |
+| Phase 3: FrameCapture integration | 5 | Multi-Output Renderer |
 
-### Total: 71-90 hours (9-11 weeks at ~8h/week)
+### Week 7: Configuration + Polish
+
+| Task | Hours | Dependencies |
+
+|------|-------|--------------|
+
+| Phase 4: Configuration Persistence | 6-8 | Phase 3 |
+
+| Testing + Bug fixes | 8 | All phases |
+
+### Total (DRM/KMS only): 60-73 hours (7-9 weeks at ~8h/week)
+
+### Future (Wayland): 22-27 hours additional
+
+| Task | Hours | Dependencies |
+
+|------|-------|--------------|
+
+| Future Phase A: Wayland Output Enumeration | 10-12 | Phase 1 |
+
+| Future Phase B: Wayland Layer-Shell | 12-15 | Future Phase A |
 
 ---
 
-## Quick Start
+## Quick Start (DRM/KMS Path)
 
-For fastest path to multi-display:
+For fastest path to multi-display with DRM/KMS:
 
-1. **Week 1-2:** Implement `WaylandOutputManager` - Get output enumeration working
-2. **Week 3:** Create basic `WaylandSurface` with layer-shell - Single output first
+1. **Week 1-2:** Implement `DRMOutputManager` - Get output enumeration working via DRM
+2. **Week 3:** Create `DRMSurface` with GBM + EGL - Single output first
 3. **Week 4:** Multi-output surfaces - Render same content to all outputs
 4. **Week 5:** Layer routing - Different content per output
+5. **Week 6-7:** Configuration + Testing
 
-This gets multi-output working on Wayland (Sway) quickly, then DRM can be added for production use.
+This gets multi-output working with DRM/KMS (lowest latency, production ready). Wayland can be added later for compositor integration if needed.
 
 ---
 
@@ -2352,11 +2444,17 @@ This section documents the components shared between the Multi-Display Implement
 ### Shared Files
 
 | File | Purpose | Used By |
+
 |------|---------|---------|
+
 | `cpp/output/OutputSink.h` | Abstract interface for all virtual outputs | NDI, Streaming, File |
+
 | `cpp/output/OutputSinkManager.h/cpp` | Manages multiple output sinks | Both plans |
+
 | `cpp/output/FrameCapture.h/cpp` | PBO-based async GPU→CPU capture | Both plans |
+
 | `cpp/display/HeadlessDisplay.h/cpp` | EGL+GBM headless rendering | Both plans |
+
 | `cpp/display/OutputInfo.h` | Common output info structures | Both plans |
 
 ### FrameCapture Class (Shared)

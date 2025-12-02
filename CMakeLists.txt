@@ -589,9 +589,15 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/display/OpenGLRenderer.cpp
     src/cuems_videocomposer/cpp/display/ShaderProgram.cpp
     src/cuems_videocomposer/cpp/display/DisplayManager.cpp
+    src/cuems_videocomposer/cpp/display/DisplayConfiguration.cpp
+    src/cuems_videocomposer/cpp/display/MultiOutputRenderer.cpp
+    src/cuems_videocomposer/cpp/display/HeadlessDisplay.cpp
     # Wayland backend (conditional compilation via #ifdef HAVE_WAYLAND)
     src/cuems_videocomposer/cpp/display/WaylandDisplay.cpp
     src/cuems_videocomposer/cpp/display/XineramaHelper.cpp
+    # Output capture and virtual outputs
+    src/cuems_videocomposer/cpp/output/FrameCapture.cpp
+    src/cuems_videocomposer/cpp/output/OutputSinkManager.cpp
     src/cuems_videocomposer/cpp/remote/OSCRemoteControl.cpp
     src/cuems_videocomposer/cpp/remote/RemoteCommandRouter.cpp
     src/cuems_videocomposer/cpp/osd/OSDManager.cpp
@@ -608,6 +614,33 @@ if(VAAPI_FOUND AND EGL_FOUND AND DRM_FOUND)
     list(APPEND CPP_SOURCES
         src/cuems_videocomposer/cpp/hwdec/VaapiInterop.cpp
     )
+endif()
+
+# DRM/KMS multi-display backend (requires libdrm, gbm, EGL)
+option(ENABLE_DRM_BACKEND "Enable DRM/KMS direct rendering backend" ON)
+
+if(ENABLE_DRM_BACKEND AND DRM_FOUND AND EGL_FOUND)
+    # Check for GBM
+    pkg_check_modules(GBM gbm)
+    if(GBM_FOUND)
+        add_definitions(-DHAVE_DRM_BACKEND)
+        include_directories(${GBM_INCLUDE_DIRS})
+        list(APPEND GL_LIBS ${GBM_LIBRARIES})
+        
+        list(APPEND CPP_SOURCES
+            src/cuems_videocomposer/cpp/display/drm/DRMOutputManager.cpp
+            src/cuems_videocomposer/cpp/display/drm/DRMSurface.cpp
+            src/cuems_videocomposer/cpp/display/drm/DRMBackend.cpp
+        )
+        
+        message(STATUS "DRM/KMS backend enabled (GBM + EGL)")
+    else()
+        message(STATUS "DRM/KMS backend disabled (GBM not found)")
+    endif()
+else()
+    if(ENABLE_DRM_BACKEND AND NOT DRM_FOUND)
+        message(STATUS "DRM/KMS backend disabled (libdrm not found)")
+    endif()
 endif()
 
 # HAP direct texture upload (optional, requires snappy)

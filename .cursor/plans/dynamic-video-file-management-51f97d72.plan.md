@@ -231,6 +231,39 @@ All controls that affect video image are per-layer:
 - Test that loop region works: play from start, then loop only region
 - Test that layer properties persist when replacing file in existing layer
 
+## Implementation Status: ✅ COMPLETE
+
+All planned functionality has been successfully implemented:
+
+### Core Features ✅
+
+- Dynamic file loading/unloading via OSC
+- UUID-based layer management (cue IDs)
+- Auto-unload on playback end (per-layer)
+- Full file looping with loop count
+- Region-based looping with loop count
+- Global MTC sync source (shared across all layers)
+- Per-layer sync controls (offset, mtcfollow)
+
+### Per-Layer Controls ✅
+
+- Position (x, y)
+- Opacity (with proper blending)
+- Scale (x, y, combined)
+- Rotation
+- Corner deformation (warping with homography)
+- Blend modes (NORMAL, MULTIPLY, SCREEN, OVERLAY)
+- Crop and panorama
+- Visibility and z-order
+
+### Architecture ✅
+
+- Common codec detection method
+- Common layer creation method
+- Simplified sync source (global, always initialized)
+- UUID to layer ID mapping
+- Proper cleanup and memory management
+
 ### To-dos
 
 - [x] Add autoUnload and loopRegion to LayerProperties.h ✅
@@ -242,33 +275,3 @@ All controls that affect video image are per-layer:
 - [x] Implement per-layer controls (position, scale, rotation, corner deformation, blend mode) ✅
 - [x] Implement global sync source with per-layer FramerateConverterSyncSource wrappers ✅
 - [x] Simplify sync source initialization (always create global, MIDI enabled by default) ✅
-
-## Implementation Status: ✅ COMPLETE
-
-All planned functionality has been successfully implemented:
-
-### Core Features ✅
-- Dynamic file loading/unloading via OSC
-- UUID-based layer management (cue IDs)
-- Auto-unload on playback end (per-layer)
-- Full file looping with loop count
-- Region-based looping with loop count
-- Global MTC sync source (shared across all layers)
-- Per-layer sync controls (offset, mtcfollow)
-
-### Per-Layer Controls ✅
-- Position (x, y)
-- Opacity (with proper blending)
-- Scale (x, y, combined)
-- Rotation
-- Corner deformation (warping with homography)
-- Blend modes (NORMAL, MULTIPLY, SCREEN, OVERLAY)
-- Crop and panorama
-- Visibility and z-order
-
-### Architecture ✅
-- Common codec detection method
-- Common layer creation method
-- Simplified sync source (global, always initialized)
-- UUID to layer ID mapping
-- Proper cleanup and memory management
