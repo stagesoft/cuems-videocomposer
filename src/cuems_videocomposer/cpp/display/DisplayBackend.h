@@ -12,6 +12,7 @@ typedef void* EGLImageKHR;
 typedef EGLImageKHR (*PFNEGLCREATEIMAGEKHRPROC)(EGLDisplay, EGLContext, unsigned int, void*, const int*);
 typedef unsigned int (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay, EGLImageKHR);
 typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(unsigned int, void*);
+typedef void (*PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC)(unsigned int, void*, const int*);
 #endif
 
 #ifdef HAVE_VAAPI_INTEROP
@@ -167,6 +168,14 @@ public:
     virtual PFNEGLCREATEIMAGEKHRPROC getEglCreateImageKHR() const { return nullptr; }
     virtual PFNEGLDESTROYIMAGEKHRPROC getEglDestroyImageKHR() const { return nullptr; }
     virtual PFNGLEGLIMAGETARGETTEXTURE2DOESPROC getGlEGLImageTargetTexture2DOES() const { return nullptr; }
+    virtual PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC getGlEGLImageTargetTexStorageEXT() const { return nullptr; }
+    
+    /**
+     * Check if we're running on Desktop GL (vs OpenGL ES)
+     * Desktop GL should use glEGLImageTargetTexStorageEXT
+     * OpenGL ES should use glEGLImageTargetTexture2DOES
+     */
+    virtual bool isDesktopGL() const { return false; }
 #endif
 
 #ifdef HAVE_VAAPI_INTEROP

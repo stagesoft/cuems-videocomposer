@@ -309,6 +309,10 @@ PFNEGLDESTROYIMAGEKHRPROC DRMBackend::getEglDestroyImageKHR() const {
 PFNGLEGLIMAGETARGETTEXTURE2DOESPROC DRMBackend::getGlEGLImageTargetTexture2DOES() const {
     return glEGLImageTargetTexture2DOES_;
 }
+
+PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC DRMBackend::getGlEGLImageTargetTexStorageEXT() const {
+    return glEGLImageTargetTexStorageEXT_;
+}
 #endif
 
 #ifdef HAVE_VAAPI_INTEROP
@@ -378,9 +382,18 @@ void DRMBackend::initEGLExtensions() {
         eglGetProcAddress("eglDestroyImageKHR");
     glEGLImageTargetTexture2DOES_ = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)
         eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    // Desktop GL extension for EGL image binding (mpv approach for DRM/KMS)
+    glEGLImageTargetTexStorageEXT_ = (PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC)
+        eglGetProcAddress("glEGLImageTargetTexStorageEXT");
     
-    if (eglCreateImageKHR_ && eglDestroyImageKHR_ && glEGLImageTargetTexture2DOES_) {
-        LOG_INFO << "DRMBackend: EGL image extensions available";
+    if (eglCreateImageKHR_ && eglDestroyImageKHR_) {
+        if (glEGLImageTargetTexStorageEXT_) {
+            LOG_INFO << "DRMBackend: EGL image extensions available (TexStorageEXT for Desktop GL)";
+        } else if (glEGLImageTargetTexture2DOES_) {
+            LOG_INFO << "DRMBackend: EGL image extensions available (Texture2DOES fallback)";
+        } else {
+            LOG_WARNING << "DRMBackend: No EGL image target function available";
+        }
     } else {
         LOG_WARNING << "DRMBackend: EGL image extensions not available";
     }

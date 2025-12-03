@@ -54,6 +54,8 @@ VaapiInterop::VaapiInterop()
     , eglCreateImageKHR_(nullptr)
     , eglDestroyImageKHR_(nullptr)
     , glEGLImageTargetTexture2DOES_(nullptr)
+    , glEGLImageTargetTexStorageEXT_(nullptr)
+    , isDesktopGL_(false)
     , eglCreateSyncKHR_(nullptr)
     , eglDestroySyncKHR_(nullptr)
     , eglClientWaitSyncKHR_(nullptr)
@@ -143,14 +145,29 @@ bool VaapiInterop::init(DisplayBackend* display) {
     eglCreateImageKHR_ = display->getEglCreateImageKHR();
     eglDestroyImageKHR_ = display->getEglDestroyImageKHR();
     glEGLImageTargetTexture2DOES_ = display->getGlEGLImageTargetTexture2DOES();
+    glEGLImageTargetTexStorageEXT_ = display->getGlEGLImageTargetTexStorageEXT();
+    isDesktopGL_ = display->isDesktopGL();
     
-    // Use glEGLImageTargetTexture2DOES exclusively - best DRM/KMS compatibility
-    // Works on ES, Desktop GL, and DRM/KMS (unlike TexStorageEXT which fails on DRM)
-    if (!glEGLImageTargetTexture2DOES_) {
-        LOG_ERROR << "VaapiInterop: glEGLImageTargetTexture2DOES not available";
-        return false;
+    // MPV approach: Use TexStorageEXT on Desktop GL, Texture2DOES on ES
+    // DRM/KMS always uses Desktop GL, so we prefer TexStorageEXT there
+    if (isDesktopGL_) {
+        if (!glEGLImageTargetTexStorageEXT_) {
+            LOG_WARNING << "VaapiInterop: glEGLImageTargetTexStorageEXT not available, trying Texture2DOES";
+            if (!glEGLImageTargetTexture2DOES_) {
+                LOG_ERROR << "VaapiInterop: No EGL image target function available";
+                return false;
+            }
+            LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexture2DOES (fallback)";
+        } else {
+            LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexStorageEXT (Desktop GL/DRM)";
+        }
+    } else {
+        if (!glEGLImageTargetTexture2DOES_) {
+            LOG_ERROR << "VaapiInterop: glEGLImageTargetTexture2DOES not available";
+            return false;
+        }
+        LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexture2DOES (OpenGL ES)";
     }
-    LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexture2DOES (DRM/KMS compatible)";
     
     if (!eglCreateImageKHR_ || !eglDestroyImageKHR_) {
         LOG_ERROR << "VaapiInterop: Missing EGL extension functions";
@@ -651,11 +668,27 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     
     glBindTexture(GL_TEXTURE_2D, 0);
     
+    // Bind Y plane texture using the appropriate extension (mpv approach)
     glBindTexture(GL_TEXTURE_2D, textureY_);
     bool bindSuccess = false;
     
-    // Use glEGLImageTargetTexture2DOES exclusively (mpv approach for compatibility)
-    if (glEGLImageTargetTexture2DOES_) {
+    if (isDesktopGL_ && glEGLImageTargetTexStorageEXT_) {
+        // Desktop GL path (DRM/KMS) - use TexStorageEXT like mpv
+        glEGLImageTargetTexStorageEXT_(GL_TEXTURE_2D, eglImageY_, nullptr);
+        GLenum err = glGetError();
+        if (err == GL_NO_ERROR) {
+            bindSuccess = true;
+        } else {
+            static int errCount = 0;
+            if (errCount++ < 5) {
+                LOG_WARNING << "VaapiInterop: glEGLImageTargetTexStorageEXT Y failed: 0x" 
+                           << std::hex << err << std::dec;
+            }
+        }
+    }
+    
+    // Fallback to Texture2DOES if TexStorageEXT not available or failed
+    if (!bindSuccess && glEGLImageTargetTexture2DOES_) {
         glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageY_);
         GLenum err = glGetError();
         if (err == GL_NO_ERROR) {
@@ -675,11 +708,27 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         return false;
     }
     
+    // Bind UV plane texture
     glBindTexture(GL_TEXTURE_2D, textureUV_);
     bindSuccess = false;
     
-    // Use glEGLImageTargetTexture2DOES exclusively (mpv approach)
-    if (glEGLImageTargetTexture2DOES_) {
+    if (isDesktopGL_ && glEGLImageTargetTexStorageEXT_) {
+        // Desktop GL path (DRM/KMS) - use TexStorageEXT like mpv
+        glEGLImageTargetTexStorageEXT_(GL_TEXTURE_2D, eglImageUV_, nullptr);
+        GLenum err = glGetError();
+        if (err == GL_NO_ERROR) {
+            bindSuccess = true;
+        } else {
+            static int errCount = 0;
+            if (errCount++ < 5) {
+                LOG_WARNING << "VaapiInterop: glEGLImageTargetTexStorageEXT UV failed: 0x" 
+                           << std::hex << err << std::dec;
+            }
+        }
+    }
+    
+    // Fallback to Texture2DOES
+    if (!bindSuccess && glEGLImageTargetTexture2DOES_) {
         glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageUV_);
         GLenum err = glGetError();
         if (err == GL_NO_ERROR) {
@@ -694,7 +743,7 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     }
     
     if (!bindSuccess) {
-        LOG_ERROR << "VaapiInterop: Failed to bind UV plane with any method";
+        LOG_ERROR << "VaapiInterop: Failed to bind UV plane";
         glBindTexture(GL_TEXTURE_2D, 0);
         return false;
     }

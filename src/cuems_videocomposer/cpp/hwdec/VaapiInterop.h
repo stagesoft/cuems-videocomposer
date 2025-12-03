@@ -176,8 +176,12 @@ private:
     // EGL extension function pointers (from DisplayBackend)
     PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR_;
     PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR_;
-    // GL_OES_EGL_image - works on both ES and Desktop GL, best DRM/KMS compatibility
+    // GL_OES_EGL_image - for OpenGL ES
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES_;
+    // GL_EXT_EGL_image_storage - for Desktop GL (mpv approach for DRM/KMS)
+    PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC glEGLImageTargetTexStorageEXT_;
+    // True if running Desktop GL (DRM/KMS), false for OpenGL ES
+    bool isDesktopGL_;
     
     // EGL sync extension functions
     PFNEGLCREATESYNCKHRPROC eglCreateSyncKHR_;

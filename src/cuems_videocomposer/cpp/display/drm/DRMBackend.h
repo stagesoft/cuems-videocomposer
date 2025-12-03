@@ -78,6 +78,8 @@ public:
     PFNEGLCREATEIMAGEKHRPROC getEglCreateImageKHR() const override;
     PFNEGLDESTROYIMAGEKHRPROC getEglDestroyImageKHR() const override;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC getGlEGLImageTargetTexture2DOES() const override;
+    PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC getGlEGLImageTargetTexStorageEXT() const override;
+    bool isDesktopGL() const override { return true; }  // DRM/KMS always uses Desktop GL
 #endif
     
 #ifdef HAVE_VAAPI_INTEROP
@@ -145,6 +147,7 @@ private:
     PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR_ = nullptr;
     PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR_ = nullptr;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES_ = nullptr;
+    PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC glEGLImageTargetTexStorageEXT_ = nullptr;
 #endif
     
 #ifdef HAVE_VAAPI_INTEROP
