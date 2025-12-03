@@ -159,8 +159,8 @@ class DynamicFileManagementTest:
         
         try:
             env = os.environ.copy()
-            if 'DISPLAY' not in env:
-                env['DISPLAY'] = ':0'
+            # Don't force DISPLAY - let the application use the environment's DISPLAY
+            # or fall back to DRM/KMS/headless mode if no display server is available
             
             # Don't capture stdout/stderr to avoid pipe buffer blocking
             # When verbose output fills the pipe buffer, videocomposer can hang

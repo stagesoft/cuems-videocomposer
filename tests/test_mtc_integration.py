@@ -116,11 +116,10 @@ class MTCIntegrationTest:
         cmd.extend(["--midi", "-1", "--verbose"])  # -1 = autodetect (connects to Midi Through)
         
         try:
-            # Set up environment - ensure DISPLAY is set for X11
+            # Set up environment - don't force DISPLAY
             env = os.environ.copy()
-            if 'DISPLAY' not in env:
-                # Try to use default display
-                env['DISPLAY'] = ':0'
+            # Don't force DISPLAY - let the application use the environment's DISPLAY
+            # or fall back to DRM/KMS/headless mode if no display server is available
             
             # Merge stderr into stdout to capture all MTC messages
             self.videocomposer_process = subprocess.Popen(

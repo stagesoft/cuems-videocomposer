@@ -78,8 +78,8 @@ def main():
     ]
     
     env = os.environ.copy()
-    if 'DISPLAY' not in env:
-        env['DISPLAY'] = ':0'
+    # Don't force DISPLAY - let the application use the environment's DISPLAY
+    # or fall back to DRM/KMS/headless mode if no display server is available
     
     print(f"Starting videocomposer: {' '.join(cmd)}")
     process = subprocess.Popen(
