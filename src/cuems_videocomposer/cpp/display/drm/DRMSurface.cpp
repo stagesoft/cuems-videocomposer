@@ -15,9 +15,9 @@
 
 namespace videocomposer {
 
-DRMSurface::DRMSurface(DRMOutputManager* outputManager, int outputIndex)
+DRMSurface::DRMSurface(DRMOutputManager* outputManager, const std::string& outputName)
     : outputManager_(outputManager)
-    , outputIndex_(outputIndex)
+    , outputName_(outputName)
     , width_(0)
     , height_(0)
 {
@@ -33,10 +33,10 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
         return false;
     }
     
-    // Get connector info
-    const DRMConnector* connector = outputManager_->getConnector(outputIndex_);
+    // Get connector info by name
+    const DRMConnector* connector = outputManager_->getConnectorByName(outputName_);
     if (!connector || !connector->info.connected) {
-        LOG_ERROR << "DRMSurface: Output " << outputIndex_ << " not connected";
+        LOG_ERROR << "DRMSurface: Output " << outputName_ << " not connected";
         return false;
     }
     
@@ -318,7 +318,7 @@ gbm_surface_created:
     eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     
     initialized_ = true;
-    LOG_INFO << "DRMSurface: Initialized successfully for output " << outputIndex_;
+    LOG_INFO << "DRMSurface: Initialized successfully for " << outputName_;
     
     return true;
 }
@@ -462,7 +462,7 @@ bool DRMSurface::resize(int width, int height) {
 
 const OutputInfo& DRMSurface::getOutputInfo() const {
     static OutputInfo defaultInfo;
-    const DRMConnector* conn = outputManager_->getConnector(outputIndex_);
+    const DRMConnector* conn = outputManager_->getConnectorByName(outputName_);
     return conn ? conn->info : defaultInfo;
 }
 
@@ -576,7 +576,7 @@ bool DRMSurface::schedulePageFlip() {
     // First frame: use drmModeSetCrtc to set the mode and initial framebuffer
     // Subsequent frames: use drmModePageFlip for vsync'd updates
     if (!modeSet_) {
-        const DRMConnector* conn = outputManager_->getConnector(outputIndex_);
+        const DRMConnector* conn = outputManager_->getConnectorByName(outputName_);
         if (!conn) {
             LOG_ERROR << "DRMSurface: No connector info for initial modeset";
             gbm_surface_release_buffer(gbmSurface_, bo);
@@ -632,7 +632,7 @@ bool DRMSurface::schedulePageFlip() {
         LOG_ERROR << "DRMSurface: Page flip failed: " << strerror(-ret) << " (errno=" << -ret << ")";
         
         // Fallback: try drmModeSetCrtc instead
-        const DRMConnector* conn = outputManager_->getConnector(outputIndex_);
+        const DRMConnector* conn = outputManager_->getConnectorByName(outputName_);
         if (conn) {
             drmModeModeInfo* mode = nullptr;
             if (conn->hasCurrentMode) {

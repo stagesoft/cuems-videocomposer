@@ -145,56 +145,40 @@ public:
     
     /**
      * Configure output region on virtual canvas
-     * @param outputIndex Output index (0-based)
+     * @param outputName Output name (e.g., "HDMI-A-1")
      * @param canvasX X position on canvas
      * @param canvasY Y position on canvas  
-     * @param canvasWidth Width on canvas (use 0 for output native width)
-     * @param canvasHeight Height on canvas (use 0 for output native height)
-     * @return true on success
+     * @param canvasWidth Width on canvas (0 = use output native width)
+     * @param canvasHeight Height on canvas (0 = use output native height)
      */
-    virtual bool configureOutputRegion(int outputIndex, int canvasX, int canvasY, 
+    virtual bool configureOutputRegion(const std::string& outputName, int canvasX, int canvasY, 
                                         int canvasWidth = 0, int canvasHeight = 0) { 
-        (void)outputIndex; (void)canvasX; (void)canvasY; 
+        (void)outputName; (void)canvasX; (void)canvasY; 
         (void)canvasWidth; (void)canvasHeight;
         return false; 
     }
     
     /**
      * Configure edge blending for an output
-     * @param outputIndex Output index
-     * @param left Left edge blend width in pixels
-     * @param right Right edge blend width in pixels
-     * @param top Top edge blend width in pixels
-     * @param bottom Bottom edge blend width in pixels
+     * @param outputName Output name
+     * @param left/right/top/bottom Edge blend width in pixels
      * @param gamma Blend gamma (typically 2.2)
-     * @return true on success
      */
-    virtual bool configureOutputBlend(int outputIndex, float left, float right,
+    virtual bool configureOutputBlend(const std::string& outputName, float left, float right,
                                        float top, float bottom, float gamma = 2.2f) {
-        (void)outputIndex; (void)left; (void)right; (void)top; (void)bottom; (void)gamma;
+        (void)outputName; (void)left; (void)right; (void)top; (void)bottom; (void)gamma;
         return false;
     }
     
     /**
-     * Get output index by name
-     * @param name Output name (e.g., "eDP-1", "HDMI-A-1")
-     * @return Output index, or -1 if not found
-     */
-    virtual int getOutputIndexByName(const std::string& name) const {
-        (void)name;
-        return -1;
-    }
-    
-    /**
      * Set output resolution/mode
-     * @param outputIndex Output index
+     * @param outputName Output name
      * @param width New width
      * @param height New height
      * @param refresh Refresh rate (0 = use default)
-     * @return true on success
      */
-    virtual bool setOutputMode(int outputIndex, int width, int height, double refresh = 0.0) {
-        (void)outputIndex; (void)width; (void)height; (void)refresh;
+    virtual bool setOutputMode(const std::string& outputName, int width, int height, double refresh = 0.0) {
+        (void)outputName; (void)width; (void)height; (void)refresh;
         return false;
     }
     

@@ -53,21 +53,21 @@ bool DRMBackend::openWindow() {
     
     LOG_INFO << "DRMBackend: Found " << outputs.size() << " connected output(s)";
     
-    // Create surfaces for each output
+    // Create surfaces for each output (keyed by name)
     // Share EGL display and GBM device for context sharing
     EGLContext sharedContext = EGL_NO_CONTEXT;
     EGLDisplay sharedDisplay = EGL_NO_DISPLAY;
     gbm_device* sharedGbmDevice = nullptr;
     
-    for (size_t i = 0; i < outputs.size(); ++i) {
-        LOG_INFO << "DRMBackend: Creating surface for output " << i 
-                 << " (" << outputs[i].name << ")";
+    for (const auto& outputInfo : outputs) {
+        const std::string& outputName = outputInfo.name;
+        LOG_INFO << "DRMBackend: Creating surface for " << outputName;
         
-        auto surface = std::make_unique<DRMSurface>(outputManager_.get(), static_cast<int>(i));
+        auto surface = std::make_unique<DRMSurface>(outputManager_.get(), outputName);
         
         // Pass shared resources to subsequent surfaces
         if (!surface->init(sharedContext, sharedDisplay, sharedGbmDevice)) {
-            LOG_ERROR << "DRMBackend: Failed to create surface for output " << i;
+            LOG_ERROR << "DRMBackend: Failed to create surface for " << outputName;
             // Continue with other outputs
             continue;
         }
@@ -77,10 +77,10 @@ bool DRMBackend::openWindow() {
             sharedContext = surface->getContext();
             sharedDisplay = surface->getDisplay();
             sharedGbmDevice = surface->getGbmDevice();
-            LOG_INFO << "DRMBackend: Output 0 created shared resources (EGL display, GBM device, context)";
+            LOG_INFO << "DRMBackend: First surface created shared resources (EGL display, GBM device, context)";
         }
         
-        surfaces_.push_back(std::move(surface));
+        surfaces_[outputName] = std::move(surface);
     }
     
     if (surfaces_.empty()) {
@@ -157,7 +157,7 @@ void DRMBackend::closeWindow() {
     outputRegions_.clear();
     
     // Cleanup surfaces
-    for (auto& surface : surfaces_) {
+    for (auto& [name, surface] : surfaces_) {
         surface->cleanup();
     }
     surfaces_.clear();
@@ -206,12 +206,12 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     primary->releaseCurrent();
     
     // Schedule page flips for all surfaces
-    for (auto& surface : surfaces_) {
+    for (auto& [name, surface] : surfaces_) {
         surface->schedulePageFlip();
     }
     
     // Wait for all flips to complete
-    for (auto& surface : surfaces_) {
+    for (auto& [name, surface] : surfaces_) {
         if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
@@ -222,7 +222,7 @@ void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager
     (void)osdManager;  // OSD rendering handled separately
     
     // Render to each output
-    for (auto& surface : surfaces_) {
+    for (auto& [name, surface] : surfaces_) {
         if (!surface->isInitialized()) {
             continue;
         }
@@ -266,7 +266,7 @@ void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager
     }
     
     // Wait for all flips to complete
-    for (auto& surface : surfaces_) {
+    for (auto& [name, surface] : surfaces_) {
         if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
@@ -385,43 +385,47 @@ size_t DRMBackend::getOutputCount() const {
     return surfaces_.size();
 }
 
-int DRMBackend::getOutputIndexByName(const std::string& name) const {
-    for (size_t i = 0; i < surfaces_.size(); ++i) {
-        if (surfaces_[i]->getOutputInfo().name == name) {
-            return static_cast<int>(i);
+bool DRMBackend::configureOutputRegion(const std::string& outputName, 
+                                        int canvasX, int canvasY,
+                                        int canvasWidth, int canvasHeight) {
+    // Find the output region by name
+    OutputRegion* region = nullptr;
+    for (auto& r : outputRegions_) {
+        if (r.name == outputName) {
+            region = &r;
+            break;
         }
     }
-    return -1;
-}
-
-bool DRMBackend::configureOutputRegion(int outputIndex, int canvasX, int canvasY,
-                                        int canvasWidth, int canvasHeight) {
-    if (outputIndex < 0 || outputIndex >= static_cast<int>(outputRegions_.size())) {
-        LOG_ERROR << "DRMBackend::configureOutputRegion: Invalid output index " << outputIndex;
+    
+    if (!region) {
+        LOG_ERROR << "DRMBackend::configureOutputRegion: Unknown output " << outputName;
         return false;
     }
     
     // Get output native dimensions if not specified
     if (canvasWidth <= 0 || canvasHeight <= 0) {
-        const auto& info = surfaces_[outputIndex]->getOutputInfo();
-        if (canvasWidth <= 0) canvasWidth = info.width;
-        if (canvasHeight <= 0) canvasHeight = info.height;
+        auto it = surfaces_.find(outputName);
+        if (it != surfaces_.end()) {
+            const auto& info = it->second->getOutputInfo();
+            if (canvasWidth <= 0) canvasWidth = info.width;
+            if (canvasHeight <= 0) canvasHeight = info.height;
+        }
     }
     
     // Update the output region
-    outputRegions_[outputIndex].canvasX = canvasX;
-    outputRegions_[outputIndex].canvasY = canvasY;
-    outputRegions_[outputIndex].canvasWidth = canvasWidth;
-    outputRegions_[outputIndex].canvasHeight = canvasHeight;
+    region->canvasX = canvasX;
+    region->canvasY = canvasY;
+    region->canvasWidth = canvasWidth;
+    region->canvasHeight = canvasHeight;
     
-    LOG_INFO << "DRMBackend: Configured output " << outputIndex 
+    LOG_INFO << "DRMBackend: Configured " << outputName 
              << " region: " << canvasX << "," << canvasY
              << " " << canvasWidth << "x" << canvasHeight;
     
     // Update MultiOutputRenderer if initialized
     if (multiRenderer_) {
         std::vector<OutputSurface*> surfacePtrs;
-        for (auto& surface : surfaces_) {
+        for (auto& [name, surface] : surfaces_) {
             surfacePtrs.push_back(surface.get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
@@ -430,28 +434,38 @@ bool DRMBackend::configureOutputRegion(int outputIndex, int canvasX, int canvasY
     return true;
 }
 
-bool DRMBackend::configureOutputBlend(int outputIndex, float left, float right,
+bool DRMBackend::configureOutputBlend(const std::string& outputName,
+                                       float left, float right,
                                        float top, float bottom, float gamma) {
-    if (outputIndex < 0 || outputIndex >= static_cast<int>(outputRegions_.size())) {
-        LOG_ERROR << "DRMBackend::configureOutputBlend: Invalid output index " << outputIndex;
+    // Find the output region by name
+    OutputRegion* region = nullptr;
+    for (auto& r : outputRegions_) {
+        if (r.name == outputName) {
+            region = &r;
+            break;
+        }
+    }
+    
+    if (!region) {
+        LOG_ERROR << "DRMBackend::configureOutputBlend: Unknown output " << outputName;
         return false;
     }
     
     // Update blend configuration
-    outputRegions_[outputIndex].blend.left = left;
-    outputRegions_[outputIndex].blend.right = right;
-    outputRegions_[outputIndex].blend.top = top;
-    outputRegions_[outputIndex].blend.bottom = bottom;
-    outputRegions_[outputIndex].blend.gamma = gamma;
+    region->blend.left = left;
+    region->blend.right = right;
+    region->blend.top = top;
+    region->blend.bottom = bottom;
+    region->blend.gamma = gamma;
     
-    LOG_INFO << "DRMBackend: Configured output " << outputIndex 
+    LOG_INFO << "DRMBackend: Configured " << outputName 
              << " blend: L=" << left << " R=" << right
              << " T=" << top << " B=" << bottom << " gamma=" << gamma;
     
     // Update MultiOutputRenderer if initialized
     if (multiRenderer_) {
         std::vector<OutputSurface*> surfacePtrs;
-        for (auto& surface : surfaces_) {
+        for (auto& [name, surface] : surfaces_) {
             surfacePtrs.push_back(surface.get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
@@ -460,45 +474,35 @@ bool DRMBackend::configureOutputBlend(int outputIndex, float left, float right,
     return true;
 }
 
-DRMSurface* DRMBackend::getSurface(int index) {
-    if (index < 0 || index >= static_cast<int>(surfaces_.size())) {
-        return nullptr;
-    }
-    return surfaces_[index].get();
-}
-
 DRMSurface* DRMBackend::getSurface(const std::string& name) {
-    for (auto& surface : surfaces_) {
-        if (surface->getOutputInfo().name == name) {
-            return surface.get();
-        }
+    auto it = surfaces_.find(name);
+    if (it != surfaces_.end()) {
+        return it->second.get();
     }
     return nullptr;
 }
 
 DRMSurface* DRMBackend::getPrimarySurface() {
-    if (primaryOutput_ >= 0 && primaryOutput_ < static_cast<int>(surfaces_.size())) {
-        return surfaces_[primaryOutput_].get();
-    }
+    // Return first surface in map (consistent ordering)
     if (!surfaces_.empty()) {
-        return surfaces_[0].get();
+        return surfaces_.begin()->second.get();
     }
     return nullptr;
 }
 
-bool DRMBackend::setOutputMode(int outputIndex, int width, int height, double refresh) {
-    LOG_INFO << "DRMBackend::setOutputMode called: index=" << outputIndex 
+bool DRMBackend::setOutputMode(const std::string& outputName, int width, int height, double refresh) {
+    LOG_INFO << "DRMBackend::setOutputMode called: " << outputName 
              << " width=" << width << " height=" << height << " refresh=" << refresh;
-    LOG_INFO << "  surfaces_.size()=" << surfaces_.size();
     
-    if (outputIndex < 0 || outputIndex >= static_cast<int>(surfaces_.size())) {
-        LOG_ERROR << "DRMBackend::setOutputMode: Invalid output index " << outputIndex;
+    auto it = surfaces_.find(outputName);
+    if (it == surfaces_.end()) {
+        LOG_ERROR << "DRMBackend::setOutputMode: No surface for output " << outputName;
         return false;
     }
     
-    DRMSurface* surface = surfaces_[outputIndex].get();
+    DRMSurface* surface = it->second.get();
     if (!surface) {
-        LOG_ERROR << "DRMBackend::setOutputMode: No surface for output " << outputIndex;
+        LOG_ERROR << "DRMBackend::setOutputMode: Null surface for " << outputName;
         return false;
     }
     
@@ -513,46 +517,45 @@ bool DRMBackend::setOutputMode(int outputIndex, int width, int height, double re
         return true;
     }
     
-    LOG_INFO << "DRMBackend: Changing output " << outputIndex << " from "
+    LOG_INFO << "DRMBackend: Changing " << outputName << " from "
              << oldWidth << "x" << oldHeight << " to " << width << "x" << height;
     
+    // Get connector index for DRMOutputManager
+    const DRMConnector* conn = outputManager_->getConnectorByName(outputName);
+    if (!conn) {
+        LOG_ERROR << "DRMBackend::setOutputMode: Unknown connector " << outputName;
+        return false;
+    }
+    int connectorIndex = conn->info.index;
+    
     // Step 1: Update the mode in DRMOutputManager (stores mode for later use)
-    // Don't call drmModeSetCrtc yet - we need a valid framebuffer first
-    if (!outputManager_->prepareMode(outputIndex, width, height, refresh)) {
+    if (!outputManager_->prepareMode(connectorIndex, width, height, refresh)) {
         LOG_ERROR << "DRMBackend::setOutputMode: Mode not available";
         return false;
     }
     
     // Step 2: Resize the GBM/EGL surface (creates new buffers, resets modeSet_=false)
-    // This makes the next schedulePageFlip do a full modeset with valid framebuffer
     if (!surface->resize(width, height)) {
         LOG_ERROR << "DRMBackend::setOutputMode: Failed to resize surface";
         return false;
     }
     
-    // Step 3: Update output regions
-    if (outputIndex < static_cast<int>(outputRegions_.size())) {
-        OutputRegion& region = outputRegions_[outputIndex];
-        
-        // Update physical size
-        region.physicalWidth = width;
-        region.physicalHeight = height;
-        
-        // Update canvas region if it was matching physical size
-        if (region.canvasWidth == oldWidth) {
-            region.canvasWidth = width;
-        }
-        if (region.canvasHeight == oldHeight) {
-            region.canvasHeight = height;
+    // Step 3: Update output region by name
+    for (auto& region : outputRegions_) {
+        if (region.name == outputName) {
+            region.physicalWidth = width;
+            region.physicalHeight = height;
+            if (region.canvasWidth == oldWidth) region.canvasWidth = width;
+            if (region.canvasHeight == oldHeight) region.canvasHeight = height;
+            break;
         }
     }
     
     // Step 4: Recalculate canvas size and reconfigure renderer
     if (multiRenderer_) {
         // Make GL context current before any GL operations
-        // Use the first surface's context (they're all shared)
-        if (!surfaces_.empty() && surfaces_[0]) {
-            surfaces_[0]->makeCurrent();
+        if (!surfaces_.empty()) {
+            surfaces_.begin()->second->makeCurrent();
         }
         
         // Recalculate total canvas size
@@ -575,25 +578,16 @@ bool DRMBackend::setOutputMode(int outputIndex, int width, int height, double re
         
         // Reconfigure renderer with new regions
         std::vector<OutputSurface*> surfacePtrs;
-        for (auto& s : surfaces_) {
-            surfacePtrs.push_back(s.get());
+        for (auto& [name, surf] : surfaces_) {
+            surfacePtrs.push_back(surf.get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
     
-    LOG_INFO << "DRMBackend: Output " << outputIndex << " successfully changed to "
+    LOG_INFO << "DRMBackend: " << outputName << " successfully changed to "
              << width << "x" << height;
     
     return true;
-}
-
-bool DRMBackend::setOutputModeByName(const std::string& name, int width, int height, double refresh) {
-    int index = getOutputIndexByName(name);
-    if (index < 0) {
-        LOG_ERROR << "DRMBackend::setOutputModeByName: Unknown output '" << name << "'";
-        return false;
-    }
-    return setOutputMode(index, width, height, refresh);
 }
 
 void DRMBackend::setCaptureEnabled(bool enabled, int width, int height) {
@@ -678,30 +672,38 @@ bool DRMBackend::setResolutionMode(const std::string& mode) {
     // Apply mode to determine target resolutions for each output
     outputManager_->applyResolutionMode();
     
-    // Now actually change each output to the new resolution
+    // Now actually change each surface to its target resolution
     bool success = true;
     auto outputs = outputManager_->getOutputs();
-    for (size_t i = 0; i < outputs.size(); ++i) {
-        const auto& info = outputs[i];
-        if (!info.connected || !info.enabled) {
+    
+    for (auto& [surfName, surface] : surfaces_) {
+        if (!surface) continue;
+        
+        // Find the matching output info by name
+        const OutputInfo* info = nullptr;
+        for (const auto& out : outputs) {
+            if (out.name == surfName) {
+                info = &out;
+                break;
+            }
+        }
+        
+        if (!info || !info->connected || !info->enabled) {
             continue;
         }
         
-        // Get current surface dimensions
-        if (i < surfaces_.size() && surfaces_[i]) {
-            int currentW = static_cast<int>(surfaces_[i]->getWidth());
-            int currentH = static_cast<int>(surfaces_[i]->getHeight());
+        int currentW = static_cast<int>(surface->getWidth());
+        int currentH = static_cast<int>(surface->getHeight());
+        
+        // If the target resolution differs, apply the change
+        if (info->width != currentW || info->height != currentH) {
+            LOG_INFO << "Applying resolution mode to " << surfName << ": "
+                     << currentW << "x" << currentH << " -> " 
+                     << info->width << "x" << info->height;
             
-            // If the target resolution differs, apply the change
-            if (info.width != currentW || info.height != currentH) {
-                LOG_INFO << "Applying resolution mode to " << info.name << ": "
-                         << currentW << "x" << currentH << " -> " 
-                         << info.width << "x" << info.height;
-                
-                if (!setOutputMode(static_cast<int>(i), info.width, info.height, info.refreshRate)) {
-                    LOG_ERROR << "Failed to apply resolution mode to " << info.name;
-                    success = false;
-                }
+            if (!setOutputMode(surfName, info->width, info->height, info->refreshRate)) {
+                LOG_ERROR << "Failed to apply resolution mode to " << surfName;
+                success = false;
             }
         }
     }
@@ -834,7 +836,7 @@ bool DRMBackend::initVirtualCanvas() {
     
     // Configure MultiOutputRenderer with surfaces and regions
     std::vector<OutputSurface*> surfacePtrs;
-    for (auto& surface : surfaces_) {
+    for (auto& [name, surface] : surfaces_) {
         surfacePtrs.push_back(surface.get());
     }
     
@@ -851,15 +853,13 @@ void DRMBackend::buildOutputRegions() {
     
     int canvasX = 0;
     
-    for (size_t i = 0; i < surfaces_.size(); ++i) {
-        DRMSurface* surface = surfaces_[i].get();
+    for (auto& [outputName, surface] : surfaces_) {
         if (!surface) continue;
         
         const OutputInfo& info = surface->getOutputInfo();
         
         OutputRegion region = OutputRegion::createDefault(
             info.name,
-            static_cast<int>(i),
             info.width,
             info.height,
             canvasX,
@@ -871,7 +871,7 @@ void DRMBackend::buildOutputRegions() {
         // Next output starts after this one
         canvasX += info.width;
         
-        LOG_INFO << "DRMBackend: Output region " << i << " (" << info.name << "): "
+        LOG_INFO << "DRMBackend: Output region (" << info.name << "): "
                  << region.canvasX << "," << region.canvasY << " "
                  << region.canvasWidth << "x" << region.canvasHeight;
     }
@@ -883,15 +883,13 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
     int canvasX = 0;
     int canvasY = 0;
     
-    for (size_t i = 0; i < surfaces_.size(); ++i) {
-        DRMSurface* surface = surfaces_[i].get();
+    for (auto& [outputName, surface] : surfaces_) {
         if (!surface) continue;
         
         const OutputInfo& info = surface->getOutputInfo();
         
         OutputRegion region;
         region.name = info.name;
-        region.index = static_cast<int>(i);
         region.canvasWidth = info.width;
         region.canvasHeight = info.height;
         region.physicalWidth = info.width;
@@ -903,10 +901,10 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
             region.canvasY = canvasY;
             
             // Blend with previous output
-            if (i > 0 && overlap > 0) {
+            if (!outputRegions_.empty() && overlap > 0) {
                 region.canvasY -= overlap;
                 region.blend.top = static_cast<float>(overlap);
-                outputRegions_[i-1].blend.bottom = static_cast<float>(overlap);
+                outputRegions_.back().blend.bottom = static_cast<float>(overlap);
             }
             
             canvasY += info.height;
@@ -916,10 +914,10 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
             region.canvasY = 0;
             
             // Blend with previous output
-            if (i > 0 && overlap > 0) {
+            if (!outputRegions_.empty() && overlap > 0) {
                 region.canvasX -= overlap;
                 region.blend.left = static_cast<float>(overlap);
-                outputRegions_[i-1].blend.right = static_cast<float>(overlap);
+                outputRegions_.back().blend.right = static_cast<float>(overlap);
             }
             
             canvasX += info.width;
@@ -931,8 +929,8 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
     // Reconfigure if already initialized
     if (multiRenderer_ && multiRenderer_->isInitialized()) {
         std::vector<OutputSurface*> surfacePtrs;
-        for (auto& surface : surfaces_) {
-            surfacePtrs.push_back(surface.get());
+        for (auto& [name, surf] : surfaces_) {
+            surfacePtrs.push_back(surf.get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
@@ -943,17 +941,16 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
 
 bool DRMBackend::configureOutputRegion(const std::string& outputName, const OutputRegion& region) {
     // Find the output
-    for (size_t i = 0; i < outputRegions_.size(); ++i) {
-        if (outputRegions_[i].name == outputName) {
-            outputRegions_[i] = region;
-            outputRegions_[i].name = outputName;  // Preserve name
-            outputRegions_[i].index = static_cast<int>(i);
+    for (auto& r : outputRegions_) {
+        if (r.name == outputName) {
+            r = region;
+            r.name = outputName;  // Preserve name
             
             // Reconfigure if initialized
             if (multiRenderer_ && multiRenderer_->isInitialized()) {
                 std::vector<OutputSurface*> surfacePtrs;
-                for (auto& surface : surfaces_) {
-                    surfacePtrs.push_back(surface.get());
+                for (auto& [name, surf] : surfaces_) {
+                    surfacePtrs.push_back(surf.get());
                 }
                 multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
             }

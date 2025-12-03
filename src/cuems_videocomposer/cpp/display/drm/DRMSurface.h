@@ -43,9 +43,9 @@ public:
     /**
      * Create a surface for a specific output
      * @param outputManager DRM output manager (not owned)
-     * @param outputIndex Index of the output to render to
+     * @param outputName Name of the output (e.g., "HDMI-A-1")
      */
-    DRMSurface(DRMOutputManager* outputManager, int outputIndex);
+    DRMSurface(DRMOutputManager* outputManager, const std::string& outputName);
     ~DRMSurface() override;
     
     // ===== Initialization =====
@@ -131,9 +131,9 @@ public:
     uint32_t getHeight() const override { return height_; }
     
     /**
-     * Get output index
+     * Get output name (e.g., "HDMI-A-1")
      */
-    int getOutputIndex() const { return outputIndex_; }
+    const std::string& getOutputName() const { return outputName_; }
     
     // ===== EGL/OpenGL Access (OutputSurface interface) =====
     
@@ -198,7 +198,7 @@ private:
     // ===== Members =====
     
     DRMOutputManager* outputManager_;  // Not owned
-    int outputIndex_;
+    std::string outputName_;           // Name of this output (e.g., "HDMI-A-1")
     uint32_t width_;
     uint32_t height_;
     

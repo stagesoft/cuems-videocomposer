@@ -52,7 +52,6 @@ class WarpMesh;
 struct OutputRegion {
     // ===== Identification =====
     std::string name;               // Output name: "HDMI-A-1", "DP-1", etc.
-    int index = -1;                 // Index in output list
     
     // ===== Canvas Position =====
     // Where this output's content comes from in the virtual canvas
@@ -124,11 +123,10 @@ struct OutputRegion {
     /**
      * Create a default 1:1 region for an output
      */
-    static OutputRegion createDefault(const std::string& outputName, int index,
+    static OutputRegion createDefault(const std::string& outputName,
                                       int width, int height, int canvasX = 0, int canvasY = 0) {
         OutputRegion region;
         region.name = outputName;
-        region.index = index;
         region.canvasX = canvasX;
         region.canvasY = canvasY;
         region.canvasWidth = width;

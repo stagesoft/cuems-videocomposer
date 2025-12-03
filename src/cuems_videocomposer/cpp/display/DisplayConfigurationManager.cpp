@@ -214,7 +214,7 @@ std::vector<OutputRegion> DisplayConfigurationManager::generateOutputRegions(
         if (!out.enabled) continue;
         
         OutputRegion region = OutputRegion::createDefault(
-            out.name, static_cast<int>(i),
+            out.name,
             out.width, out.height, 0, 0
         );
         

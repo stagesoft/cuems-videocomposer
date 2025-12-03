@@ -23,6 +23,7 @@
 #include "DRMOutputManager.h"
 #include "DRMSurface.h"
 #include <vector>
+#include <map>
 #include <memory>
 
 namespace videocomposer {
@@ -106,26 +107,21 @@ public:
     size_t getOutputCount() const override;
     
     /**
-     * Get output index by name (override)
-     */
-    int getOutputIndexByName(const std::string& name) const override;
-    
-    /**
      * Configure output region (override)
      */
-    bool configureOutputRegion(int outputIndex, int canvasX, int canvasY,
+    bool configureOutputRegion(const std::string& outputName, int canvasX, int canvasY,
                                 int canvasWidth = 0, int canvasHeight = 0) override;
     
     /**
      * Configure edge blending (override)
      */
-    bool configureOutputBlend(int outputIndex, float left, float right,
+    bool configureOutputBlend(const std::string& outputName, float left, float right,
                                float top, float bottom, float gamma = 2.2f) override;
     
     /**
      * Set output resolution/mode (override)
      */
-    bool setOutputMode(int outputIndex, int width, int height, double refresh = 0.0) override;
+    bool setOutputMode(const std::string& outputName, int width, int height, double refresh = 0.0) override;
     
     /**
      * Enable/disable frame capture (override)
@@ -165,18 +161,12 @@ public:
     /**
      * Get surface for a specific output
      */
-    DRMSurface* getSurface(int index);
     DRMSurface* getSurface(const std::string& name);
     
     /**
      * Get primary surface (first output)
      */
     DRMSurface* getPrimarySurface();
-    
-    /**
-     * Set output mode by name
-     */
-    bool setOutputModeByName(const std::string& name, int width, int height, double refresh = 0.0);
     
     /**
      * Get DRM output manager
@@ -234,7 +224,7 @@ private:
     // DRM management
     std::unique_ptr<DRMOutputManager> outputManager_;
     std::unique_ptr<DisplayConfigurationManager> configManager_;
-    std::vector<std::unique_ptr<DRMSurface>> surfaces_;
+    std::map<std::string, std::unique_ptr<DRMSurface>> surfaces_;  // key = output name
     
     // Rendering - Legacy mode (per-output)
     std::unique_ptr<OpenGLRenderer> renderer_;

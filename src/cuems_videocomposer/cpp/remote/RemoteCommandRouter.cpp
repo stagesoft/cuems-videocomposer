@@ -1711,13 +1711,7 @@ bool RemoteCommandRouter::handleDisplayMode(const std::vector<std::string>& args
              << " to " << requestedMode->width << "x" << requestedMode->height
              << "@" << requestedMode->refreshRate << "Hz";
     
-    int outputIndex = backend->getOutputIndexByName(name);
-    if (outputIndex < 0) {
-        LOG_ERROR << "display/mode: Failed to find output index for " << name;
-        return false;
-    }
-    
-    if (backend->setOutputMode(outputIndex, width, height, requestedMode->refreshRate)) {
+    if (backend->setOutputMode(name, width, height, requestedMode->refreshRate)) {
         LOG_INFO << "display/mode: Mode changed successfully";
         return true;
     }
@@ -1780,13 +1774,7 @@ bool RemoteCommandRouter::handleDisplayRegion(const std::vector<std::string>& ar
     int width = (args.size() > 3) ? std::atoi(args[3].c_str()) : 0;
     int height = (args.size() > 4) ? std::atoi(args[4].c_str()) : 0;
     
-    int outputIndex = backend->getOutputIndexByName(outputName);
-    if (outputIndex < 0) {
-        LOG_WARNING << "display/region: Unknown output '" << outputName << "'";
-        return false;
-    }
-    
-    if (backend->configureOutputRegion(outputIndex, canvasX, canvasY, width, height)) {
+    if (backend->configureOutputRegion(outputName, canvasX, canvasY, width, height)) {
         LOG_INFO << "Configured region for " << outputName 
                  << " at " << canvasX << "," << canvasY;
         if (width > 0 && height > 0) {
@@ -1795,6 +1783,7 @@ bool RemoteCommandRouter::handleDisplayRegion(const std::vector<std::string>& ar
         return true;
     }
     
+    LOG_WARNING << "display/region: Unknown output '" << outputName << "'";
     return false;
 }
 
@@ -1836,19 +1825,14 @@ bool RemoteCommandRouter::handleDisplayBlend(const std::vector<std::string>& arg
     float bottom = std::atof(args[4].c_str());
     float gamma = (args.size() > 5) ? std::atof(args[5].c_str()) : 2.2f;
     
-    int outputIndex = backend->getOutputIndexByName(outputName);
-    if (outputIndex < 0) {
-        LOG_WARNING << "display/blend: Unknown output '" << outputName << "'";
-        return false;
-    }
-    
-    if (backend->configureOutputBlend(outputIndex, left, right, top, bottom, gamma)) {
+    if (backend->configureOutputBlend(outputName, left, right, top, bottom, gamma)) {
         LOG_INFO << "Configured blend for " << outputName 
                  << ": L=" << left << " R=" << right 
                  << " T=" << top << " B=" << bottom << " gamma=" << gamma;
         return true;
     }
     
+    LOG_WARNING << "display/blend: Unknown output '" << outputName << "'";
     return false;
 }
 

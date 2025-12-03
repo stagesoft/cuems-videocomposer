@@ -108,14 +108,20 @@ public:
     // ===== Output Enumeration =====
     
     /**
-     * Get all detected outputs
+     * Get all connected outputs (builds list from connectors)
      */
-    const std::vector<OutputInfo>& getOutputs() const { return outputs_; }
+    std::vector<OutputInfo> getOutputs() const;
     
     /**
-     * Get output count
+     * Get connected output count
      */
-    size_t getOutputCount() const { return outputs_.size(); }
+    size_t getOutputCount() const;
+    
+    /**
+     * Get output info by name (direct access to connector info)
+     */
+    const OutputInfo* getOutputByName(const std::string& name) const;
+    OutputInfo* getOutputByName(const std::string& name);
     
     /**
      * Get DRM connector by index
@@ -285,10 +291,8 @@ private:
     // DRM resources
     drmModeRes* resources_ = nullptr;
     
-    // Connectors and outputs
+    // Connectors (single source of truth for output info)
     std::vector<DRMConnector> connectors_;
-    std::vector<OutputInfo> outputs_;
-    std::map<std::string, size_t> outputsByName_;
     
     // CRTC allocation tracking
     std::map<uint32_t, uint32_t> crtcToConnector_;  // crtcId -> connectorId

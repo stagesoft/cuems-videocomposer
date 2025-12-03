@@ -121,7 +121,7 @@ bool DRMOutputManager::init(const std::string& devicePath) {
         return false;
     }
     
-    LOG_INFO << "DRMOutputManager: Detected " << outputs_.size() << " connected outputs";
+    LOG_INFO << "DRMOutputManager: Detected " << getOutputCount() << " connected outputs";
     
     return true;
 }
@@ -142,8 +142,6 @@ void DRMOutputManager::cleanup() {
         }
     }
     connectors_.clear();
-    outputs_.clear();
-    outputsByName_.clear();
     crtcToConnector_.clear();
     
     // Free resources
@@ -298,8 +296,6 @@ bool DRMOutputManager::detectOutputs() {
     }
     
     connectors_.clear();
-    outputs_.clear();
-    outputsByName_.clear();
     
     // Iterate through all connectors
     for (int i = 0; i < resources_->count_connectors; ++i) {
@@ -396,10 +392,6 @@ bool DRMOutputManager::detectOutputs() {
                      << " (" << drmConn.info.getDisplayName() << ")"
                      << " " << drmConn.info.width << "x" << drmConn.info.height
                      << "@" << drmConn.info.refreshRate << "Hz";
-            
-            // Add to outputs list
-            outputs_.push_back(drmConn.info);
-            outputsByName_[drmConn.info.name] = outputs_.size() - 1;
         } else {
             // Disconnected connector - still track it
             drmConn.info.enabled = false;
@@ -408,7 +400,7 @@ bool DRMOutputManager::detectOutputs() {
         connectors_.push_back(std::move(drmConn));
     }
     
-    return !outputs_.empty();
+    return getOutputCount() > 0;
 }
 
 std::string DRMOutputManager::getConnectorTypeName(uint32_t type) const {
@@ -691,6 +683,46 @@ DRMConnector* DRMOutputManager::getConnectorByName(const std::string& name) {
     return nullptr;
 }
 
+// ============================================================================
+// Output Access (builds from connectors_ - single source of truth)
+// ============================================================================
+
+std::vector<OutputInfo> DRMOutputManager::getOutputs() const {
+    std::vector<OutputInfo> result;
+    for (const auto& conn : connectors_) {
+        if (conn.info.connected && conn.info.enabled) {
+            result.push_back(conn.info);
+        }
+    }
+    return result;
+}
+
+size_t DRMOutputManager::getOutputCount() const {
+    size_t count = 0;
+    for (const auto& conn : connectors_) {
+        if (conn.info.connected && conn.info.enabled) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+const OutputInfo* DRMOutputManager::getOutputByName(const std::string& name) const {
+    const DRMConnector* conn = getConnectorByName(name);
+    if (conn && conn->info.connected && conn->info.enabled) {
+        return &conn->info;
+    }
+    return nullptr;
+}
+
+OutputInfo* DRMOutputManager::getOutputByName(const std::string& name) {
+    DRMConnector* conn = getConnectorByName(name);
+    if (conn && conn->info.connected && conn->info.enabled) {
+        return &conn->info;
+    }
+    return nullptr;
+}
+
 bool DRMOutputManager::refreshOutputs() {
     // Re-probe connectors for hotplug changes
     bool changed = false;
@@ -743,18 +775,7 @@ bool DRMOutputManager::refreshOutputs() {
         }
     }
     
-    if (changed) {
-        // Rebuild outputs list
-        outputs_.clear();
-        outputsByName_.clear();
-        
-        for (const auto& conn : connectors_) {
-            if (conn.info.connected && conn.info.enabled) {
-                outputs_.push_back(conn.info);
-                outputsByName_[conn.info.name] = outputs_.size() - 1;
-            }
-        }
-    }
+    // No need to rebuild - getOutputs() builds from connectors_ dynamically
     
     return changed;
 }
@@ -947,6 +968,8 @@ bool DRMOutputManager::applyResolutionMode() {
         }
     }
     
+    // No need to rebuild - getOutputs() builds from connectors_ dynamically
+    
     return allSuccess;
 }
 
@@ -1008,6 +1031,10 @@ bool DRMOutputManager::applyResolutionModeToOutput(int index) {
         conn->info.refreshRate = (double)bestMode->clock * 1000.0 / 
                                  ((double)bestMode->htotal * (double)bestMode->vtotal);
     }
+    
+    // Store the current mode for schedulePageFlip
+    conn->currentMode = *bestMode;
+    conn->hasCurrentMode = true;
     
     LOG_INFO << "DRMOutputManager: " << conn->info.name << " configured to "
              << bestMode->hdisplay << "x" << bestMode->vdisplay
