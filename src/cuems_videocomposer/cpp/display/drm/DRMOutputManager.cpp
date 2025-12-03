@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <iomanip>
 
 // For EDID parsing
 #include <libdrm/drm_mode.h>
@@ -848,6 +849,59 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
     LOG_INFO << "DRMOutputManager: Set mode " << conn->info.name << " to "
              << conn->info.width << "x" << conn->info.height 
              << "@" << conn->info.refreshRate << "Hz";
+    
+    return true;
+}
+
+bool DRMOutputManager::prepareMode(int index, int width, int height, double refreshRate) {
+    LOG_INFO << "DRMOutputManager::prepareMode: index=" << index 
+             << " " << width << "x" << height << "@" << refreshRate;
+    
+    DRMConnector* conn = getConnector(index);
+    if (!conn || !conn->connector || !conn->crtcId) {
+        LOG_ERROR << "DRMOutputManager::prepareMode: Invalid output index " << index;
+        return false;
+    }
+    
+    drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate);
+    if (!mode) {
+        LOG_WARNING << "=== MODE NOT AVAILABLE ===";
+        LOG_WARNING << "  Output: " << conn->info.name;
+        LOG_WARNING << "  Requested: " << width << "x" << height << "@" << refreshRate << "Hz";
+        LOG_WARNING << "  Available modes for " << conn->info.name << ":";
+        
+        // List all available modes
+        for (int i = 0; i < conn->connector->count_modes; ++i) {
+            drmModeModeInfo* m = &conn->connector->modes[i];
+            double refresh = 0.0;
+            if (m->htotal && m->vtotal) {
+                refresh = static_cast<double>(m->clock * 1000) / (m->htotal * m->vtotal);
+            }
+            LOG_WARNING << "    - " << m->hdisplay << "x" << m->vdisplay 
+                       << "@" << std::fixed << std::setprecision(1) << refresh << "Hz"
+                       << (m->type & DRM_MODE_TYPE_PREFERRED ? " (preferred)" : "");
+        }
+        LOG_WARNING << "==========================";
+        return false;
+    }
+    
+    LOG_INFO << "DRMOutputManager::prepareMode: Found mode " << mode->hdisplay << "x" << mode->vdisplay;
+    
+    // Store the new mode (will be applied in schedulePageFlip when modeSet_=false)
+    conn->currentMode = *mode;
+    conn->hasCurrentMode = true;
+    
+    // Update stored info
+    conn->info.width = mode->hdisplay;
+    conn->info.height = mode->vdisplay;
+    if (mode->htotal && mode->vtotal) {
+        conn->info.refreshRate = static_cast<double>(mode->clock * 1000) /
+                                 (mode->htotal * mode->vtotal);
+    }
+    
+    LOG_INFO << "DRMOutputManager::prepareMode: Prepared " << conn->info.name << " for "
+             << conn->info.width << "x" << conn->info.height 
+             << "@" << conn->info.refreshRate << "Hz (modeset pending)";
     
     return true;
 }

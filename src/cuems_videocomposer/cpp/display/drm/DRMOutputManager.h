@@ -155,6 +155,13 @@ public:
      */
     bool setMode(const std::string& name, int width, int height, double refreshRate = 0.0);
     
+    /**
+     * Prepare mode change (store mode without calling drmModeSetCrtc)
+     * The actual modeset happens when schedulePageFlip renders with modeSet_=false
+     * @return true if mode is valid and available
+     */
+    bool prepareMode(int index, int width, int height, double refreshRate = 0.0);
+    
     // ===== Resolution Mode Selection =====
     
     /**

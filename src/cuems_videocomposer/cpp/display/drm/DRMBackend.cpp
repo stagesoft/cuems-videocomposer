@@ -507,13 +507,15 @@ bool DRMBackend::setOutputMode(int outputIndex, int width, int height, double re
     LOG_INFO << "DRMBackend: Changing output " << outputIndex << " from "
              << oldWidth << "x" << oldHeight << " to " << width << "x" << height;
     
-    // Step 1: Set DRM mode (performs drmModeSetCrtc)
-    if (!outputManager_->setMode(outputIndex, width, height, refresh)) {
-        LOG_ERROR << "DRMBackend::setOutputMode: Failed to set DRM mode";
+    // Step 1: Update the mode in DRMOutputManager (stores mode for later use)
+    // Don't call drmModeSetCrtc yet - we need a valid framebuffer first
+    if (!outputManager_->prepareMode(outputIndex, width, height, refresh)) {
+        LOG_ERROR << "DRMBackend::setOutputMode: Mode not available";
         return false;
     }
     
-    // Step 2: Resize the GBM/EGL surface
+    // Step 2: Resize the GBM/EGL surface (creates new buffers, resets modeSet_=false)
+    // This makes the next schedulePageFlip do a full modeset with valid framebuffer
     if (!surface->resize(width, height)) {
         LOG_ERROR << "DRMBackend::setOutputMode: Failed to resize surface";
         return false;

@@ -202,32 +202,27 @@ class ResolutionModesTest:
             # Now test resolution changes while video is actively playing
             print("\n[5] Testing resolution changes DURING playback...")
             print("     (Video should continue playing smoothly through each change)")
+            print("     NOTE: Laptop panels (eDP) typically only support native resolution.")
+            print("           Use external monitors (HDMI/DP) to test actual mode changes.")
             
-            # Test sequence: multiple resolution changes while video plays
+            # Test on external outputs which typically support multiple modes
+            # HDMI-A-1 is most likely to support multiple resolutions
+            outputs_to_test = ["HDMI-A-1", "DP-1", "eDP-1"]
+            
             resolution_sequence = [
                 (1920, 1080, 60, "1080p"),
                 (1280, 720, 60, "720p"),
                 (1920, 1080, 60, "1080p (restore)"),
-                (2560, 1440, 60, "1440p (if available)"),
-                (1920, 1080, 60, "1080p (final)"),
             ]
             
-            for width, height, refresh, desc in resolution_sequence:
-                print(f"\n    → Changing to {desc} ({width}x{height}@{refresh}Hz) while video plays...")
-                self.send_osc("/videocomposer/display/mode", "eDP-1", str(width), str(height), str(refresh))
-                print(f"      Waiting 4 seconds for mode change to complete...")
-                time.sleep(4)  # Wait for mode change + verify video still playing
-                print(f"      ✓ Resolution changed, video should still be playing")
-            
-            # Test on second output if available
-            print("\n[6] Testing resolution changes on second output (if available)...")
-            for output in ["HDMI-A-1", "DP-1"]:
+            for output in outputs_to_test:
                 print(f"\n    Testing {output}:")
-                for width, height, refresh, desc in [(1920, 1080, 60, "1080p"), (1280, 720, 60, "720p")]:
-                    print(f"      → Changing {output} to {desc} while video plays...")
+                for width, height, refresh, desc in resolution_sequence:
+                    print(f"      → Changing to {desc} ({width}x{height}@{refresh}Hz)...")
                     self.send_osc("/videocomposer/display/mode", output, str(width), str(height), str(refresh))
+                    print(f"        Waiting 4 seconds...")
                     time.sleep(4)
-                    print(f"        ✓ Changed, video should still be playing")
+                print(f"      Done testing {output}")
             
             # Final verification: video should still be playing
             print("\n[7] Final verification...")

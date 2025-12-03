@@ -1693,9 +1693,17 @@ bool RemoteCommandRouter::handleDisplayMode(const std::vector<std::string>& args
     // Check if requested mode is available
     const OutputMode* requestedMode = found->findMode(width, height, refresh);
     if (!requestedMode) {
-        LOG_WARNING << "display/mode: Mode " << width << "x" << height 
-                    << " not available for " << name;
-        LOG_INFO << "  Use /videocomposer/display/modes " << name << " to see available modes";
+        LOG_WARNING << "=== MODE NOT AVAILABLE ===";
+        LOG_WARNING << "  Output: " << name;
+        LOG_WARNING << "  Requested: " << width << "x" << height << "@" << refresh << "Hz";
+        LOG_WARNING << "  Available modes:";
+        for (const auto& mode : found->modes) {
+            LOG_WARNING << "    - " << mode.width << "x" << mode.height 
+                       << "@" << mode.refreshRate << "Hz"
+                       << (mode.preferred ? " (preferred)" : "");
+        }
+        LOG_WARNING << "==========================";
+        LOG_INFO << "  Send /videocomposer/display/modes " << name << " to query modes via OSC";
         return false;
     }
     
