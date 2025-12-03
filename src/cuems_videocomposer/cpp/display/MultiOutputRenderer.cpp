@@ -436,18 +436,45 @@ void MultiOutputRenderer::blitToOutputs() {
 
 void MultiOutputRenderer::blitToOutput(OutputState& output) {
     if (!output.surface || !blitShader_ || !canvas_) {
+        LOG_ERROR << "MultiOutputRenderer::blitToOutput: Missing surface, shader, or canvas";
         return;
+    }
+    
+    static int debugCount = 0;
+    bool debug = debugCount < 10;
+    
+    if (debug) {
+        LOG_INFO << "blitToOutput: " << output.region.name 
+                 << " surface=" << output.surface
+                 << " canvas tex=" << canvas_->getTexture()
+                 << " canvas size=" << canvas_->getWidth() << "x" << canvas_->getHeight();
     }
     
     // Make output surface current
     output.surface->makeCurrent();
     
+    if (debug) {
+        GLenum err = glGetError();
+        LOG_INFO << "blitToOutput: After makeCurrent, GL error=" << err;
+    }
+    
     // Set viewport to output size
     glViewport(0, 0, output.region.physicalWidth, output.region.physicalHeight);
     
-    // Clear to black first (important for areas outside the canvas region)
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    // Clear to bright color for debugging (RED for display 2)
+    if (output.region.canvasX > 0) {
+        glClearColor(0.5f, 0.0f, 0.0f, 1.0f);  // Dark red for display 2
+    } else {
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);  // Black for display 1
+    }
     glClear(GL_COLOR_BUFFER_BIT);
+    
+    if (debug) {
+        LOG_INFO << "blitToOutput: Blitting region "
+                 << output.region.canvasX << "," << output.region.canvasY
+                 << " size " << output.region.canvasWidth << "x" << output.region.canvasHeight
+                 << " to physical " << output.region.physicalWidth << "x" << output.region.physicalHeight;
+    }
     
     // Blit canvas region to output with blend/warp
     blitShader_->blit(
@@ -457,8 +484,18 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
         output.region
     );
     
+    if (debug) {
+        GLenum err = glGetError();
+        LOG_INFO << "blitToOutput: After blit, GL error=" << err;
+    }
+    
     // Swap buffers (EGL swap for DRM surfaces)
     output.surface->swapBuffers();
+    
+    if (debug) {
+        LOG_INFO << "blitToOutput: After swapBuffers for " << output.region.name;
+        debugCount++;
+    }
     
     output.surface->releaseCurrent();
 }
