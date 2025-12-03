@@ -162,7 +162,21 @@ bool DRMBackend::isWindowOpen() const {
 }
 
 void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
+    static int renderCallCount = 0;
+    renderCallCount++;
+    
+    if (renderCallCount <= 3) {
+        LOG_INFO << "DRMBackend::render called (call #" << renderCallCount << ")"
+                 << " initialized=" << initialized_
+                 << " surfaces=" << surfaces_.size()
+                 << " useVirtualCanvas=" << useVirtualCanvas_
+                 << " multiRenderer=" << (multiRenderer_ ? "yes" : "no");
+    }
+    
     if (!initialized_ || surfaces_.empty()) {
+        if (renderCallCount <= 3) {
+            LOG_ERROR << "DRMBackend::render: Early return - not initialized or no surfaces";
+        }
         return;
     }
     

@@ -461,6 +461,15 @@ void VideoComposerApplication::updateLayers() {
 }
 
 void VideoComposerApplication::render() {
+    static int appRenderCount = 0;
+    appRenderCount++;
+    
+    if (appRenderCount <= 3) {
+        LOG_INFO << "VideoComposerApplication::render called (call #" << appRenderCount << ")"
+                 << " displayBackend=" << (displayBackend_ ? "yes" : "no")
+                 << " layerManager=" << (layerManager_ ? "yes" : "no");
+    }
+    
     if (displayBackend_ && layerManager_) {
         displayBackend_->render(layerManager_.get(), osdManager_.get());
         
