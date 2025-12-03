@@ -72,6 +72,25 @@ bool DRMOutputManager::init(const std::string& devicePath) {
     resources_ = drmModeGetResources(drmFd_);
     if (!resources_) {
         LOG_ERROR << "DRMOutputManager: Failed to get DRM resources";
+        
+        // Check if this is an NVIDIA card and provide helpful hint
+        drmVersion* version = drmGetVersion(drmFd_);
+        if (version) {
+            std::string driverName(version->name, version->name_len);
+            drmFreeVersion(version);
+            
+            if (driverName == "nvidia-drm" || driverName.find("nvidia") != std::string::npos) {
+                LOG_ERROR << "DRMOutputManager: NVIDIA driver detected without KMS support";
+                LOG_ERROR << "DRMOutputManager: To fix, enable modesetting:";
+                LOG_ERROR << "DRMOutputManager:   1. Add 'nvidia-drm.modeset=1' to kernel parameters, or";
+                LOG_ERROR << "DRMOutputManager:   2. Run: echo 'options nvidia-drm modeset=1' | sudo tee /etc/modprobe.d/nvidia-drm.conf";
+                LOG_ERROR << "DRMOutputManager:   3. Then: sudo update-initramfs -u && sudo reboot";
+            } else {
+                LOG_ERROR << "DRMOutputManager: Driver '" << driverName << "' may not support KMS";
+                LOG_ERROR << "DRMOutputManager: Ensure no other process (compositor/X11) holds DRM master";
+            }
+        }
+        
         cleanup();
         return false;
     }
@@ -278,19 +297,52 @@ bool DRMOutputManager::detectOutputs() {
                 
                 // Save original CRTC state
                 drmConn.savedCrtc = drmModeGetCrtc(drmFd_, drmConn.crtcId);
-                if (drmConn.savedCrtc) {
+                if (drmConn.savedCrtc && drmConn.savedCrtc->mode_valid) {
+                    // Use current mode from CRTC
                     drmConn.info.width = drmConn.savedCrtc->width;
                     drmConn.info.height = drmConn.savedCrtc->height;
                     drmConn.info.x = drmConn.savedCrtc->x;
                     drmConn.info.y = drmConn.savedCrtc->y;
                     
                     // Get refresh rate from current mode
-                    if (drmConn.savedCrtc->mode_valid) {
-                        drmModeModeInfo* mode = &drmConn.savedCrtc->mode;
-                        if (mode->htotal && mode->vtotal) {
-                            drmConn.info.refreshRate = static_cast<double>(mode->clock * 1000) /
-                                                       (mode->htotal * mode->vtotal);
+                    drmModeModeInfo* mode = &drmConn.savedCrtc->mode;
+                    if (mode->htotal && mode->vtotal) {
+                        drmConn.info.refreshRate = static_cast<double>(mode->clock * 1000) /
+                                                   (mode->htotal * mode->vtotal);
+                    }
+                } else {
+                    // No current mode set (no compositor running) - use preferred or first available mode
+                    drmModeModeInfo* bestMode = nullptr;
+                    
+                    // Find preferred mode first
+                    for (int m = 0; m < conn->count_modes; ++m) {
+                        if (conn->modes[m].type & DRM_MODE_TYPE_PREFERRED) {
+                            bestMode = &conn->modes[m];
+                            break;
                         }
+                    }
+                    
+                    // Fall back to first mode if no preferred
+                    if (!bestMode && conn->count_modes > 0) {
+                        bestMode = &conn->modes[0];
+                    }
+                    
+                    if (bestMode) {
+                        drmConn.info.width = bestMode->hdisplay;
+                        drmConn.info.height = bestMode->vdisplay;
+                        drmConn.info.x = 0;
+                        drmConn.info.y = 0;
+                        
+                        if (bestMode->htotal && bestMode->vtotal) {
+                            drmConn.info.refreshRate = static_cast<double>(bestMode->clock * 1000) /
+                                                       (bestMode->htotal * bestMode->vtotal);
+                        }
+                        
+                        LOG_INFO << "DRMOutputManager: No active mode on " << drmConn.info.name 
+                                 << ", will use " << bestMode->hdisplay << "x" << bestMode->vdisplay
+                                 << (bestMode->type & DRM_MODE_TYPE_PREFERRED ? " (preferred)" : "");
+                    } else {
+                        LOG_WARNING << "DRMOutputManager: No modes available for " << drmConn.info.name;
                     }
                 }
             }
