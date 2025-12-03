@@ -526,9 +526,7 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         uvModifier = desc.objects[uvObjectIdx].drm_format_modifier;
         uvFd = dup(desc.objects[uvObjectIdx].fd);
         
-        LOG_INFO << "VaapiInterop: SEPARATE_LAYERS mode - " << desc.num_layers << " layers, "
-                 << desc.num_objects << " objects, yFormat=R8, uvFormat=GR88";
-    } else if (desc.num_layers == 1 && desc.layers[0].num_planes >= 2) {
+        } else if (desc.num_layers == 1 && desc.layers[0].num_planes >= 2) {
         // COMPOSED_LAYERS mode
         yObjectIdx = desc.layers[0].object_index[0];
         yOffset = desc.layers[0].offset[0];
@@ -557,9 +555,6 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     }
     
     // Create EGL images
-    static int createCount = 0;
-    createCount++;
-    
     eglImageY_ = createEGLImageFromDmaBuf(yFd, width, height, yFormat, yOffset, yPitch, yModifier);
     
     if (eglImageY_ == EGL_NO_IMAGE_KHR) {
@@ -567,13 +562,6 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         close(yFd);
         close(uvFd);
         return false;
-    }
-    
-    if (createCount <= 3) {
-        LOG_INFO << "VaapiInterop: createEGLImages #" << createCount 
-                 << " Y: fd=" << yFd << " size=" << width << "x" << height 
-                 << " format=0x" << std::hex << yFormat << std::dec
-                 << " image=" << eglImageY_;
     }
     
     eglImageUV_ = createEGLImageFromDmaBuf(uvFd, width / 2, height / 2, uvFormat, uvOffset, uvPitch, uvModifier);
@@ -691,19 +679,6 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     
     // Clear any pending GL errors before we start
     while (glGetError() != GL_NO_ERROR) {}
-    
-    // Log first few bind attempts for debugging
-    static int bindCount = 0;
-    if (bindCount++ < 5) {
-        EGLDisplay currentDisplay = eglGetCurrentDisplay();
-        EGLContext currentContext = eglGetCurrentContext();
-        LOG_INFO << "VaapiInterop: bindTextures #" << bindCount
-                 << " display=" << currentDisplay
-                 << " context=" << currentContext
-                 << " eglImageY=" << eglImageY_
-                 << " textureY=" << textureY_
-                 << " prevWasDeleted=" << (textureY_ == 0 ? "no_prev" : "yes");
-    }
     
     // Bind Y plane texture using the appropriate extension (mpv approach)
     glBindTexture(GL_TEXTURE_2D, textureY_);
@@ -1053,20 +1028,8 @@ EGLImageKHR VaapiInterop::createEGLImageFromDmaBuf(
     
     // Use eglGetCurrentDisplay() like mpv does
     EGLDisplay currentDisplay = eglGetCurrentDisplay();
-    bool usedFallback = false;
     if (currentDisplay == EGL_NO_DISPLAY) {
         currentDisplay = eglDisplay_;  // Fallback
-        usedFallback = true;
-    }
-    
-    // Log first few image creations for debugging
-    static int createCount = 0;
-    if (createCount++ < 3) {
-        LOG_INFO << "VaapiInterop: createEGLImage #" << createCount 
-                 << " display=" << currentDisplay 
-                 << " (fallback=" << usedFallback << ")"
-                 << " size=" << width << "x" << height
-                 << " format=0x" << std::hex << fourcc << std::dec;
     }
     
     EGLImageKHR image = eglCreateImageKHR_(
