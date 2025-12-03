@@ -57,18 +57,57 @@ bool DRMSurface::init(EGLContext sharedContext) {
     gbmDevice_ = gbm_create_device(outputManager_->getFd());
     if (!gbmDevice_) {
         LOG_ERROR << "DRMSurface: Failed to create GBM device";
+        LOG_ERROR << "DRMSurface: Ensure the GPU driver supports GBM (Mesa or NVIDIA 495+)";
         return false;
     }
     
-    // Create GBM surface
-    gbmSurface_ = gbm_surface_create(gbmDevice_, width_, height_,
-                                      GBM_FORMAT_XRGB8888,
-                                      GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
-    if (!gbmSurface_) {
-        LOG_ERROR << "DRMSurface: Failed to create GBM surface";
-        cleanup();
-        return false;
+    // Log GBM backend info
+    const char* gbmBackend = gbm_device_get_backend_name(gbmDevice_);
+    LOG_INFO << "DRMSurface: GBM backend: " << (gbmBackend ? gbmBackend : "unknown");
+    
+    // Try different formats - NVIDIA may prefer ARGB over XRGB
+    static const struct {
+        uint32_t format;
+        const char* name;
+    } formats[] = {
+        { GBM_FORMAT_XRGB8888, "XRGB8888" },
+        { GBM_FORMAT_ARGB8888, "ARGB8888" },
+        { GBM_FORMAT_XBGR8888, "XBGR8888" },
+        { GBM_FORMAT_ABGR8888, "ABGR8888" },
+    };
+    
+    // Try different usage flags - some drivers don't support all combinations
+    static const struct {
+        uint32_t flags;
+        const char* name;
+    } usageFlags[] = {
+        { GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING, "SCANOUT|RENDERING" },
+        { GBM_BO_USE_RENDERING, "RENDERING only" },
+        { GBM_BO_USE_SCANOUT, "SCANOUT only" },
+    };
+    
+    // Try all combinations
+    for (const auto& fmt : formats) {
+        for (const auto& usage : usageFlags) {
+            gbmSurface_ = gbm_surface_create(gbmDevice_, width_, height_, fmt.format, usage.flags);
+            if (gbmSurface_) {
+                LOG_INFO << "DRMSurface: Created GBM surface with format " << fmt.name 
+                         << ", usage " << usage.name;
+                goto gbm_surface_created;
+            }
+        }
     }
+    
+    // All attempts failed
+    LOG_ERROR << "DRMSurface: Failed to create GBM surface with any format/usage combination";
+    LOG_ERROR << "DRMSurface: This may indicate:";
+    LOG_ERROR << "DRMSurface:   - GPU driver doesn't support GBM scanout";
+    LOG_ERROR << "DRMSurface:   - Another process (X11/Wayland) holds the display";
+    LOG_ERROR << "DRMSurface:   - NVIDIA: ensure nvidia-drm.modeset=1 is set";
+    cleanup();
+    return false;
+    
+gbm_surface_created:
     
     // Initialize EGL
     PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
