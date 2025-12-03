@@ -59,11 +59,11 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
         ownGbmDevice_ = false;
         LOG_INFO << "DRMSurface: Using shared GBM device";
     } else {
-        gbmDevice_ = gbm_create_device(outputManager_->getFd());
-        if (!gbmDevice_) {
-            LOG_ERROR << "DRMSurface: Failed to create GBM device";
-            LOG_ERROR << "DRMSurface: Ensure the GPU driver supports GBM (Mesa or NVIDIA 495+)";
-            return false;
+    gbmDevice_ = gbm_create_device(outputManager_->getFd());
+    if (!gbmDevice_) {
+        LOG_ERROR << "DRMSurface: Failed to create GBM device";
+        LOG_ERROR << "DRMSurface: Ensure the GPU driver supports GBM (Mesa or NVIDIA 495+)";
+        return false;
         }
         ownGbmDevice_ = true;
     }
@@ -131,11 +131,11 @@ gbm_surface_created:
         usingPlatformDisplay = true;
     } else {
         // Initialize EGL - prefer platform-aware functions for GBM
-        PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
-            (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
-        
-        if (eglGetPlatformDisplayEXT) {
-            eglDisplay_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbmDevice_, nullptr);
+    PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
+        (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    
+    if (eglGetPlatformDisplayEXT) {
+        eglDisplay_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbmDevice_, nullptr);
             if (eglDisplay_ != EGL_NO_DISPLAY) {
                 usingPlatformDisplay = true;
             }
@@ -143,23 +143,23 @@ gbm_surface_created:
         
         if (eglDisplay_ == EGL_NO_DISPLAY) {
             // Fallback to legacy path
-            eglDisplay_ = eglGetDisplay((EGLNativeDisplayType)gbmDevice_);
-        }
-        
-        if (eglDisplay_ == EGL_NO_DISPLAY) {
-            LOG_ERROR << "DRMSurface: Failed to get EGL display";
-            cleanup();
-            return false;
-        }
-        
-        EGLint major, minor;
-        if (!eglInitialize(eglDisplay_, &major, &minor)) {
-            LOG_ERROR << "DRMSurface: Failed to initialize EGL";
-            cleanup();
-            return false;
-        }
-        
-        LOG_INFO << "DRMSurface: EGL " << major << "." << minor;
+        eglDisplay_ = eglGetDisplay((EGLNativeDisplayType)gbmDevice_);
+    }
+    
+    if (eglDisplay_ == EGL_NO_DISPLAY) {
+        LOG_ERROR << "DRMSurface: Failed to get EGL display";
+        cleanup();
+        return false;
+    }
+    
+    EGLint major, minor;
+    if (!eglInitialize(eglDisplay_, &major, &minor)) {
+        LOG_ERROR << "DRMSurface: Failed to initialize EGL";
+        cleanup();
+        return false;
+    }
+    
+    LOG_INFO << "DRMSurface: EGL " << major << "." << minor;
         ownEglDisplay_ = true;
     }
     
@@ -259,8 +259,8 @@ gbm_surface_created:
         eglSurface_ = eglCreatePlatformWindowSurfaceEXT(eglDisplay_, eglConfig_, gbmSurface_, nullptr);
     } else {
         LOG_INFO << "DRMSurface: Using legacy eglCreateWindowSurface";
-        eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
-                                             (EGLNativeWindowType)gbmSurface_, nullptr);
+    eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
+                                         (EGLNativeWindowType)gbmSurface_, nullptr);
     }
     
     if (eglSurface_ == EGL_NO_SURFACE) {
@@ -344,7 +344,7 @@ void DRMSurface::cleanup() {
         
         // Only terminate if we created it
         if (ownEglDisplay_) {
-            eglTerminate(eglDisplay_);
+        eglTerminate(eglDisplay_);
         }
         eglDisplay_ = EGL_NO_DISPLAY;
         ownEglDisplay_ = false;
@@ -518,7 +518,7 @@ bool DRMSurface::schedulePageFlip() {
     
     // Subsequent frames: use page flip for vsync
     ret = drmModePageFlip(outputManager_->getFd(), crtcId_,
-                          nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
+                              nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
     
     if (ret != 0) {
         LOG_ERROR << "DRMSurface: Page flip failed: " << strerror(-ret) << " (errno=" << -ret << ")";

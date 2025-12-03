@@ -263,7 +263,7 @@ bool GPUTextureFrameBuffer::uploadCompressedData(const uint8_t* data, size_t siz
 
     // Clear any pending GL errors (similar fix as VAAPI interop)
     while (glGetError() != GL_NO_ERROR) {}
-    
+
     glBindTexture(GL_TEXTURE_2D, textureIds_[0]);
     if (!checkGLError("glBindTexture(upload)")) {
         return false;
@@ -290,7 +290,7 @@ bool GPUTextureFrameBuffer::uploadUncompressedData(const uint8_t* data, size_t s
 
     // Clear any pending GL errors
     while (glGetError() != GL_NO_ERROR) {}
-    
+
     glBindTexture(GL_TEXTURE_2D, textureIds_[0]);
     if (!checkGLError("glBindTexture(upload)")) {
         return false;

@@ -1,15 +1,16 @@
 /**
  * MultiOutputRenderer.h - Multi-output rendering orchestration
  * 
- * Part of the Multi-Display Implementation for cuems-videocomposer.
- * Manages rendering to multiple physical outputs with layer routing,
- * edge blending, and integration with virtual outputs (NDI, streaming).
+ * Part of the Virtual Canvas architecture for cuems-videocomposer.
+ * 
+ * Renders all layers to a single VirtualCanvas, then blits regions
+ * to physical outputs with optional edge blending and warping.
  * 
  * Features:
- * - Route specific layers to specific outputs
- * - Edge blending for projector setups
- * - Geometric warping support
- * - Frame capture for virtual outputs
+ * - Single unified canvas for all content (layers can span outputs)
+ * - Edge blending for projector overlap
+ * - Geometric warping for keystone/curved surfaces
+ * - Frame capture for virtual outputs (NDI, streaming)
  * - Synchronized multi-output presentation
  */
 
@@ -18,6 +19,9 @@
 
 #include "OutputInfo.h"
 #include "OutputConfig.h"
+#include "OutputRegion.h"
+#include "VirtualCanvas.h"
+#include "OutputBlitShader.h"
 #include "OpenGLRenderer.h"
 #include "../layer/LayerManager.h"
 #include "../osd/OSDManager.h"
@@ -26,6 +30,10 @@
 #include <memory>
 #include <map>
 #include <functional>
+
+#ifdef HAVE_EGL
+#include <EGL/egl.h>
+#endif
 
 namespace videocomposer {
 
@@ -98,6 +106,10 @@ public:
 
 /**
  * MultiOutputRenderer - Orchestrates rendering to multiple displays
+ * 
+ * Uses VirtualCanvas architecture:
+ * 1. All layers render to a single FBO (VirtualCanvas)
+ * 2. Regions are blitted to each output with blend/warp via OutputBlitShader
  */
 class MultiOutputRenderer {
 public:
@@ -107,11 +119,39 @@ public:
     // ===== Initialization =====
     
     /**
-     * Initialize with list of output surfaces
+     * Initialize with EGL context for Virtual Canvas mode
+     * This is the preferred initialization method for DRM/KMS.
+     * 
+     * @param eglDisplay EGL display
+     * @param eglContext Shared EGL context (must be current when calling GL functions)
+     * @return true on success
+     */
+#ifdef HAVE_EGL
+    bool init(EGLDisplay eglDisplay, EGLContext eglContext);
+#endif
+    
+    /**
+     * Initialize with list of output surfaces (legacy mode)
      * @param surfaces Vector of surfaces to render to (not owned)
      * @return true on success
      */
     bool init(const std::vector<OutputSurface*>& surfaces);
+    
+    /**
+     * Configure output regions for Virtual Canvas mode
+     * Call after init() to set up output layout.
+     * 
+     * @param regions Vector of output regions defining canvas layout
+     * @param surfaces Corresponding output surfaces (not owned)
+     */
+    void configureOutputs(const std::vector<OutputRegion>& regions,
+                          const std::vector<OutputSurface*>& surfaces);
+    
+    /**
+     * Reconfigure canvas size (call when outputs change)
+     * Automatically calculates combined size from output regions.
+     */
+    void reconfigureCanvas();
     
     /**
      * Cleanup resources
@@ -122,6 +162,25 @@ public:
      * Check if initialized
      */
     bool isInitialized() const { return initialized_; }
+    
+    /**
+     * Check if using Virtual Canvas mode
+     */
+    bool isVirtualCanvasMode() const { return useVirtualCanvas_; }
+    
+    // ===== Virtual Canvas Access =====
+    
+    /**
+     * Get the virtual canvas (for direct access if needed)
+     */
+    VirtualCanvas* getCanvas() { return canvas_.get(); }
+    const VirtualCanvas* getCanvas() const { return canvas_.get(); }
+    
+    /**
+     * Get canvas dimensions
+     */
+    int getCanvasWidth() const { return canvas_ ? canvas_->getWidth() : 0; }
+    int getCanvasHeight() const { return canvas_ ? canvas_->getHeight() : 0; }
     
     // ===== Layer Mapping =====
     
@@ -256,8 +315,9 @@ private:
      */
     struct OutputState {
         OutputSurface* surface = nullptr;
-        std::vector<LayerRenderInfo> layerMappings;
-        BlendRegion blend;
+        OutputRegion region;                      // Canvas region for this output
+        std::vector<LayerRenderInfo> layerMappings;  // Legacy: per-output layer routing
+        BlendRegion blend;                        // Legacy: separate blend config
         std::shared_ptr<WarpMesh> warpMesh;
         std::unique_ptr<BlendShader> blendShader;
         bool needsBlending = false;
@@ -265,9 +325,15 @@ private:
         bool captureEnabled = false;
     };
     
+    // Virtual Canvas components
+    std::unique_ptr<VirtualCanvas> canvas_;
+    std::unique_ptr<OutputBlitShader> blitShader_;
+    bool useVirtualCanvas_ = false;
+    
     std::vector<OutputState> outputs_;
+    std::vector<OutputRegion> outputRegions_;     // Output regions in canvas
     std::unique_ptr<OpenGLRenderer> renderer_;
-    std::map<int, std::vector<int>> layerToOutputs_;  // layerId -> output indices
+    std::map<int, std::vector<int>> layerToOutputs_;  // layerId -> output indices (legacy)
     
     // Virtual output capture
     std::unique_ptr<FrameCapture> frameCapture_;
@@ -277,7 +343,7 @@ private:
     GLuint compositeDepthRBO_ = 0;
     int captureWidth_ = 0;
     int captureHeight_ = 0;
-    int captureSourceIndex_ = -1;  // -1 = composite FBO
+    int captureSourceIndex_ = -1;  // -1 = virtual canvas
     bool captureEnabled_ = false;
     
     bool initialized_ = false;
@@ -288,17 +354,32 @@ private:
     // ===== Private Methods =====
     
     /**
-     * Render layers to a specific output
+     * Render all layers to the virtual canvas
+     */
+    void renderToCanvas(LayerManager* layerManager, OSDManager* osdManager);
+    
+    /**
+     * Blit canvas regions to all outputs
+     */
+    void blitToOutputs();
+    
+    /**
+     * Blit canvas region to a single output
+     */
+    void blitToOutput(OutputState& output);
+    
+    /**
+     * Render layers to a specific output (legacy mode)
      */
     void renderLayersToOutput(OutputState& output, LayerManager* layerManager);
     
     /**
-     * Apply edge blending
+     * Apply edge blending (legacy mode)
      */
     void applyBlending(OutputState& output);
     
     /**
-     * Apply geometric warping
+     * Apply geometric warping (legacy mode)
      */
     void applyWarping(OutputState& output);
     
@@ -308,12 +389,12 @@ private:
     void captureForVirtualOutputs();
     
     /**
-     * Render to composite FBO
+     * Render to composite FBO (legacy mode)
      */
     void renderToCompositeFBO(LayerManager* layerManager);
     
     /**
-     * Create composite FBO
+     * Create composite FBO (legacy mode)
      */
     bool createCompositeFBO(int width, int height);
     
@@ -326,6 +407,11 @@ private:
      * Find output by name
      */
     int findOutputByName(const std::string& name) const;
+    
+    /**
+     * Calculate canvas size from output regions
+     */
+    void calculateCanvasSize(int& width, int& height) const;
 };
 
 } // namespace videocomposer

@@ -603,6 +603,8 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/display/DisplayManager.cpp
     src/cuems_videocomposer/cpp/display/DisplayConfiguration.cpp
     src/cuems_videocomposer/cpp/display/MultiOutputRenderer.cpp
+    src/cuems_videocomposer/cpp/display/VirtualCanvas.cpp
+    src/cuems_videocomposer/cpp/display/OutputBlitShader.cpp
     src/cuems_videocomposer/cpp/display/HeadlessDisplay.cpp
     # Wayland backend (conditional compilation via #ifdef HAVE_WAYLAND)
     src/cuems_videocomposer/cpp/display/WaylandDisplay.cpp

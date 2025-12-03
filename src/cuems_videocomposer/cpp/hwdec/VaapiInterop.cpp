@@ -158,13 +158,13 @@ bool VaapiInterop::init(DisplayBackend* display) {
                 return false;
             }
             LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexture2DOES (fallback)";
-        } else {
+    } else {
             LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexStorageEXT (Desktop GL/DRM)";
         }
     } else {
         if (!glEGLImageTargetTexture2DOES_) {
             LOG_ERROR << "VaapiInterop: glEGLImageTargetTexture2DOES not available";
-            return false;
+        return false;
         }
         LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexture2DOES (OpenGL ES)";
     }
@@ -526,7 +526,7 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         uvModifier = desc.objects[uvObjectIdx].drm_format_modifier;
         uvFd = dup(desc.objects[uvObjectIdx].fd);
         
-        } else if (desc.num_layers == 1 && desc.layers[0].num_planes >= 2) {
+    } else if (desc.num_layers == 1 && desc.layers[0].num_planes >= 2) {
         // COMPOSED_LAYERS mode
         yObjectIdx = desc.layers[0].object_index[0];
         yOffset = desc.layers[0].offset[0];
@@ -654,28 +654,28 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         prevEglImageUV_ = EGL_NO_IMAGE_KHR;
     }
     
-    glGenTextures(1, &textureY_);
-    glGenTextures(1, &textureUV_);
-    
-    if (textureY_ == 0 || textureUV_ == 0) {
-        LOG_ERROR << "VaapiInterop: Failed to create textures";
-        return false;
-    }
-    
+        glGenTextures(1, &textureY_);
+        glGenTextures(1, &textureUV_);
+        
+        if (textureY_ == 0 || textureUV_ == 0) {
+            LOG_ERROR << "VaapiInterop: Failed to create textures";
+            return false;
+        }
+        
     // Set texture parameters before binding EGL image
-    glBindTexture(GL_TEXTURE_2D, textureY_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    
-    glBindTexture(GL_TEXTURE_2D, textureUV_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    
-    glBindTexture(GL_TEXTURE_2D, 0);
+        glBindTexture(GL_TEXTURE_2D, textureY_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        
+        glBindTexture(GL_TEXTURE_2D, textureUV_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
     
     // Clear any pending GL errors before we start
     while (glGetError() != GL_NO_ERROR) {}
@@ -705,7 +705,7 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         GLenum err = glGetError();
         if (err == GL_NO_ERROR) {
             bindSuccess = true;
-        } else {
+    } else {
             static int errCount = 0;
             if (errCount++ < 5) {
                 LOG_WARNING << "VaapiInterop: glEGLImageTargetTexture2DOES Y failed: 0x" 
@@ -745,12 +745,12 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         GLenum err = glGetError();
         if (err == GL_NO_ERROR) {
             bindSuccess = true;
-        } else {
+    } else {
             static int errCount = 0;
             if (errCount++ < 5) {
                 LOG_WARNING << "VaapiInterop: glEGLImageTargetTexture2DOES UV failed: 0x" 
                            << std::hex << err << std::dec;
-            }
+    }
         }
     }
     

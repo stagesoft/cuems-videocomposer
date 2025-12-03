@@ -1,8 +1,9 @@
 /**
  * DRMSurface.h - Per-output rendering surface for DRM/KMS
  * 
- * Part of the Multi-Display Implementation for cuems-videocomposer.
+ * Part of the Virtual Canvas architecture for cuems-videocomposer.
  * Provides GBM+EGL rendering surface for a single DRM output.
+ * Inherits from OutputSurface for compatibility with MultiOutputRenderer.
  * 
  * Features:
  * - GBM surface for buffer allocation
@@ -15,6 +16,7 @@
 #define VIDEOCOMPOSER_DRMSURFACE_H
 
 #include "../OutputInfo.h"
+#include "../MultiOutputRenderer.h"  // For OutputSurface base class
 #include <gbm.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -29,13 +31,14 @@ class DRMOutputManager;
 /**
  * DRMSurface - Rendering surface for a single DRM output
  * 
+ * Inherits from OutputSurface for use with MultiOutputRenderer.
  * Manages:
  * - GBM surface allocation
  * - EGL context and surface creation
  * - Framebuffer management
  * - Page flipping with vsync
  */
-class DRMSurface {
+class DRMSurface : public OutputSurface {
 public:
     /**
      * Create a surface for a specific output
@@ -43,7 +46,7 @@ public:
      * @param outputIndex Index of the output to render to
      */
     DRMSurface(DRMOutputManager* outputManager, int outputIndex);
-    ~DRMSurface();
+    ~DRMSurface() override;
     
     // ===== Initialization =====
     
@@ -102,44 +105,44 @@ public:
      */
     bool isFlipPending() const { return flipPending_; }
     
-    // ===== Output Information =====
+    // ===== Output Information (OutputSurface interface) =====
     
     /**
      * Get output info
      */
-    const OutputInfo& getOutputInfo() const;
+    const OutputInfo& getOutputInfo() const override;
     
     /**
      * Get current width
      */
-    uint32_t getWidth() const { return width_; }
+    uint32_t getWidth() const override { return width_; }
     
     /**
      * Get current height
      */
-    uint32_t getHeight() const { return height_; }
+    uint32_t getHeight() const override { return height_; }
     
     /**
      * Get output index
      */
     int getOutputIndex() const { return outputIndex_; }
     
-    // ===== EGL/OpenGL Access =====
+    // ===== EGL/OpenGL Access (OutputSurface interface) =====
     
     /**
      * Make this surface's context current
      */
-    void makeCurrent();
+    void makeCurrent() override;
     
     /**
      * Release context (make none current)
      */
-    void releaseCurrent();
+    void releaseCurrent() override;
     
     /**
      * Swap buffers (for non-atomic mode)
      */
-    void swapBuffers();
+    void swapBuffers() override;
     
     /**
      * Get EGL context

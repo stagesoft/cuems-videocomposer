@@ -95,22 +95,33 @@ bool DRMBackend::openWindow() {
     initVAAPI();
 #endif
     
-    // Create OpenGL renderer using primary surface
+    // Initialize rendering
     DRMSurface* primary = getPrimarySurface();
     if (primary) {
         primary->makeCurrent();
         
-        renderer_ = std::make_unique<OpenGLRenderer>();
-        if (!renderer_->init()) {
-            LOG_ERROR << "DRMBackend: Failed to initialize OpenGL renderer";
-            // Continue anyway - rendering might still work
+        if (useVirtualCanvas_) {
+            // Virtual Canvas mode: use MultiOutputRenderer
+            if (!initVirtualCanvas()) {
+                LOG_WARNING << "DRMBackend: Virtual Canvas init failed, falling back to legacy mode";
+                useVirtualCanvas_ = false;
+            }
+        }
+        
+        if (!useVirtualCanvas_) {
+            // Legacy mode: single OpenGLRenderer
+            renderer_ = std::make_unique<OpenGLRenderer>();
+            if (!renderer_->init()) {
+                LOG_ERROR << "DRMBackend: Failed to initialize OpenGL renderer";
+            }
         }
         
         primary->releaseCurrent();
     }
     
     initialized_ = true;
-    LOG_INFO << "DRMBackend: Initialized with " << surfaces_.size() << " output(s)";
+    LOG_INFO << "DRMBackend: Initialized with " << surfaces_.size() << " output(s)"
+             << (useVirtualCanvas_ ? " (Virtual Canvas mode)" : " (Legacy mode)");
     
     return true;
 }
@@ -129,7 +140,10 @@ void DRMBackend::closeWindow() {
     }
 #endif
     
+    // Cleanup renderers
+    multiRenderer_.reset();
     renderer_.reset();
+    outputRegions_.clear();
     
     // Cleanup surfaces
     for (auto& surface : surfaces_) {
@@ -148,11 +162,53 @@ bool DRMBackend::isWindowOpen() const {
 }
 
 void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
-    (void)osdManager;  // OSD rendering handled separately
-    
     if (!initialized_ || surfaces_.empty()) {
         return;
     }
+    
+    if (useVirtualCanvas_ && multiRenderer_) {
+        renderVirtualCanvas(layerManager, osdManager);
+    } else {
+        renderLegacy(layerManager, osdManager);
+    }
+}
+
+void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osdManager) {
+    if (!multiRenderer_) {
+        return;
+    }
+    
+    // Make primary surface context current for canvas rendering
+    DRMSurface* primary = getPrimarySurface();
+    if (!primary) {
+        return;
+    }
+    
+    primary->makeCurrent();
+    
+    // MultiOutputRenderer::render() handles:
+    // 1. Rendering all layers to VirtualCanvas
+    // 2. Blitting regions to each output surface (with blend/warp)
+    // 3. Swapping buffers on each surface
+    multiRenderer_->render(layerManager, osdManager);
+    
+    primary->releaseCurrent();
+    
+    // Schedule page flips for all surfaces
+    for (auto& surface : surfaces_) {
+        surface->schedulePageFlip();
+    }
+    
+    // Wait for all flips to complete
+    for (auto& surface : surfaces_) {
+        if (surface->isFlipPending()) {
+            surface->waitForFlip();
+        }
+    }
+}
+
+void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
+    (void)osdManager;  // OSD rendering handled separately
     
     // Render to each output
     for (auto& surface : surfaces_) {
@@ -177,7 +233,6 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
         // Render layers (use getLayersSortedByZOrder like X11/Wayland backends do)
         if (renderer_ && layerManager) {
             auto layers = layerManager->getLayersSortedByZOrder();
-            size_t renderedCount = 0;
             
             for (size_t i = 0; i < layers.size(); ++i) {
                 VideoLayer* layer = layers[i];
@@ -185,21 +240,11 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
                     bool visible = layer->properties().visible;
                     bool ready = layer->isReady();
                     
-                    
                     if (visible && ready) {
-                        bool renderOk = renderer_->renderLayer(layer);
-                        if (renderOk) {
-                            renderedCount++;
-                        } else {
-                            static int renderFailCounter = 0;
-                            if (renderFailCounter++ < 5) {
-                                LOG_ERROR << "DRMBackend: renderLayer() returned false for layer " << layer->getLayerId();
-                            }
-                        }
+                        renderer_->renderLayer(layer);
                     }
                 }
             }
-            
         }
         
         // End frame
@@ -427,6 +472,171 @@ void DRMBackend::initVAAPI() {
     
     LOG_INFO << "DRMBackend: VAAPI initialized (version " << major << "." << minor << ")";
 #endif
+}
+
+bool DRMBackend::initVirtualCanvas() {
+    if (surfaces_.empty()) {
+        LOG_ERROR << "DRMBackend: No surfaces for Virtual Canvas";
+        return false;
+    }
+    
+    DRMSurface* primary = getPrimarySurface();
+    if (!primary) {
+        LOG_ERROR << "DRMBackend: No primary surface for Virtual Canvas";
+        return false;
+    }
+    
+    // Create MultiOutputRenderer with EGL context
+    multiRenderer_ = std::make_unique<MultiOutputRenderer>();
+    
+#ifdef HAVE_EGL
+    if (!multiRenderer_->init(primary->getDisplay(), primary->getContext())) {
+        LOG_ERROR << "DRMBackend: Failed to initialize MultiOutputRenderer";
+        multiRenderer_.reset();
+        return false;
+    }
+#else
+    LOG_ERROR << "DRMBackend: Virtual Canvas requires EGL";
+    multiRenderer_.reset();
+    return false;
+#endif
+    
+    // Build default output regions
+    buildOutputRegions();
+    
+    // Configure MultiOutputRenderer with surfaces and regions
+    std::vector<OutputSurface*> surfacePtrs;
+    for (auto& surface : surfaces_) {
+        surfacePtrs.push_back(surface.get());
+    }
+    
+    multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
+    
+    LOG_INFO << "DRMBackend: Virtual Canvas initialized with " 
+             << outputRegions_.size() << " output(s)";
+    
+    return true;
+}
+
+void DRMBackend::buildOutputRegions() {
+    outputRegions_.clear();
+    
+    int canvasX = 0;
+    
+    for (size_t i = 0; i < surfaces_.size(); ++i) {
+        DRMSurface* surface = surfaces_[i].get();
+        if (!surface) continue;
+        
+        const OutputInfo& info = surface->getOutputInfo();
+        
+        OutputRegion region = OutputRegion::createDefault(
+            info.name,
+            static_cast<int>(i),
+            info.width,
+            info.height,
+            canvasX,
+            0  // All outputs at Y=0 (horizontal arrangement)
+        );
+        
+        outputRegions_.push_back(region);
+        
+        // Next output starts after this one
+        canvasX += info.width;
+        
+        LOG_INFO << "DRMBackend: Output region " << i << " (" << info.name << "): "
+                 << region.canvasX << "," << region.canvasY << " "
+                 << region.canvasWidth << "x" << region.canvasHeight;
+    }
+}
+
+void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overlap) {
+    outputRegions_.clear();
+    
+    int canvasX = 0;
+    int canvasY = 0;
+    
+    for (size_t i = 0; i < surfaces_.size(); ++i) {
+        DRMSurface* surface = surfaces_[i].get();
+        if (!surface) continue;
+        
+        const OutputInfo& info = surface->getOutputInfo();
+        
+        OutputRegion region;
+        region.name = info.name;
+        region.index = static_cast<int>(i);
+        region.canvasWidth = info.width;
+        region.canvasHeight = info.height;
+        region.physicalWidth = info.width;
+        region.physicalHeight = info.height;
+        region.enabled = true;
+        
+        if (arrangement == "vertical") {
+            region.canvasX = 0;
+            region.canvasY = canvasY;
+            
+            // Blend with previous output
+            if (i > 0 && overlap > 0) {
+                region.canvasY -= overlap;
+                region.blend.top = static_cast<float>(overlap);
+                outputRegions_[i-1].blend.bottom = static_cast<float>(overlap);
+            }
+            
+            canvasY += info.height;
+        } else {
+            // Default: horizontal
+            region.canvasX = canvasX;
+            region.canvasY = 0;
+            
+            // Blend with previous output
+            if (i > 0 && overlap > 0) {
+                region.canvasX -= overlap;
+                region.blend.left = static_cast<float>(overlap);
+                outputRegions_[i-1].blend.right = static_cast<float>(overlap);
+            }
+            
+            canvasX += info.width;
+        }
+        
+        outputRegions_.push_back(region);
+    }
+    
+    // Reconfigure if already initialized
+    if (multiRenderer_ && multiRenderer_->isInitialized()) {
+        std::vector<OutputSurface*> surfacePtrs;
+        for (auto& surface : surfaces_) {
+            surfacePtrs.push_back(surface.get());
+        }
+        multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
+    }
+    
+    LOG_INFO << "DRMBackend: Auto-configured " << outputRegions_.size() 
+             << " outputs (" << arrangement << ", overlap=" << overlap << ")";
+}
+
+bool DRMBackend::configureOutputRegion(const std::string& outputName, const OutputRegion& region) {
+    // Find the output
+    for (size_t i = 0; i < outputRegions_.size(); ++i) {
+        if (outputRegions_[i].name == outputName) {
+            outputRegions_[i] = region;
+            outputRegions_[i].name = outputName;  // Preserve name
+            outputRegions_[i].index = static_cast<int>(i);
+            
+            // Reconfigure if initialized
+            if (multiRenderer_ && multiRenderer_->isInitialized()) {
+                std::vector<OutputSurface*> surfacePtrs;
+                for (auto& surface : surfaces_) {
+                    surfacePtrs.push_back(surface.get());
+                }
+                multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
+            }
+            
+            LOG_INFO << "DRMBackend: Configured output region " << outputName;
+            return true;
+        }
+    }
+    
+    LOG_WARNING << "DRMBackend: Output not found: " << outputName;
+    return false;
 }
 
 } // namespace videocomposer

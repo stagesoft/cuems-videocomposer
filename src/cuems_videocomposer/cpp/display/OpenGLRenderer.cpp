@@ -118,7 +118,7 @@ bool OpenGLRenderer::init() {
     
     // glEnable(GL_TEXTURE_*) is deprecated in Core Profile - skip it (mpv doesn't use it)
     if (!isCoreProfile_) {
-        glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    glEnable(GL_TEXTURE_RECTANGLE_ARB);
     }
 
     // Generate texture
@@ -662,7 +662,7 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         // Upload frame data to cached texture
         // glEnable is deprecated in Core Profile - only use in compatibility mode
         if (!isCoreProfile_) {
-            glEnable(GL_TEXTURE_RECTANGLE_ARB);
+        glEnable(GL_TEXTURE_RECTANGLE_ARB);
         }
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB, layerTextureId);
         glTexSubImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, 0, 0,
@@ -1146,7 +1146,7 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
     // Enable texture 2D (OSD uses GL_TEXTURE_2D, not GL_TEXTURE_RECTANGLE_ARB)
     // Note: glEnable(GL_TEXTURE_2D) is deprecated in Core Profile
     if (!isCoreProfile_) {
-        glEnable(GL_TEXTURE_2D);
+    glEnable(GL_TEXTURE_2D);
     }
     
     // Set color to white (texture provides color)
@@ -1178,7 +1178,7 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
 
         // Ensure texture is bound and enabled
         if (!isCoreProfile_) {
-            glEnable(GL_TEXTURE_2D);
+        glEnable(GL_TEXTURE_2D);
         }
         
         // Set color to white with full opacity for text
@@ -1210,7 +1210,7 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
     
     // Re-enable GL_TEXTURE_RECTANGLE_ARB for video layers (they need it for next frame)
     if (!isCoreProfile_) {
-        glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    glEnable(GL_TEXTURE_RECTANGLE_ARB);
     }
 }
 
@@ -1571,7 +1571,7 @@ void OpenGLRenderer::renderMasterQuadWithTransforms() {
         // Fixed-function fallback (no color correction)
         // Note: This path won't work in Core Profile (DRM mode)
         if (!isCoreProfile_) {
-            glEnable(GL_TEXTURE_2D);
+        glEnable(GL_TEXTURE_2D);
         }
         glBindTexture(GL_TEXTURE_2D, masterFBOTexture_);
         
