@@ -410,13 +410,27 @@ void MultiOutputRenderer::renderToCanvas(LayerManager* layerManager, OSDManager*
 
 void MultiOutputRenderer::blitToOutputs() {
     if (!blitShader_ || !canvas_) {
+        LOG_ERROR << "MultiOutputRenderer: Cannot blit - shader or canvas not ready";
         return;
     }
     
-    for (auto& output : outputs_) {
+    static int blitLogCount = 0;
+    
+    for (size_t i = 0; i < outputs_.size(); ++i) {
+        auto& output = outputs_[i];
         if (output.surface && output.region.enabled) {
+            if (blitLogCount < 5) {
+                LOG_INFO << "MultiOutputRenderer: Blitting to output " << i 
+                         << " (" << output.region.name << ")"
+                         << " canvas region: " << output.region.canvasX << "," << output.region.canvasY
+                         << " " << output.region.canvasWidth << "x" << output.region.canvasHeight;
+            }
             blitToOutput(output);
         }
+    }
+    
+    if (blitLogCount < 5) {
+        blitLogCount++;
     }
 }
 
@@ -431,6 +445,10 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
     // Set viewport to output size
     glViewport(0, 0, output.region.physicalWidth, output.region.physicalHeight);
     
+    // Clear to black first (important for areas outside the canvas region)
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    
     // Blit canvas region to output with blend/warp
     blitShader_->blit(
         canvas_->getTexture(),
@@ -439,7 +457,7 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
         output.region
     );
     
-    // Swap buffers
+    // Swap buffers (EGL swap for DRM surfaces)
     output.surface->swapBuffers();
     
     output.surface->releaseCurrent();

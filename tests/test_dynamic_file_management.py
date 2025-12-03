@@ -35,9 +35,12 @@ except ImportError:
 
 
 class DynamicFileManagementTest:
-    # Window bounds (assume typical window size, adjust if needed)
-    WINDOW_WIDTH = 1280
-    WINDOW_HEIGHT = 720
+    # Virtual Canvas bounds (two 1920x1080 displays side by side)
+    # Total canvas: 3840x1080
+    CANVAS_WIDTH = 3840
+    CANVAS_HEIGHT = 1080
+    WINDOW_WIDTH = CANVAS_WIDTH   # For backward compatibility
+    WINDOW_HEIGHT = CANVAS_HEIGHT
     # Assume typical video size for bounds calculation (will be conservative)
     ASSUMED_VIDEO_WIDTH = 1920
     ASSUMED_VIDEO_HEIGHT = 1080
@@ -269,18 +272,24 @@ class DynamicFileManagementTest:
         return self.send_osc("/videocomposer/layer/unload", cue_id)
     
     def test_layer_controls(self, cue_id, layer_num=1, second=0):
-        """Test per-layer image controls - initial setup with time-based variations."""
+        """Test per-layer image controls - initial setup with time-based variations.
+        
+        Uses Virtual Canvas coordinates for multi-display setup:
+        - Canvas is 3840x1080 (two 1920x1080 displays side by side)
+        - Display 1 (eDP-1): X 0-1919
+        - Display 2 (HDMI-A-1): X 1920-3839
+        """
         print(f"\n=== Test: Image controls for layer {layer_num} (second {second}) ===")
         print(f"Cue ID: {cue_id}")
         
-        # Different controls for each layer
-        # Use moderate scales and centered positions to keep layers visible
+        # Virtual Canvas coordinates for 3840x1080 (two 1920x1080 displays)
+        # Layers positioned to appear on BOTH displays
         if layer_num == 1:
-            # Layer 1: Left side, good size
-            position_x = 50
-            position_y = 100
+            # Layer 1: Center of Display 1 (left monitor)
+            position_x = 960   # Center of first 1920px (display 1)
+            position_y = 540   # Center vertically
             opacity = 0.9
-            scale = 0.4  # 40% scale - visible but not too big
+            scale = 0.8  # 80% scale - larger to be visible
             rotation = 0.0
             zorder = 1
             blendmode = 0  # NORMAL
@@ -295,11 +304,11 @@ class DynamicFileManagementTest:
                 ("/videocomposer/layer/{}/blendmode", blendmode),
             ]
         elif layer_num == 2:
-            # Layer 2: Right side, good size
-            position_x = 400
-            position_y = 100
+            # Layer 2: Center of Display 2 (right monitor)
+            position_x = 2880  # Center of second 1920px (1920 + 960 = 2880)
+            position_y = 540   # Center vertically
             opacity = 0.9
-            scale = 0.4  # 40% scale - visible but not too big
+            scale = 0.8  # 80% scale - larger to be visible
             rotation = 0.0
             zorder = 2
             blendmode = 0  # NORMAL
@@ -314,11 +323,11 @@ class DynamicFileManagementTest:
                 ("/videocomposer/layer/{}/blendmode", blendmode),
             ]
         else:  # layer_num == 3
-            # Layer 3: Center-bottom, good size
-            position_x = 200
-            position_y = 350
+            # Layer 3: Spanning both displays (centered at boundary)
+            position_x = 1920  # Exactly at the boundary between displays
+            position_y = 540   # Center vertically
             opacity = 0.9
-            scale = 0.4  # 40% scale - visible but not too big
+            scale = 1.0  # Full scale - spans both displays
             rotation = 0.0
             zorder = 3
             blendmode = 0  # NORMAL
@@ -398,14 +407,17 @@ class DynamicFileManagementTest:
             # Update both layers every frame for maximum smoothness
             # Use very small thresholds to allow smooth interpolation
             
-            # Layer 1 adjustments
-            # Scale: smooth oscillation between 0.35 and 0.45 (small range for stability)
-            scale1 = 0.35 + 0.1 * (0.5 + 0.5 * sin_val2)  # Scale: 0.35-0.45
+            # Layer 1 adjustments (on Display 1 - left monitor)
+            # Virtual Canvas: 3840x1080, Display 1 is X 0-1919
+            # Scale: smooth oscillation between 0.7 and 0.9
+            scale1 = 0.7 + 0.2 * (0.5 + 0.5 * sin_val2)  # Scale: 0.7-0.9
             
-            # Position: move in a smooth circular pattern (small radius)
-            radius = 50  # Small radius to stay visible
-            x1 = 150 + radius * math.cos(progress * math.pi)
-            y1 = 150 + radius * math.sin(progress * math.pi)
+            # Position: move in a smooth circular pattern on Display 1
+            radius = 200  # Larger radius for bigger canvas
+            center_x1 = 960  # Center of display 1
+            center_y1 = 540  # Center vertically
+            x1 = center_x1 + radius * math.cos(progress * math.pi)
+            y1 = center_y1 + radius * 0.5 * math.sin(progress * math.pi)  # Less vertical movement
             # Send position as FLOATS for sub-pixel smoothness
             self.send_osc(f"/videocomposer/layer/{cue_id_1}/position", float(x1), float(y1), verbose=False)
             prev_values['x1'] = x1
@@ -426,14 +438,17 @@ class DynamicFileManagementTest:
             self.send_osc(f"/videocomposer/layer/{cue_id_1}/rotation", rotation1, verbose=False)
             prev_values['rotation1'] = rotation1
             
-            # Layer 2 adjustments
-            # Scale: smooth oscillation (between 0.35 and 0.45 - same as layer 1)
-            scale2 = 0.35 + 0.1 * (0.5 + 0.5 * -sin_val2)  # Scale: 0.35-0.45
+            # Layer 2 adjustments (on Display 2 - right monitor)
+            # Virtual Canvas: 3840x1080, Display 2 is X 1920-3839
+            # Scale: smooth oscillation (between 0.7 and 0.9 - same as layer 1)
+            scale2 = 0.7 + 0.2 * (0.5 + 0.5 * -sin_val2)  # Scale: 0.7-0.9
             
-            # Position: move in opposite circular pattern (stay in visible area)
-            radius2 = 50  # Small radius to stay visible
-            x2 = 500 + radius2 * -math.cos(progress * 0.8 * math.pi)
-            y2 = 150 + radius2 * -math.sin(progress * 0.8 * math.pi)
+            # Position: move in opposite circular pattern on Display 2
+            radius2 = 200  # Larger radius for bigger canvas
+            center_x2 = 2880  # Center of display 2 (1920 + 960)
+            center_y2 = 540  # Center vertically
+            x2 = center_x2 + radius2 * -math.cos(progress * 0.8 * math.pi)
+            y2 = center_y2 + radius2 * 0.5 * -math.sin(progress * 0.8 * math.pi)
             # Send position as FLOATS for sub-pixel smoothness
             self.send_osc(f"/videocomposer/layer/{cue_id_2}/position", float(x2), float(y2), verbose=False)
             prev_values['x2'] = x2
@@ -454,15 +469,17 @@ class DynamicFileManagementTest:
             self.send_osc(f"/videocomposer/layer/{cue_id_2}/rotation", rotation2, verbose=False)
             prev_values['rotation2'] = rotation2
             
-            # Layer 3 adjustments (if provided)
+            # Layer 3 adjustments (if provided) - SPANS BOTH DISPLAYS
             if cue_id_3:
-                # Scale: smooth oscillation (between 0.35 and 0.45 - same range as others)
-                scale3 = 0.35 + 0.1 * (0.5 + 0.5 * math.cos(progress * 2.5 * math.pi))  # Scale: 0.35-0.45
+                # Scale: smooth oscillation (between 0.9 and 1.1 - larger to span displays)
+                scale3 = 0.9 + 0.2 * (0.5 + 0.5 * math.cos(progress * 2.5 * math.pi))  # Scale: 0.9-1.1
                 
-                # Position: figure-8 pattern for interesting motion (stay in visible area)
-                radius3 = 40  # Small radius
-                x3 = 300 + radius3 * math.sin(progress * 2 * math.pi)
-                y3 = 350 + radius3 * math.sin(progress * 4 * math.pi) * 0.5
+                # Position: figure-8 pattern at the display boundary (spans both)
+                radius3 = 300  # Larger radius
+                center_x3 = 1920  # At the boundary between displays
+                center_y3 = 540
+                x3 = center_x3 + radius3 * math.sin(progress * 2 * math.pi)
+                y3 = center_y3 + radius3 * 0.3 * math.sin(progress * 4 * math.pi)
                 self.send_osc(f"/videocomposer/layer/{cue_id_3}/position", float(x3), float(y3), verbose=False)
                 prev_values['x3'] = x3
                 prev_values['y3'] = y3
@@ -512,27 +529,31 @@ class DynamicFileManagementTest:
         return True
     
     def reset_and_distribute_layers(self, cue_id_1, cue_id_2, cue_id_3=None, duration=10):
-        """Progressively reset rotation, set scale to 50%, and distribute layers in window."""
+        """Progressively reset rotation, set scale to 80%, and distribute layers across Virtual Canvas.
+        
+        Virtual Canvas coordinates: 3840x1080 (two 1920x1080 displays)
+        - Display 1: X 0-1919
+        - Display 2: X 1920-3839
+        """
         print(f"\n=== Reset and Distribute Layers ({duration} seconds) ===")
-        print("Resetting rotation to 0, setting scale to 50%, and distributing layers...")
+        print("Resetting rotation to 0, setting scale to 80%, and distributing layers across both displays...")
         
-        # Get initial state (from progressive adjustments - we'll interpolate from current)
-        # Target state: rotation=0, scale=0.4, positions distributed
-        target_scale = 0.4
+        # Target state: rotation=0, scale=0.8, positions distributed across canvas
+        target_scale = 0.8
         
-        # Calculate distributed positions for layers (keep in visible area)
+        # Calculate distributed positions for layers across Virtual Canvas (3840x1080)
         if cue_id_3:
-            # 3 layers: arrange in a row
+            # 3 layers: one on each display, one spanning both
             target_positions = [
-                (50, 150),       # Layer 1: left
-                (350, 150),      # Layer 2: center
-                (200, 350),      # Layer 3: bottom-center
+                (960, 540),      # Layer 1: Center of display 1
+                (2880, 540),     # Layer 2: Center of display 2
+                (1920, 540),     # Layer 3: Spanning both (at boundary)
             ]
         else:
-            # 2 layers: side by side
+            # 2 layers: one on each display
             target_positions = [
-                (100, 150),      # Layer 1: left
-                (450, 150),      # Layer 2: right
+                (960, 540),      # Layer 1: Center of display 1
+                (2880, 540),     # Layer 2: Center of display 2
             ]
         
         start_time = time.time()
@@ -542,13 +563,14 @@ class DynamicFileManagementTest:
         log_interval = 2.0
         
         # Store initial values (we'll interpolate from these)
+        # Starting from progressive_image_adjustments end state
         initial_values = {
-            'rotation1': 15.0, 'scale1': 0.4, 'x1': 150, 'y1': 150,
-            'rotation2': -10.0, 'scale2': 0.4, 'x2': 500, 'y2': 150,
+            'rotation1': 15.0, 'scale1': 0.8, 'x1': 960, 'y1': 400,
+            'rotation2': -10.0, 'scale2': 0.8, 'x2': 2880, 'y2': 400,
         }
         if cue_id_3:
             initial_values.update({
-                'rotation3': 20.0, 'scale3': 0.4, 'x3': 300, 'y3': 350,
+                'rotation3': 20.0, 'scale3': 1.0, 'x3': 1920, 'y3': 540,
             })
         
         while time.time() - start_time < duration:
