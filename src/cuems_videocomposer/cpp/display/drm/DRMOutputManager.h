@@ -48,6 +48,8 @@ struct DRMConnector {
     uint32_t crtcId = 0;           // Associated CRTC ID
     drmModeConnector* connector = nullptr;  // DRM connector (owned, must free)
     drmModeCrtc* savedCrtc = nullptr;       // Original mode for restore
+    drmModeModeInfo currentMode = {};       // Current active mode (updated on mode change)
+    bool hasCurrentMode = false;            // True if currentMode is valid
     OutputInfo info;               // Parsed output information
     bool acquired = false;         // Have we acquired this connector?
     

@@ -430,6 +430,10 @@ bool DRMSurface::resize(int width, int height) {
     width_ = static_cast<uint32_t>(width);
     height_ = static_cast<uint32_t>(height);
     
+    // Reset modeSet_ flag so next schedulePageFlip does a full drmModeSetCrtc
+    // instead of just drmModePageFlip (which would fail since CRTC was cleared)
+    modeSet_ = false;
+    
     // Create new GBM surface
     gbmSurface_ = gbm_surface_create(gbmDevice_, width_, height_,
                                       GBM_FORMAT_XRGB8888,
@@ -570,25 +574,39 @@ bool DRMSurface::schedulePageFlip() {
     // Subsequent frames: use drmModePageFlip for vsync'd updates
     if (!modeSet_) {
         const DRMConnector* conn = outputManager_->getConnector(outputIndex_);
-        if (!conn || !conn->savedCrtc) {
+        if (!conn) {
             LOG_ERROR << "DRMSurface: No connector info for initial modeset";
             gbm_surface_release_buffer(gbmSurface_, bo);
             return false;
         }
         
-        LOG_INFO << "DRMSurface: Setting initial mode for " << conn->info.name;
+        // Use currentMode if available (set after mode change), otherwise use savedCrtc
+        drmModeModeInfo* mode = nullptr;
+        if (conn->hasCurrentMode) {
+            mode = const_cast<drmModeModeInfo*>(&conn->currentMode);
+        } else if (conn->savedCrtc) {
+            mode = &conn->savedCrtc->mode;
+        }
+        
+        if (!mode) {
+            LOG_ERROR << "DRMSurface: No mode available for modeset";
+            gbm_surface_release_buffer(gbmSurface_, bo);
+            return false;
+        }
+        
+        LOG_INFO << "DRMSurface: Setting mode for " << conn->info.name 
+                 << " (" << mode->hdisplay << "x" << mode->vdisplay << ")";
         ret = drmModeSetCrtc(outputManager_->getFd(), crtcId_,
-                            nextFb_.fbId, 0, 0, &connectorId_, 1,
-                            &conn->savedCrtc->mode);
+                            nextFb_.fbId, 0, 0, &connectorId_, 1, mode);
         
         if (ret != 0) {
-            LOG_ERROR << "DRMSurface: Initial modeset failed: " << strerror(-ret);
+            LOG_ERROR << "DRMSurface: Modeset failed: " << strerror(-ret);
             gbm_surface_release_buffer(gbmSurface_, bo);
             return false;
         }
         
         modeSet_ = true;
-        LOG_INFO << "DRMSurface: Initial modeset successful, framebuffer displayed";
+        LOG_INFO << "DRMSurface: Modeset successful, framebuffer displayed";
         
         // Release previous buffer if any
         if (currentBo_) {
@@ -612,17 +630,25 @@ bool DRMSurface::schedulePageFlip() {
         
         // Fallback: try drmModeSetCrtc instead
         const DRMConnector* conn = outputManager_->getConnector(outputIndex_);
-        if (conn && conn->savedCrtc) {
-            ret = drmModeSetCrtc(outputManager_->getFd(), crtcId_,
-                                nextFb_.fbId, 0, 0, &connectorId_, 1,
-                                &conn->savedCrtc->mode);
-            if (ret != 0) {
-                LOG_ERROR << "DRMSurface: SetCrtc fallback failed: " << strerror(-ret);
-                gbm_surface_release_buffer(gbmSurface_, bo);
-                return false;
+        if (conn) {
+            drmModeModeInfo* mode = nullptr;
+            if (conn->hasCurrentMode) {
+                mode = const_cast<drmModeModeInfo*>(&conn->currentMode);
+            } else if (conn->savedCrtc) {
+                mode = &conn->savedCrtc->mode;
             }
-            // No flip pending in fallback mode
-            return true;
+            
+            if (mode) {
+                ret = drmModeSetCrtc(outputManager_->getFd(), crtcId_,
+                                    nextFb_.fbId, 0, 0, &connectorId_, 1, mode);
+                if (ret != 0) {
+                    LOG_ERROR << "DRMSurface: SetCrtc fallback failed: " << strerror(-ret);
+                    gbm_surface_release_buffer(gbmSurface_, bo);
+                    return false;
+                }
+                // No flip pending in fallback mode
+                return true;
+            }
         }
         
         gbm_surface_release_buffer(gbmSurface_, bo);

@@ -340,6 +340,10 @@ bool DRMOutputManager::detectOutputs() {
                     drmConn.info.x = drmConn.savedCrtc->x;
                     drmConn.info.y = drmConn.savedCrtc->y;
                     
+                    // Initialize currentMode from savedCrtc
+                    drmConn.currentMode = drmConn.savedCrtc->mode;
+                    drmConn.hasCurrentMode = true;
+                    
                     // Get refresh rate from current mode
                     drmModeModeInfo* mode = &drmConn.savedCrtc->mode;
                     if (mode->htotal && mode->vtotal) {
@@ -368,6 +372,10 @@ bool DRMOutputManager::detectOutputs() {
                         drmConn.info.height = bestMode->vdisplay;
                         drmConn.info.x = 0;
                         drmConn.info.y = 0;
+                        
+                        // Initialize currentMode from bestMode
+                        drmConn.currentMode = *bestMode;
+                        drmConn.hasCurrentMode = true;
                         
                         if (bestMode->htotal && bestMode->vtotal) {
                             drmConn.info.refreshRate = static_cast<double>(bestMode->clock * 1000) /
@@ -807,7 +815,7 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
         return false;
     }
     
-    // Set mode
+    // Set mode (with fb_id=0 to just configure mode, actual framebuffer set in schedulePageFlip)
     int ret = drmModeSetCrtc(drmFd_, conn->crtcId, 0, 0, 0,
                              &conn->connectorId, 1, mode);
     
@@ -815,6 +823,10 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
         LOG_ERROR << "DRMOutputManager: drmModeSetCrtc failed: " << strerror(-ret);
         return false;
     }
+    
+    // Save the new current mode (for use in schedulePageFlip after resize)
+    conn->currentMode = *mode;
+    conn->hasCurrentMode = true;
     
     // Update stored info
     conn->info.width = mode->hdisplay;
