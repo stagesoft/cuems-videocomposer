@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Focused test for resolution mode features.
+Test for on-the-fly resolution changes during video playback.
 
-Tests:
-1. Resolution mode listing and status
-2. Setting resolution modes (native, maximum, 1080p, etc.)
-3. Live resolution changes per output
-4. Mode listing per output
+This test loads a video, starts playback with MTC, and then changes
+display resolutions while the video is actively playing. The video
+should continue playing smoothly through all resolution changes.
 
 Requires MTC timecode to play videos.
 """
@@ -94,10 +92,12 @@ class ResolutionModesTest:
         # Copy environment to preserve LD_LIBRARY_PATH set by wrapper script
         env = os.environ.copy()
         
+        # Stream output to terminal for debugging
+        # Use None to let output go to terminal, or subprocess.STDOUT to merge stderr
         self.videocomposer_process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=None,  # Let output go to terminal
+            stderr=subprocess.STDOUT,  # Merge stderr to stdout
             text=True,
             env=env
         )
@@ -105,9 +105,6 @@ class ResolutionModesTest:
         
         if self.videocomposer_process.poll() is not None:
             print("ERROR: videocomposer exited immediately")
-            stdout, stderr = self.videocomposer_process.communicate()
-            print(f"STDOUT: {stdout}")
-            print(f"STDERR: {stderr}")
             return False
         
         print("videocomposer started successfully")
@@ -150,10 +147,15 @@ class ResolutionModesTest:
                 self.videocomposer_process.kill()
     
     def run_tests(self):
-        """Run resolution mode tests."""
+        """Run on-the-fly resolution change test during video playback."""
         print("=" * 70)
-        print("Resolution Modes Test")
+        print("On-the-Fly Resolution Changes During Video Playback Test")
         print("=" * 70)
+        
+        if not self.video_file or not Path(self.video_file).exists():
+            print("ERROR: Video file required for this test")
+            print("  Usage: ./test_resolution_modes.py --video <path/to/video.mp4>")
+            return False
         
         if not self.start_videocomposer():
             return False
@@ -162,137 +164,85 @@ class ResolutionModesTest:
             self.cleanup()
             return False
         
-        if MTC_AVAILABLE and self.mtc_helper:
-            if self.mtc_helper.setup():
-                print("MTC setup complete")
-            else:
-                print("WARNING: MTC setup failed")
+        if not MTC_AVAILABLE or not self.mtc_helper:
+            print("ERROR: MTC helper required for video playback test")
+            self.cleanup()
+            return False
+        
+        if not self.mtc_helper.setup():
+            print("ERROR: MTC setup failed")
+            self.cleanup()
+            return False
         
         time.sleep(1)
         
         try:
-            # Test 1: List displays
-            print("\n[1] Listing displays...")
-            self.send_osc("/videocomposer/display/list")
+            # Load video
+            print("\n[1] Loading video file...")
+            self.send_osc("/videocomposer/layer/load", self.video_file, "test_video")
             time.sleep(1)
             
-            # Test 2: Show resolution mode options
-            print("\n[2] Resolution mode options...")
-            self.send_osc("/videocomposer/display/resolution_mode")
-            time.sleep(1)
+            # Enable mtcfollow
+            print("\n[2] Enabling mtcfollow...")
+            self.send_osc("/videocomposer/layer/test_video/mtcfollow", "1")
+            time.sleep(0.5)
             
-            # Test 3: List modes for common outputs
-            print("\n[3] Listing available modes for outputs...")
-            for output in ["eDP-1", "HDMI-A-1", "DP-1"]:
-                print(f"\n  Modes for {output}:")
-                self.send_osc("/videocomposer/display/modes", output)
-                time.sleep(0.5)
+            # Position layer to be visible
+            print("\n[3] Positioning layer on canvas...")
+            self.send_osc("/videocomposer/layer/test_video/position", "960", "540")  # Center
+            self.send_osc("/videocomposer/layer/test_video/scale", "1.0", "1.0")
+            time.sleep(0.5)
             
-            # Test 4: Try different resolution modes
-            print("\n[4] Testing resolution modes...")
-            modes = ["1080p", "native", "maximum", "720p", "4k"]
-            for mode in modes:
-                print(f"\n  Setting mode to: {mode}")
-                self.send_osc("/videocomposer/display/resolution_mode", mode)
-                time.sleep(1)
+            # Start MTC and let video play for a bit
+            print("\n[4] Starting MTC timecode...")
+            self.mtc_helper.start(0)
+            print("  → Video should now be playing")
+            time.sleep(5)  # Let video play for 5 seconds to establish playback
             
-            # Test 5: Live resolution changes
-            print("\n[5] Testing live resolution changes...")
-            outputs = ["eDP-1", "HDMI-A-1"]
-            resolutions = [
-                (1920, 1080, 60),
-                (1280, 720, 60),
-                (1920, 1080, 60),  # Restore
+            # Now test resolution changes while video is actively playing
+            print("\n[5] Testing resolution changes DURING playback...")
+            print("     (Video should continue playing smoothly through each change)")
+            
+            # Test sequence: multiple resolution changes while video plays
+            resolution_sequence = [
+                (1920, 1080, 60, "1080p"),
+                (1280, 720, 60, "720p"),
+                (1920, 1080, 60, "1080p (restore)"),
+                (2560, 1440, 60, "1440p (if available)"),
+                (1920, 1080, 60, "1080p (final)"),
             ]
             
-            for output in outputs:
-                print(f"\n  Testing {output}:")
-                for width, height, refresh in resolutions:
-                    print(f"    Changing to {width}x{height}@{refresh}Hz...")
-                    self.send_osc("/videocomposer/display/mode", output, str(width), str(height), str(refresh))
-                    time.sleep(2)  # Wait for mode change
+            for width, height, refresh, desc in resolution_sequence:
+                print(f"\n    → Changing to {desc} ({width}x{height}@{refresh}Hz) while video plays...")
+                self.send_osc("/videocomposer/display/mode", "eDP-1", str(width), str(height), str(refresh))
+                print(f"      Waiting 4 seconds for mode change to complete...")
+                time.sleep(4)  # Wait for mode change + verify video still playing
+                print(f"      ✓ Resolution changed, video should still be playing")
             
-            # Test 6: Video playback with on-the-fly resolution changes (if video provided)
-            if self.video_file and Path(self.video_file).exists():
-                print("\n[6] Testing on-the-fly resolution changes during video playback...")
-                print("     (This is the critical test - video should continue playing smoothly)")
-                
-                # Load video
-                print("\n  Step 1: Loading video file...")
-                self.send_osc("/videocomposer/layer/load", self.video_file, "test_video")
+            # Test on second output if available
+            print("\n[6] Testing resolution changes on second output (if available)...")
+            for output in ["HDMI-A-1", "DP-1"]:
+                print(f"\n    Testing {output}:")
+                for width, height, refresh, desc in [(1920, 1080, 60, "1080p"), (1280, 720, 60, "720p")]:
+                    print(f"      → Changing {output} to {desc} while video plays...")
+                    self.send_osc("/videocomposer/display/mode", output, str(width), str(height), str(refresh))
+                    time.sleep(4)
+                    print(f"        ✓ Changed, video should still be playing")
+            
+            # Final verification: video should still be playing
+            print("\n[7] Final verification...")
+            print("     Video should have been playing continuously through all resolution changes")
+            time.sleep(3)
+            
+            if self.mtc_helper:
+                print("\nStopping MTC...")
+                self.mtc_helper.stop()
                 time.sleep(1)
-                
-                # Enable mtcfollow
-                print("  Step 2: Enabling mtcfollow...")
-                self.send_osc("/videocomposer/layer/test_video/mtcfollow", "1")
-                time.sleep(0.5)
-                
-                # Position layer to be visible
-                print("  Step 3: Positioning layer on canvas...")
-                self.send_osc("/videocomposer/layer/test_video/position", "960", "540")  # Center
-                self.send_osc("/videocomposer/layer/test_video/scale", "1.0", "1.0")
-                time.sleep(0.5)
-                
-                # Start MTC and let video play for a bit
-                if self.mtc_helper:
-                    print("  Step 4: Starting MTC timecode...")
-                    self.mtc_helper.start(0)
-                    print("  → Video should now be playing")
-                    time.sleep(5)  # Let video play for 5 seconds to establish playback
-                
-                # Now test resolution changes while video is actively playing
-                print("\n  Step 5: Testing resolution changes DURING playback...")
-                print("          (Video should continue playing smoothly through each change)")
-                
-                # Test sequence: multiple resolution changes while video plays
-                resolution_sequence = [
-                    (1920, 1080, 60, "1080p"),
-                    (1280, 720, 60, "720p"),
-                    (1920, 1080, 60, "1080p (restore)"),
-                    (2560, 1440, 60, "1440p (if available)"),
-                    (1920, 1080, 60, "1080p (final)"),
-                ]
-                
-                for width, height, refresh, desc in resolution_sequence:
-                    print(f"\n    → Changing to {desc} ({width}x{height}@{refresh}Hz) while video plays...")
-                    self.send_osc("/videocomposer/display/mode", "eDP-1", str(width), str(height), str(refresh))
-                    print(f"      Waiting 4 seconds for mode change to complete...")
-                    time.sleep(4)  # Wait for mode change + verify video still playing
-                    print(f"      ✓ Resolution changed, video should still be playing")
-                
-                # Test on second output if available
-                print("\n  Step 6: Testing resolution changes on second output (if available)...")
-                for output in ["HDMI-A-1", "DP-1"]:
-                    print(f"\n    Testing {output}:")
-                    for width, height, refresh, desc in [(1920, 1080, 60, "1080p"), (1280, 720, 60, "720p")]:
-                        print(f"      → Changing {output} to {desc} while video plays...")
-                        self.send_osc("/videocomposer/display/mode", output, str(width), str(height), str(refresh))
-                        time.sleep(4)
-                        print(f"        ✓ Changed, video should still be playing")
-                
-                # Final verification: video should still be playing
-                print("\n  Step 7: Final verification...")
-                print("          Video should have been playing continuously through all resolution changes")
-                time.sleep(3)
-                
-                if self.mtc_helper:
-                    print("  Stopping MTC...")
-                    self.mtc_helper.stop()
-                    time.sleep(1)
-                
-                print("\n  ✓ On-the-fly resolution change test completed!")
-                print("    If video played smoothly through all changes, test PASSED")
-            else:
-                print("\n[6] Skipping video playback test (no video file provided)")
-                print("    To test on-the-fly resolution changes, provide --video <path>")
             
             print("\n" + "=" * 70)
-            print("All resolution tests completed!")
+            print("✓ Test completed!")
+            print("  If video played smoothly through all changes, test PASSED")
             print("=" * 70)
-            
-            # Keep running for a bit
-            print("\nKeeping videocomposer running for 3 seconds...")
-            time.sleep(3)
             
             return True
             
@@ -309,9 +259,9 @@ class ResolutionModesTest:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test resolution modes")
+    parser = argparse.ArgumentParser(description="Test on-the-fly resolution changes during video playback")
     parser.add_argument("--videocomposer", help="Path to cuems-videocomposer binary or wrapper (auto-detected if not provided)")
-    parser.add_argument("--video", help="Video file for playback test (optional)")
+    parser.add_argument("--video", required=True, help="Video file for playback test (required)")
     parser.add_argument("--osc-port", type=int, default=7770, help="OSC port (default: 7770)")
     parser.add_argument("--fps", type=float, default=25.0, help="MTC framerate (default: 25.0)")
     parser.add_argument("--mtc-port", type=int, default=0, help="MTC MIDI port (default: 0)")

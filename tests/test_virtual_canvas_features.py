@@ -134,10 +134,11 @@ class VirtualCanvasFeaturesTest:
         # Copy environment to preserve LD_LIBRARY_PATH set by wrapper script
         env = os.environ.copy()
         
+        # Stream output to terminal for debugging
         self.videocomposer_process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=None,  # Let output go to terminal
+            stderr=subprocess.STDOUT,  # Merge stderr to stdout
             text=True,
             env=env
         )
@@ -147,9 +148,6 @@ class VirtualCanvasFeaturesTest:
         
         if self.videocomposer_process.poll() is not None:
             print("ERROR: videocomposer exited immediately")
-            stdout, stderr = self.videocomposer_process.communicate()
-            print(f"STDOUT: {stdout}")
-            print(f"STDERR: {stderr}")
             return False
         
         print("videocomposer started successfully")
