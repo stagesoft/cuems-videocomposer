@@ -74,6 +74,7 @@ private:
     int viewportHeight_;
     bool letterbox_;
     bool initialized_;
+    bool isCoreProfile_;  // True if OpenGL Core Profile (DRM/EGL mode)
     
     // Shader-based rendering (VBO/VAO)
     GLuint quadVAO_;                // Vertex Array Object for quad

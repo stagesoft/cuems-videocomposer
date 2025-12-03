@@ -100,12 +100,26 @@ bool OpenGLRenderer::init() {
         LOG_WARNING << "OpenGL 3.3 not available, some features may not work";
     }
 
+    // Check if we're in core profile (DRM/EGL uses core profile)
+    // mpv always uses Core Profile and never calls glEnable(GL_TEXTURE_*)
+    GLint profileMask = 0;
+    glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profileMask);
+    isCoreProfile_ = (profileMask & GL_CONTEXT_CORE_PROFILE_BIT) != 0;
+    
+    if (isCoreProfile_) {
+        LOG_INFO << "OpenGLRenderer: Running in Core Profile mode (like mpv)";
+    }
+    
     // Initialize OpenGL state (matches original xjadeo)
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);  // Black background, fully opaque
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    
+    // glEnable(GL_TEXTURE_*) is deprecated in Core Profile - skip it (mpv doesn't use it)
+    if (!isCoreProfile_) {
+        glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    }
 
     // Generate texture
     glGenTextures(1, &textureId_);
@@ -682,7 +696,10 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         }
         
         // Upload frame data to cached texture
-        glEnable(GL_TEXTURE_RECTANGLE_ARB);
+        // glEnable is deprecated in Core Profile - only use in compatibility mode
+        if (!isCoreProfile_) {
+            glEnable(GL_TEXTURE_RECTANGLE_ARB);
+        }
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB, layerTextureId);
         glTexSubImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, 0, 0,
                         layerTextureWidth, layerTextureHeight,
@@ -800,6 +817,8 @@ void OpenGLRenderer::cleanupDeferredTextures() {
 }
 
 bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, const LayerProperties& properties, const FrameInfo& frameInfo) {
+    static int gpuDebug = 0;
+    
     if (!gpuFrame.isValid()) {
         LOG_VERBOSE << "renderLayerFromGPU: gpuFrame is invalid";
         return false;
@@ -810,6 +829,12 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
     }
 
     TexturePlaneType planeType = gpuFrame.getPlaneType();
+    
+    if (gpuDebug < 5) {
+        LOG_INFO << "renderLayerFromGPU: planeType=" << static_cast<int>(planeType) 
+                << ", textureId=" << gpuFrame.getTextureId(0);
+        gpuDebug++;
+    }
 
     // For multi-plane formats (NV12, YUV420P), skip bindGPUTexture
     // We'll bind textures manually in the shader path
@@ -854,13 +879,12 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
             GLuint texUV = gpuFrame.getTextureId(1);
             
             // Bind Y plane to texture unit 0
+            // Note: glEnable(GL_TEXTURE_2D) not needed with shaders (mpv doesn't use it)
             glActiveTexture(GL_TEXTURE0);
-            glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, texY);
             
             // Bind UV plane to texture unit 1
             glActiveTexture(GL_TEXTURE1);
-            glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, texUV);
             
             // Reset to texture unit 0
@@ -900,13 +924,12 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
             shader = hapQAlphaShader_.get();
             
             // Bind YCoCg color texture to unit 0
+            // Note: glEnable(GL_TEXTURE_2D) not needed with shaders (mpv doesn't use it)
             glActiveTexture(GL_TEXTURE0);
-            glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, gpuFrame.getTextureId(0));
             
             // Bind alpha texture to unit 1
             glActiveTexture(GL_TEXTURE1);
-            glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, gpuFrame.getTextureId(1));
             
             // Reset to texture unit 0
@@ -1165,7 +1188,10 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
     glDisable(GL_CULL_FACE);
     
     // Enable texture 2D (OSD uses GL_TEXTURE_2D, not GL_TEXTURE_RECTANGLE_ARB)
-    glEnable(GL_TEXTURE_2D);
+    // Note: glEnable(GL_TEXTURE_2D) is deprecated in Core Profile
+    if (!isCoreProfile_) {
+        glEnable(GL_TEXTURE_2D);
+    }
     
     // Set color to white (texture provides color)
     glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
@@ -1195,7 +1221,9 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
         float h = -2.0f * item.height / viewportHeight_;
 
         // Ensure texture is bound and enabled
-        glEnable(GL_TEXTURE_2D);
+        if (!isCoreProfile_) {
+            glEnable(GL_TEXTURE_2D);
+        }
         
         // Set color to white with full opacity for text
         glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
@@ -1225,7 +1253,9 @@ void OpenGLRenderer::renderOSDItems(const std::vector<OSDRenderItem>& items) {
     glPopAttrib();
     
     // Re-enable GL_TEXTURE_RECTANGLE_ARB for video layers (they need it for next frame)
-    glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    if (!isCoreProfile_) {
+        glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    }
 }
 
 bool OpenGLRenderer::initQuadVBO() {
@@ -1583,7 +1613,10 @@ void OpenGLRenderer::renderMasterQuadWithTransforms() {
         glDisable(GL_BLEND);
     } else {
         // Fixed-function fallback (no color correction)
-        glEnable(GL_TEXTURE_2D);
+        // Note: This path won't work in Core Profile (DRM mode)
+        if (!isCoreProfile_) {
+            glEnable(GL_TEXTURE_2D);
+        }
         glBindTexture(GL_TEXTURE_2D, masterFBOTexture_);
         
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);

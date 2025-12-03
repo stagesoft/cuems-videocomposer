@@ -165,18 +165,8 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
             continue;
         }
         
-        // Clear with visible test color for first few frames
-        static int frameCount = 0;
-        if (frameCount < 60) {
-            // Cycle through colors: Red -> Green -> Blue
-            float r = (frameCount % 3 == 0) ? 1.0f : 0.0f;
-            float g = (frameCount % 3 == 1) ? 1.0f : 0.0f;
-            float b = (frameCount % 3 == 2) ? 1.0f : 0.0f;
-            glClearColor(r, g, b, 1.0f);
-            frameCount++;
-        } else {
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        }
+        // Clear
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         
         // Render layers (use getLayersSortedByZOrder like X11/Wayland backends do)
