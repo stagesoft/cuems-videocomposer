@@ -511,20 +511,23 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     int yFd, uvFd;
     
     if (desc.num_layers == 2) {
-        // SEPARATE_LAYERS mode
+        // SEPARATE_LAYERS mode - force R8/GR88 like mpv does for NV12
         yObjectIdx = desc.layers[0].object_index[0];
         yOffset = desc.layers[0].offset[0];
         yPitch = desc.layers[0].pitch[0];
-        yFormat = desc.layers[0].drm_format;
+        yFormat = DRM_FORMAT_R8;  // Force R8 for Y plane like mpv
         yModifier = desc.objects[yObjectIdx].drm_format_modifier;
         yFd = dup(desc.objects[yObjectIdx].fd);
         
         uvObjectIdx = desc.layers[1].object_index[0];
         uvOffset = desc.layers[1].offset[0];
         uvPitch = desc.layers[1].pitch[0];
-        uvFormat = desc.layers[1].drm_format;
+        uvFormat = DRM_FORMAT_GR88;  // Force GR88 for UV plane like mpv
         uvModifier = desc.objects[uvObjectIdx].drm_format_modifier;
         uvFd = dup(desc.objects[uvObjectIdx].fd);
+        
+        LOG_INFO << "VaapiInterop: SEPARATE_LAYERS mode - " << desc.num_layers << " layers, "
+                 << desc.num_objects << " objects, yFormat=R8, uvFormat=GR88";
     } else if (desc.num_layers == 1 && desc.layers[0].num_planes >= 2) {
         // COMPOSED_LAYERS mode
         yObjectIdx = desc.layers[0].object_index[0];
@@ -667,6 +670,18 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     
     glBindTexture(GL_TEXTURE_2D, 0);
+    
+    // Log first few bind attempts for debugging
+    static int bindCount = 0;
+    if (bindCount++ < 3) {
+        EGLDisplay currentDisplay = eglGetCurrentDisplay();
+        EGLContext currentContext = eglGetCurrentContext();
+        LOG_INFO << "VaapiInterop: bindTextures #" << bindCount
+                 << " display=" << currentDisplay
+                 << " context=" << currentContext
+                 << " eglImageY=" << eglImageY_
+                 << " textureY=" << textureY_;
+    }
     
     // Bind Y plane texture using the appropriate extension (mpv approach)
     glBindTexture(GL_TEXTURE_2D, textureY_);
@@ -1016,9 +1031,22 @@ EGLImageKHR VaapiInterop::createEGLImageFromDmaBuf(
     
     // Use eglGetCurrentDisplay() like mpv does
     EGLDisplay currentDisplay = eglGetCurrentDisplay();
+    bool usedFallback = false;
     if (currentDisplay == EGL_NO_DISPLAY) {
         currentDisplay = eglDisplay_;  // Fallback
+        usedFallback = true;
     }
+    
+    // Log first few image creations for debugging
+    static int createCount = 0;
+    if (createCount++ < 3) {
+        LOG_INFO << "VaapiInterop: createEGLImage #" << createCount 
+                 << " display=" << currentDisplay 
+                 << " (fallback=" << usedFallback << ")"
+                 << " size=" << width << "x" << height
+                 << " format=0x" << std::hex << fourcc << std::dec;
+    }
+    
     EGLImageKHR image = eglCreateImageKHR_(
         currentDisplay, EGL_NO_CONTEXT,
         EGL_LINUX_DMA_BUF_EXT, NULL, attribs);
