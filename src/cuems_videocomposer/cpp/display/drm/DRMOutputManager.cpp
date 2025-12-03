@@ -54,8 +54,14 @@ bool DRMOutputManager::init(const std::string& devicePath) {
     seatManager_ = std::make_unique<SeatManager>();
     if (!seatManager_->init()) {
         LOG_WARNING << "DRMOutputManager: Failed to initialize seat manager";
+        LOG_WARNING << "DRMOutputManager: Possible reasons:";
+        LOG_WARNING << "  - seatd not running (try: sudo systemctl start seatd)";
+        LOG_WARNING << "  - Another session (X11/Wayland) is active and holding the seat";
+        LOG_WARNING << "  - User doesn't have permission (check logind session)";
         LOG_WARNING << "DRMOutputManager: Will attempt direct device access (may require root)";
         // Continue anyway - might work with root or proper permissions
+    } else {
+        LOG_INFO << "DRMOutputManager: Seat manager initialized successfully";
     }
     
     // Determine device path

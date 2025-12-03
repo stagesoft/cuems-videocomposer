@@ -35,6 +35,8 @@ bool SeatManager::init() {
     }
     
 #ifdef HAVE_LIBSEAT
+    seatEnabled_ = false;
+    
     // Open seat with callbacks
     struct libseat_seat_listener listener = {
         .enable_seat = onEnableDevice,
@@ -47,13 +49,26 @@ bool SeatManager::init() {
         return false;
     }
     
-    // Dispatch to get initial state
-    while (libseat_dispatch(seat_, 0) > 0) {
-        // Process events
+    // Dispatch events until seat is enabled (with timeout to avoid infinite wait)
+    int dispatchCount = 0;
+    const int maxDispatches = 100;  // Safety limit
+    while (!seatEnabled_ && dispatchCount < maxDispatches) {
+        if (libseat_dispatch(seat_, 100) < 0) {  // 100ms timeout
+            break;
+        }
+        dispatchCount++;
+    }
+    
+    if (!seatEnabled_) {
+        LOG_WARNING << "SeatManager: Seat not enabled after initialization";
+        LOG_WARNING << "SeatManager: This may happen if another session is active";
+        libseat_close_seat(seat_);
+        seat_ = nullptr;
+        return false;
     }
     
     initialized_ = true;
-    LOG_INFO << "SeatManager: Initialized (libseat)";
+    LOG_INFO << "SeatManager: Initialized (libseat, seat enabled)";
     return true;
 #else
     // No libseat - will use direct open() which requires root or proper permissions
@@ -69,16 +84,17 @@ void SeatManager::cleanup() {
     }
     
 #ifdef HAVE_LIBSEAT
-    // Disable seat (releases DRM master for all devices)
-    if (seat_) {
-        libseat_disable_seat(seat_);
-    }
-    
-    // Close all devices
+    // Close all devices first
     for (auto& [fd, info] : devices_) {
         closeDevice(fd);
     }
     devices_.clear();
+    
+    // Disable seat (releases DRM master for all devices)
+    if (seat_ && seatEnabled_) {
+        libseat_disable_seat(seat_);
+        seatEnabled_ = false;
+    }
     
     if (seat_) {
         libseat_close_seat(seat_);
@@ -98,6 +114,13 @@ int SeatManager::openDevice(const std::string& path) {
 #ifdef HAVE_LIBSEAT
     if (!seat_) {
         LOG_ERROR << "SeatManager: libseat not available";
+        return -1;
+    }
+    
+    // Ensure seat is enabled before opening devices
+    if (!seatEnabled_) {
+        LOG_ERROR << "SeatManager: Seat not enabled, cannot open device";
+        LOG_ERROR << "SeatManager: Try dispatching events or check if another session is active";
         return -1;
     }
     
@@ -229,16 +252,16 @@ bool SeatManager::isAvailable() {
 #ifdef HAVE_LIBSEAT
 void SeatManager::onEnableDevice(struct libseat* seat, void* data) {
     SeatManager* self = static_cast<SeatManager*>(data);
-    LOG_INFO << "SeatManager: Seat enabled";
+    self->seatEnabled_ = true;
+    LOG_INFO << "SeatManager: Seat enabled - devices can now be opened";
     (void)seat;
-    (void)self;
 }
 
 void SeatManager::onDisableDevice(struct libseat* seat, void* data) {
     SeatManager* self = static_cast<SeatManager*>(data);
-    LOG_WARNING << "SeatManager: Seat disabled";
+    self->seatEnabled_ = false;
+    LOG_WARNING << "SeatManager: Seat disabled - devices are no longer accessible";
     (void)seat;
-    (void)self;
 }
 #endif
 

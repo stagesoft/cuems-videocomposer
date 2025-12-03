@@ -91,6 +91,7 @@ private:
     
 #ifdef HAVE_LIBSEAT
     struct libseat* seat_ = nullptr;
+    bool seatEnabled_ = false;  // Track if seat is enabled (can open devices)
     
     // Device tracking (device_id -> fd mapping)
     struct DeviceInfo {
