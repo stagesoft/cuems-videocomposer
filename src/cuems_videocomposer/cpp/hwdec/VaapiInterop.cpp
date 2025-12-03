@@ -557,6 +557,9 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     }
     
     // Create EGL images
+    static int createCount = 0;
+    createCount++;
+    
     eglImageY_ = createEGLImageFromDmaBuf(yFd, width, height, yFormat, yOffset, yPitch, yModifier);
     
     if (eglImageY_ == EGL_NO_IMAGE_KHR) {
@@ -564,6 +567,13 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         close(yFd);
         close(uvFd);
         return false;
+    }
+    
+    if (createCount <= 3) {
+        LOG_INFO << "VaapiInterop: createEGLImages #" << createCount 
+                 << " Y: fd=" << yFd << " size=" << width << "x" << height 
+                 << " format=0x" << std::hex << yFormat << std::dec
+                 << " image=" << eglImageY_;
     }
     
     eglImageUV_ = createEGLImageFromDmaBuf(uvFd, width / 2, height / 2, uvFormat, uvOffset, uvPitch, uvModifier);
@@ -631,6 +641,11 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         currentDisplay = eglDisplay_;
     }
     
+    // Ensure GPU is done with old textures before we delete them
+    if (textureY_ != 0 || textureUV_ != 0) {
+        glFinish();  // Wait for all GL commands to complete
+    }
+    
     // Step 1: Delete old textures (they were bound to old EGL images)
     if (textureY_ != 0) {
         glDeleteTextures(1, &textureY_);
@@ -674,16 +689,20 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     
     glBindTexture(GL_TEXTURE_2D, 0);
     
+    // Clear any pending GL errors before we start
+    while (glGetError() != GL_NO_ERROR) {}
+    
     // Log first few bind attempts for debugging
     static int bindCount = 0;
-    if (bindCount++ < 3) {
+    if (bindCount++ < 5) {
         EGLDisplay currentDisplay = eglGetCurrentDisplay();
         EGLContext currentContext = eglGetCurrentContext();
         LOG_INFO << "VaapiInterop: bindTextures #" << bindCount
                  << " display=" << currentDisplay
                  << " context=" << currentContext
                  << " eglImageY=" << eglImageY_
-                 << " textureY=" << textureY_;
+                 << " textureY=" << textureY_
+                 << " prevWasDeleted=" << (textureY_ == 0 ? "no_prev" : "yes");
     }
     
     // Bind Y plane texture using the appropriate extension (mpv approach)
