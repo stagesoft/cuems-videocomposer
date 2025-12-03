@@ -27,7 +27,7 @@ DRMSurface::~DRMSurface() {
     cleanup();
 }
 
-bool DRMSurface::init(EGLContext sharedContext) {
+bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_device* sharedGbmDevice) {
     if (!outputManager_ || !outputManager_->isInitialized()) {
         LOG_ERROR << "DRMSurface: Invalid output manager";
         return false;
@@ -53,12 +53,19 @@ bool DRMSurface::init(EGLContext sharedContext) {
     LOG_INFO << "DRMSurface: Initializing for " << connector->info.name
              << " (" << width_ << "x" << height_ << ")";
     
-    // Create GBM device
-    gbmDevice_ = gbm_create_device(outputManager_->getFd());
-    if (!gbmDevice_) {
-        LOG_ERROR << "DRMSurface: Failed to create GBM device";
-        LOG_ERROR << "DRMSurface: Ensure the GPU driver supports GBM (Mesa or NVIDIA 495+)";
-        return false;
+    // Use shared GBM device if provided, otherwise create new one
+    if (sharedGbmDevice) {
+        gbmDevice_ = sharedGbmDevice;
+        ownGbmDevice_ = false;
+        LOG_INFO << "DRMSurface: Using shared GBM device";
+    } else {
+        gbmDevice_ = gbm_create_device(outputManager_->getFd());
+        if (!gbmDevice_) {
+            LOG_ERROR << "DRMSurface: Failed to create GBM device";
+            LOG_ERROR << "DRMSurface: Ensure the GPU driver supports GBM (Mesa or NVIDIA 495+)";
+            return false;
+        }
+        ownGbmDevice_ = true;
     }
     
     // Log GBM backend info
@@ -113,41 +120,52 @@ bool DRMSurface::init(EGLContext sharedContext) {
     
 gbm_surface_created:
     
-    // Initialize EGL - prefer platform-aware functions for GBM
-    PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
-        (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    // Use shared EGL display if provided, otherwise create new one
+    bool usingPlatformDisplay = false;
+    
+    if (sharedDisplay != EGL_NO_DISPLAY) {
+        eglDisplay_ = sharedDisplay;
+        ownEglDisplay_ = false;
+        LOG_INFO << "DRMSurface: Using shared EGL display";
+        // Assume platform display if shared
+        usingPlatformDisplay = true;
+    } else {
+        // Initialize EGL - prefer platform-aware functions for GBM
+        PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
+            (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+        
+        if (eglGetPlatformDisplayEXT) {
+            eglDisplay_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbmDevice_, nullptr);
+            if (eglDisplay_ != EGL_NO_DISPLAY) {
+                usingPlatformDisplay = true;
+            }
+        }
+        
+        if (eglDisplay_ == EGL_NO_DISPLAY) {
+            // Fallback to legacy path
+            eglDisplay_ = eglGetDisplay((EGLNativeDisplayType)gbmDevice_);
+        }
+        
+        if (eglDisplay_ == EGL_NO_DISPLAY) {
+            LOG_ERROR << "DRMSurface: Failed to get EGL display";
+            cleanup();
+            return false;
+        }
+        
+        EGLint major, minor;
+        if (!eglInitialize(eglDisplay_, &major, &minor)) {
+            LOG_ERROR << "DRMSurface: Failed to initialize EGL";
+            cleanup();
+            return false;
+        }
+        
+        LOG_INFO << "DRMSurface: EGL " << major << "." << minor;
+        ownEglDisplay_ = true;
+    }
     
     // Also get the platform window surface function - required for GBM on Mesa/Intel
     PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC eglCreatePlatformWindowSurfaceEXT =
         (PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC)eglGetProcAddress("eglCreatePlatformWindowSurfaceEXT");
-    
-    bool usingPlatformDisplay = false;
-    if (eglGetPlatformDisplayEXT) {
-        eglDisplay_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbmDevice_, nullptr);
-        if (eglDisplay_ != EGL_NO_DISPLAY) {
-            usingPlatformDisplay = true;
-        }
-    }
-    
-    if (eglDisplay_ == EGL_NO_DISPLAY) {
-        // Fallback to legacy path
-        eglDisplay_ = eglGetDisplay((EGLNativeDisplayType)gbmDevice_);
-    }
-    
-    if (eglDisplay_ == EGL_NO_DISPLAY) {
-        LOG_ERROR << "DRMSurface: Failed to get EGL display";
-        cleanup();
-        return false;
-    }
-    
-    EGLint major, minor;
-    if (!eglInitialize(eglDisplay_, &major, &minor)) {
-        LOG_ERROR << "DRMSurface: Failed to initialize EGL";
-        cleanup();
-        return false;
-    }
-    
-    LOG_INFO << "DRMSurface: EGL " << major << "." << minor;
     
     // Bind OpenGL ES or OpenGL API
     if (!eglBindAPI(EGL_OPENGL_API)) {
@@ -324,8 +342,12 @@ void DRMSurface::cleanup() {
             eglContext_ = EGL_NO_CONTEXT;
         }
         
-        eglTerminate(eglDisplay_);
+        // Only terminate if we created it
+        if (ownEglDisplay_) {
+            eglTerminate(eglDisplay_);
+        }
         eglDisplay_ = EGL_NO_DISPLAY;
+        ownEglDisplay_ = false;
     }
     
     // Destroy GBM resources
@@ -334,10 +356,12 @@ void DRMSurface::cleanup() {
         gbmSurface_ = nullptr;
     }
     
-    if (gbmDevice_) {
+    // Only destroy GBM device if we created it
+    if (gbmDevice_ && ownGbmDevice_) {
         gbm_device_destroy(gbmDevice_);
-        gbmDevice_ = nullptr;
     }
+    gbmDevice_ = nullptr;
+    ownGbmDevice_ = false;
     
     initialized_ = false;
 }

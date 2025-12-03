@@ -50,9 +50,13 @@ public:
     /**
      * Initialize GBM + EGL for this output
      * @param sharedContext Optional EGL context to share resources with
+     * @param sharedDisplay Optional shared EGL display (required for context sharing)
+     * @param sharedGbmDevice Optional shared GBM device (for resource sharing)
      * @return true on success
      */
-    bool init(EGLContext sharedContext = EGL_NO_CONTEXT);
+    bool init(EGLContext sharedContext = EGL_NO_CONTEXT, 
+              EGLDisplay sharedDisplay = EGL_NO_DISPLAY,
+              gbm_device* sharedGbmDevice = nullptr);
     
     /**
      * Cleanup all resources
@@ -205,6 +209,10 @@ private:
     // Flip state
     bool flipPending_ = false;
     bool initialized_ = false;
+    
+    // Ownership flags (for cleanup)
+    bool ownGbmDevice_ = false;      // True if we created the GBM device
+    bool ownEglDisplay_ = false;     // True if we created the EGL display
     
     // DRM IDs (cached)
     uint32_t connectorId_ = 0;

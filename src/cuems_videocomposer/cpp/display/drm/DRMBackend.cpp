@@ -52,7 +52,10 @@ bool DRMBackend::openWindow() {
     LOG_INFO << "DRMBackend: Found " << outputs.size() << " connected output(s)";
     
     // Create surfaces for each output
+    // Share EGL display and GBM device for context sharing
     EGLContext sharedContext = EGL_NO_CONTEXT;
+    EGLDisplay sharedDisplay = EGL_NO_DISPLAY;
+    gbm_device* sharedGbmDevice = nullptr;
     
     for (size_t i = 0; i < outputs.size(); ++i) {
         LOG_INFO << "DRMBackend: Creating surface for output " << i 
@@ -60,15 +63,19 @@ bool DRMBackend::openWindow() {
         
         auto surface = std::make_unique<DRMSurface>(outputManager_.get(), static_cast<int>(i));
         
-        if (!surface->init(sharedContext)) {
+        // Pass shared resources to subsequent surfaces
+        if (!surface->init(sharedContext, sharedDisplay, sharedGbmDevice)) {
             LOG_ERROR << "DRMBackend: Failed to create surface for output " << i;
             // Continue with other outputs
             continue;
         }
         
-        // Use first surface's context for sharing
+        // Use first surface's resources for sharing
         if (sharedContext == EGL_NO_CONTEXT) {
             sharedContext = surface->getContext();
+            sharedDisplay = surface->getDisplay();
+            sharedGbmDevice = surface->getGbmDevice();
+            LOG_INFO << "DRMBackend: Output 0 created shared resources (EGL display, GBM device, context)";
         }
         
         surfaces_.push_back(std::move(surface));
