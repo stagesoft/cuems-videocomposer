@@ -217,6 +217,7 @@ private:
     // Ownership flags (for cleanup)
     bool ownGbmDevice_ = false;      // True if we created the GBM device
     bool ownEglDisplay_ = false;     // True if we created the EGL display
+    bool ownEglContext_ = false;     // True if we created the EGL context
     
     // DRM IDs (cached)
     uint32_t connectorId_ = 0;

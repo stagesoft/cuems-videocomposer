@@ -231,25 +231,36 @@ gbm_surface_created:
                     << std::hex << visualId << std::dec;
     }
     
-    // Create EGL context
-    EGLint contextAttribs[] = {
-        EGL_CONTEXT_MAJOR_VERSION, 3,
-        EGL_CONTEXT_MINOR_VERSION, 3,
-        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-        EGL_NONE
-    };
-    
-    eglContext_ = eglCreateContext(eglDisplay_, eglConfig_, sharedContext, contextAttribs);
-    if (eglContext_ == EGL_NO_CONTEXT) {
-        // Try simpler context
-        EGLint simpleAttribs[] = { EGL_NONE };
-        eglContext_ = eglCreateContext(eglDisplay_, eglConfig_, sharedContext, simpleAttribs);
+    // Create or reuse EGL context
+    // IMPORTANT: All surfaces must share the SAME context (not just share objects)
+    // because VAOs are context-specific and not shared between contexts
+    if (sharedContext != EGL_NO_CONTEXT) {
+        // Use the shared context directly - all surfaces share one context
+        eglContext_ = sharedContext;
+        ownEglContext_ = false;
+        LOG_INFO << "DRMSurface: Using shared EGL context (VAOs will work across surfaces)";
+    } else {
+        // Create new context for first surface
+        EGLint contextAttribs[] = {
+            EGL_CONTEXT_MAJOR_VERSION, 3,
+            EGL_CONTEXT_MINOR_VERSION, 3,
+            EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+            EGL_NONE
+        };
         
+        eglContext_ = eglCreateContext(eglDisplay_, eglConfig_, EGL_NO_CONTEXT, contextAttribs);
         if (eglContext_ == EGL_NO_CONTEXT) {
-            LOG_ERROR << "DRMSurface: Failed to create EGL context";
-            cleanup();
-            return false;
+            // Try simpler context
+            EGLint simpleAttribs[] = { EGL_NONE };
+            eglContext_ = eglCreateContext(eglDisplay_, eglConfig_, EGL_NO_CONTEXT, simpleAttribs);
+            
+            if (eglContext_ == EGL_NO_CONTEXT) {
+                LOG_ERROR << "DRMSurface: Failed to create EGL context";
+                cleanup();
+                return false;
+            }
         }
+        ownEglContext_ = true;
     }
     
     // Create EGL surface from GBM surface
@@ -337,10 +348,12 @@ void DRMSurface::cleanup() {
             eglSurface_ = EGL_NO_SURFACE;
         }
         
-        if (eglContext_ != EGL_NO_CONTEXT) {
+        // Only destroy context if we created it
+        if (eglContext_ != EGL_NO_CONTEXT && ownEglContext_) {
             eglDestroyContext(eglDisplay_, eglContext_);
-            eglContext_ = EGL_NO_CONTEXT;
         }
+        eglContext_ = EGL_NO_CONTEXT;
+        ownEglContext_ = false;
         
         // Only terminate if we created it
         if (ownEglDisplay_) {
