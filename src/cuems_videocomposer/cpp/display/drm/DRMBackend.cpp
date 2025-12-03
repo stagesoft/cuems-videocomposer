@@ -175,13 +175,23 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
 
 void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osdManager) {
     if (!multiRenderer_) {
+        LOG_ERROR << "DRMBackend::renderVirtualCanvas: No multiRenderer!";
         return;
     }
     
     // Make primary surface context current for canvas rendering
     DRMSurface* primary = getPrimarySurface();
     if (!primary) {
+        LOG_ERROR << "DRMBackend::renderVirtualCanvas: No primary surface!";
         return;
+    }
+    
+    static int frameCount = 0;
+    bool debug = (frameCount++ < 5);
+    
+    if (debug) {
+        LOG_INFO << "DRMBackend::renderVirtualCanvas: Frame " << frameCount 
+                 << ", surfaces=" << surfaces_.size();
     }
     
     primary->makeCurrent();
@@ -194,16 +204,31 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     
     primary->releaseCurrent();
     
+    if (debug) {
+        LOG_INFO << "DRMBackend::renderVirtualCanvas: Scheduling page flips for " 
+                 << surfaces_.size() << " surfaces";
+    }
+    
     // Schedule page flips for all surfaces
-    for (auto& surface : surfaces_) {
-        surface->schedulePageFlip();
+    for (size_t i = 0; i < surfaces_.size(); ++i) {
+        if (debug) {
+            LOG_INFO << "DRMBackend: Scheduling page flip for surface " << i;
+        }
+        surfaces_[i]->schedulePageFlip();
     }
     
     // Wait for all flips to complete
-    for (auto& surface : surfaces_) {
-        if (surface->isFlipPending()) {
-            surface->waitForFlip();
+    for (size_t i = 0; i < surfaces_.size(); ++i) {
+        if (surfaces_[i]->isFlipPending()) {
+            if (debug) {
+                LOG_INFO << "DRMBackend: Waiting for flip on surface " << i;
+            }
+            surfaces_[i]->waitForFlip();
         }
+    }
+    
+    if (debug) {
+        LOG_INFO << "DRMBackend::renderVirtualCanvas: Frame complete";
     }
 }
 

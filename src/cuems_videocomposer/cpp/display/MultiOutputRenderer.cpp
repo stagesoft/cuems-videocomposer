@@ -334,16 +334,32 @@ void MultiOutputRenderer::setCaptureResolution(int width, int height) {
 
 void MultiOutputRenderer::render(LayerManager* layerManager, OSDManager* osdManager) {
     if (!initialized_ || outputs_.empty()) {
+        LOG_ERROR << "MultiOutputRenderer::render: Not initialized or no outputs";
         return;
     }
     
+    static int renderFrameCount = 0;
+    bool debug = (renderFrameCount++ < 5);
+    
     // ===== Virtual Canvas Mode =====
     if (useVirtualCanvas_ && canvas_) {
+        if (debug) {
+            LOG_INFO << "MultiOutputRenderer::render: Virtual Canvas mode, outputs=" << outputs_.size();
+        }
+        
         // Step 1: Render all layers to virtual canvas
         renderToCanvas(layerManager, osdManager);
         
+        if (debug) {
+            LOG_INFO << "MultiOutputRenderer::render: Canvas rendered, now blitting to outputs";
+        }
+        
         // Step 2: Blit canvas regions to each output
         blitToOutputs();
+        
+        if (debug) {
+            LOG_INFO << "MultiOutputRenderer::render: Blit complete";
+        }
         
         // Step 3: Capture for virtual outputs (sinks)
         if (captureEnabled_ && outputSinkManager_) {
