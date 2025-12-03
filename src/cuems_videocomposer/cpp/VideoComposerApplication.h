@@ -57,6 +57,7 @@ public:
     ConfigurationManager* getConfig() { return config_.get(); }
     LayerManager* getLayerManager() { return layerManager_.get(); }
     OSDManager* getOSDManager() { return osdManager_.get(); }
+    DisplayBackend* getDisplayBackend() { return displayBackend_.get(); }
     
     // Get renderer access (for master layer controls)
     OpenGLRenderer& renderer();

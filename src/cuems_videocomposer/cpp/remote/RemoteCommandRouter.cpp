@@ -6,6 +6,7 @@
 #include "../sync/MIDISyncSource.h"
 #include "../osd/OSDManager.h"
 #include "../display/OpenGLRenderer.h"
+#include "../display/DisplayBackend.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
 #include "../utils/SMPTEUtils.h"
 #include <sstream>
@@ -272,8 +273,17 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerAppCommand("display/list", [this](const std::vector<std::string>& args) {
         return handleDisplayList(args);
     });
+    registerAppCommand("display/modes", [this](const std::vector<std::string>& args) {
+        return handleDisplayModes(args);
+    });
     registerAppCommand("display/mode", [this](const std::vector<std::string>& args) {
         return handleDisplayMode(args);
+    });
+    registerAppCommand("display/resolution_mode", [this](const std::vector<std::string>& args) {
+        return handleDisplayResolutionMode(args);
+    });
+    registerAppCommand("display/region", [this](const std::vector<std::string>& args) {
+        return handleDisplayRegion(args);
     });
     registerAppCommand("display/assign", [this](const std::vector<std::string>& args) {
         return handleDisplayAssign(args);
@@ -286,6 +296,14 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     });
     registerAppCommand("display/load", [this](const std::vector<std::string>& args) {
         return handleDisplayLoad(args);
+    });
+    
+    // Virtual output commands (NDI, streaming, capture)
+    registerAppCommand("output/capture", [this](const std::vector<std::string>& args) {
+        return handleOutputCapture(args);
+    });
+    registerAppCommand("output/list", [this](const std::vector<std::string>& args) {
+        return handleOutputList(args);
     });
 }
 
@@ -1568,36 +1586,207 @@ bool RemoteCommandRouter::handleMasterColorReset(const std::vector<std::string>&
 bool RemoteCommandRouter::handleDisplayList(const std::vector<std::string>& args) {
     (void)args;  // No arguments needed
     
-    // TODO: When DisplayConfiguration is integrated into VideoComposerApplication,
-    // this will return a JSON-formatted list of all outputs with their metadata.
-    // For now, log a message indicating the feature is available.
-    LOG_INFO << "Display list requested - feature pending full integration";
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "display/list: No display backend available";
+        return false;
+    }
     
-    // Return true to indicate command was recognized
+    auto outputs = backend->getOutputs();
+    
+    LOG_INFO << "=== Connected Displays (" << outputs.size() << ") ===";
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        const auto& out = outputs[i];
+        LOG_INFO << "  [" << i << "] " << out.name 
+                 << " (" << out.make << " " << out.model << ")"
+                 << " " << out.width << "x" << out.height << "@" << out.refreshRate << "Hz"
+                 << (out.connected ? " [connected]" : " [disconnected]");
+    }
+    
+    return true;
+}
+
+bool RemoteCommandRouter::handleDisplayModes(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/display/modes <outputName>
+    if (args.empty()) {
+        LOG_WARNING << "display/modes requires: <outputName>";
+        return false;
+    }
+    
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "display/modes: No display backend available";
+        return false;
+    }
+    
+    std::string outputName = args[0];
+    auto outputs = backend->getOutputs();
+    
+    // Find the output
+    const OutputInfo* found = nullptr;
+    for (const auto& out : outputs) {
+        if (out.name == outputName) {
+            found = &out;
+            break;
+        }
+    }
+    
+    if (!found) {
+        LOG_WARNING << "display/modes: Unknown output '" << outputName << "'";
+        return false;
+    }
+    
+    LOG_INFO << "=== Available Modes for " << outputName << " ===";
+    LOG_INFO << "  Current: " << found->width << "x" << found->height 
+             << "@" << found->refreshRate << "Hz";
+    
+    for (size_t i = 0; i < found->modes.size(); ++i) {
+        const auto& mode = found->modes[i];
+        LOG_INFO << "  [" << i << "] " << mode.width << "x" << mode.height 
+                 << "@" << mode.refreshRate << "Hz"
+                 << (mode.preferred ? " (preferred)" : "");
+    }
+    
     return true;
 }
 
 bool RemoteCommandRouter::handleDisplayMode(const std::vector<std::string>& args) {
-    // Expected: /videocomposer/display/mode <name> <width> <height> <refresh>
-    if (args.size() < 4) {
-        LOG_WARNING << "display/mode requires: <name> <width> <height> <refresh>";
+    // Expected: /videocomposer/display/mode <name> <width> <height> [refresh]
+    if (args.size() < 3) {
+        LOG_WARNING << "display/mode requires: <name> <width> <height> [refresh]";
+        return false;
+    }
+    
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "display/mode: No display backend available";
         return false;
     }
     
     std::string name = args[0];
     int width = std::atoi(args[1].c_str());
     int height = std::atoi(args[2].c_str());
-    double refresh = std::atof(args[3].c_str());
+    double refresh = (args.size() > 3) ? std::atof(args[3].c_str()) : 0.0;
     
-    LOG_INFO << "Display mode change requested: " << name 
-             << " to " << width << "x" << height << "@" << refresh << "Hz"
-             << " - feature pending full integration";
+    // Validate mode exists
+    auto outputs = backend->getOutputs();
+    const OutputInfo* found = nullptr;
+    for (const auto& out : outputs) {
+        if (out.name == name) {
+            found = &out;
+            break;
+        }
+    }
     
-    return true;
+    if (!found) {
+        LOG_WARNING << "display/mode: Unknown output '" << name << "'";
+        return false;
+    }
+    
+    // Check if requested mode is available
+    const OutputMode* requestedMode = found->findMode(width, height, refresh);
+    if (!requestedMode) {
+        LOG_WARNING << "display/mode: Mode " << width << "x" << height 
+                    << " not available for " << name;
+        LOG_INFO << "  Use /videocomposer/display/modes " << name << " to see available modes";
+        return false;
+    }
+    
+    LOG_INFO << "Display mode change: " << name 
+             << " to " << requestedMode->width << "x" << requestedMode->height
+             << "@" << requestedMode->refreshRate << "Hz";
+    
+    int outputIndex = backend->getOutputIndexByName(name);
+    if (outputIndex < 0) {
+        LOG_ERROR << "display/mode: Failed to find output index for " << name;
+        return false;
+    }
+    
+    if (backend->setOutputMode(outputIndex, width, height, requestedMode->refreshRate)) {
+        LOG_INFO << "display/mode: Mode changed successfully";
+        return true;
+    }
+    
+    LOG_ERROR << "display/mode: Failed to change mode";
+    return false;
+}
+
+bool RemoteCommandRouter::handleDisplayResolutionMode(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/display/resolution_mode <mode>
+    // Modes: preferred, native, 1080p, 720p, 4k
+    
+    if (args.empty()) {
+        LOG_INFO << "=== Resolution Mode Options ===";
+        LOG_INFO << "  native    - Use panel's true pixels (EDID preferred)";
+        LOG_INFO << "  maximum   - Use highest available resolution";
+        LOG_INFO << "  1080p     - Force 1920x1080 (default)";
+        LOG_INFO << "  720p      - Force 1280x720";
+        LOG_INFO << "  4k        - Force 3840x2160";
+        LOG_INFO << "";
+        LOG_INFO << "Usage: /videocomposer/display/resolution_mode <mode>";
+        return true;
+    }
+    
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "display/resolution_mode: No display backend available";
+        return false;
+    }
+    
+    std::string modeStr = args[0];
+    
+    if (backend->setResolutionMode(modeStr)) {
+        LOG_INFO << "Resolution mode set to: " << modeStr;
+        LOG_INFO << "Note: Some changes may require restart to fully apply";
+        return true;
+    }
+    
+    LOG_WARNING << "Unknown resolution mode: " << modeStr;
+    LOG_INFO << "Valid modes: native, maximum, 1080p, 720p, 4k";
+    return false;
+}
+
+bool RemoteCommandRouter::handleDisplayRegion(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/display/region <outputName> <canvasX> <canvasY> [width] [height]
+    if (args.size() < 3) {
+        LOG_WARNING << "display/region requires: <outputName> <canvasX> <canvasY> [width] [height]";
+        return false;
+    }
+    
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "display/region: No display backend available";
+        return false;
+    }
+    
+    std::string outputName = args[0];
+    int canvasX = std::atoi(args[1].c_str());
+    int canvasY = std::atoi(args[2].c_str());
+    int width = (args.size() > 3) ? std::atoi(args[3].c_str()) : 0;
+    int height = (args.size() > 4) ? std::atoi(args[4].c_str()) : 0;
+    
+    int outputIndex = backend->getOutputIndexByName(outputName);
+    if (outputIndex < 0) {
+        LOG_WARNING << "display/region: Unknown output '" << outputName << "'";
+        return false;
+    }
+    
+    if (backend->configureOutputRegion(outputIndex, canvasX, canvasY, width, height)) {
+        LOG_INFO << "Configured region for " << outputName 
+                 << " at " << canvasX << "," << canvasY;
+        if (width > 0 && height > 0) {
+            LOG_INFO << "  size " << width << "x" << height;
+        }
+        return true;
+    }
+    
+    return false;
 }
 
 bool RemoteCommandRouter::handleDisplayAssign(const std::vector<std::string>& args) {
     // Expected: /videocomposer/display/assign <layerId> <outputName>
+    // NOTE: In Virtual Canvas mode, layers render to the canvas, not directly to outputs.
+    // This command is a legacy holdover and may be deprecated.
     if (args.size() < 2) {
         LOG_WARNING << "display/assign requires: <layerId> <outputName>";
         return false;
@@ -1607,15 +1796,21 @@ bool RemoteCommandRouter::handleDisplayAssign(const std::vector<std::string>& ar
     std::string outputName = args[1];
     
     LOG_INFO << "Layer " << layerId << " assigned to output " << outputName
-             << " - feature pending full integration";
+             << " - NOTE: In Virtual Canvas mode, use layer position to control which output shows the layer";
     
     return true;
 }
 
 bool RemoteCommandRouter::handleDisplayBlend(const std::vector<std::string>& args) {
-    // Expected: /videocomposer/display/blend <outputName> <left> <right> <top> <bottom>
+    // Expected: /videocomposer/display/blend <outputName> <left> <right> <top> <bottom> [gamma]
     if (args.size() < 5) {
-        LOG_WARNING << "display/blend requires: <outputName> <left> <right> <top> <bottom>";
+        LOG_WARNING << "display/blend requires: <outputName> <left> <right> <top> <bottom> [gamma]";
+        return false;
+    }
+    
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "display/blend: No display backend available";
         return false;
     }
     
@@ -1624,41 +1819,149 @@ bool RemoteCommandRouter::handleDisplayBlend(const std::vector<std::string>& arg
     float right = std::atof(args[2].c_str());
     float top = std::atof(args[3].c_str());
     float bottom = std::atof(args[4].c_str());
+    float gamma = (args.size() > 5) ? std::atof(args[5].c_str()) : 2.2f;
     
-    LOG_INFO << "Blend region for " << outputName 
-             << ": L=" << left << " R=" << right 
-             << " T=" << top << " B=" << bottom
-             << " - feature pending full integration";
+    int outputIndex = backend->getOutputIndexByName(outputName);
+    if (outputIndex < 0) {
+        LOG_WARNING << "display/blend: Unknown output '" << outputName << "'";
+        return false;
+    }
     
-    return true;
+    if (backend->configureOutputBlend(outputIndex, left, right, top, bottom, gamma)) {
+        LOG_INFO << "Configured blend for " << outputName 
+                 << ": L=" << left << " R=" << right 
+                 << " T=" << top << " B=" << bottom << " gamma=" << gamma;
+        return true;
+    }
+    
+    return false;
 }
 
 bool RemoteCommandRouter::handleDisplaySave(const std::vector<std::string>& args) {
-    // Expected: /videocomposer/display/save <path>
-    if (args.empty()) {
-        LOG_WARNING << "display/save requires: <path>";
+    // Expected: /videocomposer/display/save [path]
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "display/save: No display backend available";
         return false;
     }
     
-    std::string path = args[0];
+    std::string path = args.empty() ? "" : args[0];
     
-    LOG_INFO << "Display config save to " << path
-             << " - feature pending full integration";
+    if (backend->saveConfiguration(path)) {
+        LOG_INFO << "Display configuration saved" 
+                 << (path.empty() ? " to default location" : " to " + path);
+        return true;
+    }
     
-    return true;
+    LOG_ERROR << "display/save: Failed to save configuration";
+    return false;
 }
 
 bool RemoteCommandRouter::handleDisplayLoad(const std::vector<std::string>& args) {
-    // Expected: /videocomposer/display/load <path>
-    if (args.empty()) {
-        LOG_WARNING << "display/load requires: <path>";
+    // Expected: /videocomposer/display/load [path]
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "display/load: No display backend available";
         return false;
     }
     
-    std::string path = args[0];
+    std::string path = args.empty() ? "" : args[0];
     
-    LOG_INFO << "Display config load from " << path
-             << " - feature pending full integration";
+    if (backend->loadConfiguration(path)) {
+        LOG_INFO << "Display configuration loaded" 
+                 << (path.empty() ? " from default location" : " from " + path);
+        return true;
+    }
+    
+    LOG_WARNING << "display/load: Failed to load configuration from " 
+                << (path.empty() ? "default location" : path);
+    return false;
+}
+
+// ============================================================================
+// Virtual Output Handlers (Phase 6)
+// ============================================================================
+
+bool RemoteCommandRouter::handleOutputCapture(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/output/capture <enable|disable|status>
+    //           /videocomposer/output/capture enable [width] [height]
+    if (args.empty()) {
+        LOG_WARNING << "output/capture requires: <enable|disable|status> [width] [height]";
+        return false;
+    }
+    
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "output/capture: No display backend available";
+        return false;
+    }
+    
+    std::string action = args[0];
+    
+    if (action == "status") {
+        bool enabled = backend->isCaptureEnabled();
+        LOG_INFO << "Output capture: " << (enabled ? "ENABLED" : "DISABLED");
+        return true;
+    }
+    
+    if (action == "enable" || action == "1" || action == "on") {
+        int width = (args.size() > 1) ? std::atoi(args[1].c_str()) : 0;
+        int height = (args.size() > 2) ? std::atoi(args[2].c_str()) : 0;
+        
+        backend->setCaptureEnabled(true, width, height);
+        LOG_INFO << "Output capture enabled";
+        if (width > 0 && height > 0) {
+            LOG_INFO << "  Resolution: " << width << "x" << height;
+        }
+        return true;
+    }
+    
+    if (action == "disable" || action == "0" || action == "off") {
+        backend->setCaptureEnabled(false);
+        LOG_INFO << "Output capture disabled";
+        return true;
+    }
+    
+    LOG_WARNING << "output/capture: Unknown action '" << action << "'";
+    return false;
+}
+
+bool RemoteCommandRouter::handleOutputList(const std::vector<std::string>& args) {
+    // Expected: /videocomposer/output/list
+    (void)args;
+    
+    auto* backend = app_->getDisplayBackend();
+    if (!backend) {
+        LOG_WARNING << "output/list: No display backend available";
+        return false;
+    }
+    
+    // List physical outputs
+    auto outputs = backend->getOutputs();
+    
+    LOG_INFO << "=== Physical Outputs (" << outputs.size() << ") ===";
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        const auto& out = outputs[i];
+        LOG_INFO << "  [" << i << "] " << out.name 
+                 << " " << out.width << "x" << out.height
+                 << "@" << out.refreshRate << "Hz"
+                 << (out.enabled ? "" : " (disabled)");
+    }
+    
+    // Capture status
+    LOG_INFO << "=== Capture Status ===";
+    bool captureEnabled = backend->isCaptureEnabled();
+    LOG_INFO << "  Frame capture: " << (captureEnabled ? "ENABLED" : "DISABLED");
+    
+    // Virtual outputs info
+    LOG_INFO << "=== Virtual Outputs ===";
+    LOG_INFO << "  NDI: Not configured (use NDI SDK)";
+    LOG_INFO << "  Streaming: Not configured";
+    LOG_INFO << "";
+    LOG_INFO << "Commands:";
+    LOG_INFO << "  /videocomposer/output/capture enable [w] [h]";
+    LOG_INFO << "  /videocomposer/output/capture disable";
+    LOG_INFO << "  /videocomposer/output/capture status";
     
     return true;
 }

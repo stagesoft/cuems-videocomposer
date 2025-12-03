@@ -28,6 +28,18 @@
 namespace videocomposer {
 
 /**
+ * ResolutionMode - How to select display resolution
+ */
+enum class ResolutionMode {
+    NATIVE,         // Use EDID preferred mode (panel's true pixels)
+    MAXIMUM,        // Use highest available resolution
+    HD_1080P,       // Force 1920x1080 (or closest)
+    HD_720P,        // Force 1280x720 (or closest)
+    UHD_4K,         // Force 3840x2160 (or closest)
+    CUSTOM          // Use custom per-output settings
+};
+
+/**
  * DRMConnector - Internal representation of a DRM connector
  */
 struct DRMConnector {
@@ -141,6 +153,45 @@ public:
      */
     bool setMode(const std::string& name, int width, int height, double refreshRate = 0.0);
     
+    // ===== Resolution Mode Selection =====
+    
+    /**
+     * Set global resolution mode policy
+     * @param mode Resolution selection mode
+     */
+    void setResolutionMode(ResolutionMode mode);
+    
+    /**
+     * Get current resolution mode
+     */
+    ResolutionMode getResolutionMode() const { return resolutionMode_; }
+    
+    /**
+     * Apply resolution mode to all outputs
+     * Call after init() to apply the configured resolution policy.
+     * @return true if all outputs were configured successfully
+     */
+    bool applyResolutionMode();
+    
+    /**
+     * Apply resolution mode to a specific output
+     * @param index Output index
+     * @return true on success
+     */
+    bool applyResolutionModeToOutput(int index);
+    
+    /**
+     * Find best mode matching resolution criteria
+     * @param connector The connector to search
+     * @param targetWidth Target width (0 = any)
+     * @param targetHeight Target height (0 = any)
+     * @param preferHighest If true, prefer highest resolution when multiple match
+     * @return Pointer to best mode, or nullptr if none found
+     */
+    const drmModeModeInfo* findBestMode(const DRMConnector& connector,
+                                        int targetWidth = 0, int targetHeight = 0,
+                                        bool preferHighest = false) const;
+    
     /**
      * Restore original mode for all outputs
      */
@@ -220,6 +271,7 @@ private:
     int drmFd_ = -1;
     std::string devicePath_;
     bool atomicSupported_ = false;
+    ResolutionMode resolutionMode_ = ResolutionMode::HD_1080P;  // Default to 1080p
     
     // DRM resources
     drmModeRes* resources_ = nullptr;

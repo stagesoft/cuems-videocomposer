@@ -2,7 +2,10 @@
 #define VIDEOCOMPOSER_DISPLAYBACKEND_H
 
 #include "../video/FrameBuffer.h"
+#include "OutputInfo.h"
 #include <cstdint>
+#include <vector>
+#include <string>
 
 // Forward declarations for EGL/VAAPI types (avoid including headers)
 #ifdef HAVE_EGL
@@ -125,6 +128,130 @@ public:
      * @return true if supported, false otherwise
      */
     virtual bool supportsMultiDisplay() const = 0;
+
+    // ===== Multi-Output Support =====
+    
+    /**
+     * Get number of physical outputs
+     * @return Number of outputs (1 for single-display backends)
+     */
+    virtual size_t getOutputCount() const { return 1; }
+    
+    /**
+     * Get list of all connected outputs with their info
+     * @return Vector of OutputInfo structures
+     */
+    virtual std::vector<OutputInfo> getOutputs() const { return {}; }
+    
+    /**
+     * Configure output region on virtual canvas
+     * @param outputIndex Output index (0-based)
+     * @param canvasX X position on canvas
+     * @param canvasY Y position on canvas  
+     * @param canvasWidth Width on canvas (use 0 for output native width)
+     * @param canvasHeight Height on canvas (use 0 for output native height)
+     * @return true on success
+     */
+    virtual bool configureOutputRegion(int outputIndex, int canvasX, int canvasY, 
+                                        int canvasWidth = 0, int canvasHeight = 0) { 
+        (void)outputIndex; (void)canvasX; (void)canvasY; 
+        (void)canvasWidth; (void)canvasHeight;
+        return false; 
+    }
+    
+    /**
+     * Configure edge blending for an output
+     * @param outputIndex Output index
+     * @param left Left edge blend width in pixels
+     * @param right Right edge blend width in pixels
+     * @param top Top edge blend width in pixels
+     * @param bottom Bottom edge blend width in pixels
+     * @param gamma Blend gamma (typically 2.2)
+     * @return true on success
+     */
+    virtual bool configureOutputBlend(int outputIndex, float left, float right,
+                                       float top, float bottom, float gamma = 2.2f) {
+        (void)outputIndex; (void)left; (void)right; (void)top; (void)bottom; (void)gamma;
+        return false;
+    }
+    
+    /**
+     * Get output index by name
+     * @param name Output name (e.g., "eDP-1", "HDMI-A-1")
+     * @return Output index, or -1 if not found
+     */
+    virtual int getOutputIndexByName(const std::string& name) const {
+        (void)name;
+        return -1;
+    }
+    
+    /**
+     * Set output resolution/mode
+     * @param outputIndex Output index
+     * @param width New width
+     * @param height New height
+     * @param refresh Refresh rate (0 = use default)
+     * @return true on success
+     */
+    virtual bool setOutputMode(int outputIndex, int width, int height, double refresh = 0.0) {
+        (void)outputIndex; (void)width; (void)height; (void)refresh;
+        return false;
+    }
+    
+    // ===== Virtual Output / Capture Support =====
+    
+    /**
+     * Enable/disable frame capture for virtual outputs
+     * @param enabled Enable or disable capture
+     * @param width Capture width (0 = use canvas width)
+     * @param height Capture height (0 = use canvas height)
+     */
+    virtual void setCaptureEnabled(bool enabled, int width = 0, int height = 0) {
+        (void)enabled; (void)width; (void)height;
+    }
+    
+    /**
+     * Check if capture is enabled
+     */
+    virtual bool isCaptureEnabled() const { return false; }
+    
+    /**
+     * Set output sink manager for virtual outputs
+     * @param sinkManager Output sink manager (not owned)
+     */
+    virtual void setOutputSinkManager(class OutputSinkManager* sinkManager) {
+        (void)sinkManager;
+    }
+    
+    /**
+     * Set resolution mode for all outputs
+     * @param mode Mode string: "native", "maximum", "1080p", "720p", "4k"
+     * @return true if mode was set (may need re-init to apply)
+     */
+    virtual bool setResolutionMode(const std::string& mode) {
+        (void)mode;
+        return false;
+    }
+    
+    /**
+     * Save display configuration to file
+     * @param path File path (empty = default)
+     * @return true on success
+     */
+    virtual bool saveConfiguration(const std::string& path = "") {
+        (void)path;
+        return false;
+    }
+    
+    /**
+     * Load display configuration from file
+     * @param path File path (empty = default)
+     * @return true on success
+     */
+    virtual bool loadConfiguration(const std::string& path = "") {
+        (void)path;
+        return false;
+    }
 
     /**
      * Get OpenGL context (for OpenGL backends)

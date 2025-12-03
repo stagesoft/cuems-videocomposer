@@ -841,6 +841,157 @@ bool DRMOutputManager::setMode(const std::string& name, int width, int height, d
     return setMode(conn->info.index, width, height, refreshRate);
 }
 
+// ============================================================================
+// Resolution Mode Selection
+// ============================================================================
+
+void DRMOutputManager::setResolutionMode(ResolutionMode mode) {
+    resolutionMode_ = mode;
+    
+    const char* modeName = "UNKNOWN";
+    switch (mode) {
+        case ResolutionMode::NATIVE:    modeName = "NATIVE"; break;
+        case ResolutionMode::MAXIMUM:   modeName = "MAXIMUM"; break;
+        case ResolutionMode::HD_1080P:  modeName = "1080P"; break;
+        case ResolutionMode::HD_720P:   modeName = "720P"; break;
+        case ResolutionMode::UHD_4K:    modeName = "4K"; break;
+        case ResolutionMode::CUSTOM:    modeName = "CUSTOM"; break;
+    }
+    
+    LOG_INFO << "DRMOutputManager: Resolution mode set to " << modeName;
+}
+
+bool DRMOutputManager::applyResolutionMode() {
+    bool allSuccess = true;
+    
+    for (size_t i = 0; i < connectors_.size(); ++i) {
+        if (connectors_[i].info.connected) {
+            if (!applyResolutionModeToOutput(static_cast<int>(i))) {
+                allSuccess = false;
+            }
+        }
+    }
+    
+    return allSuccess;
+}
+
+bool DRMOutputManager::applyResolutionModeToOutput(int index) {
+    DRMConnector* conn = getConnector(index);
+    if (!conn || !conn->connector) {
+        return false;
+    }
+    
+    const drmModeModeInfo* bestMode = nullptr;
+    
+    switch (resolutionMode_) {
+        case ResolutionMode::NATIVE:
+            bestMode = findBestMode(*conn, 0, 0, false);  // Use EDID preferred (panel's native)
+            break;
+            
+        case ResolutionMode::MAXIMUM:
+            bestMode = findBestMode(*conn, 0, 0, true);   // Use highest available
+            break;
+            
+        case ResolutionMode::HD_1080P:
+            bestMode = findBestMode(*conn, 1920, 1080, false);
+            if (!bestMode) {
+                // Fallback to any 1080-height mode
+                bestMode = findBestMode(*conn, 0, 1080, false);
+            }
+            break;
+            
+        case ResolutionMode::HD_720P:
+            bestMode = findBestMode(*conn, 1280, 720, false);
+            if (!bestMode) {
+                bestMode = findBestMode(*conn, 0, 720, false);
+            }
+            break;
+            
+        case ResolutionMode::UHD_4K:
+            bestMode = findBestMode(*conn, 3840, 2160, false);
+            if (!bestMode) {
+                // Try other 4K variants
+                bestMode = findBestMode(*conn, 4096, 2160, false);
+            }
+            break;
+            
+        case ResolutionMode::CUSTOM:
+            // Custom mode - don't change, use existing
+            return true;
+    }
+    
+    if (!bestMode) {
+        LOG_WARNING << "DRMOutputManager: No suitable mode found for " << conn->info.name
+                    << ", using current mode";
+        return false;
+    }
+    
+    // Update connector info with selected mode
+    conn->info.width = bestMode->hdisplay;
+    conn->info.height = bestMode->vdisplay;
+    if (bestMode->htotal && bestMode->vtotal) {
+        conn->info.refreshRate = (double)bestMode->clock * 1000.0 / 
+                                 ((double)bestMode->htotal * (double)bestMode->vtotal);
+    }
+    
+    LOG_INFO << "DRMOutputManager: " << conn->info.name << " configured to "
+             << bestMode->hdisplay << "x" << bestMode->vdisplay
+             << "@" << conn->info.refreshRate << "Hz";
+    
+    return true;
+}
+
+const drmModeModeInfo* DRMOutputManager::findBestMode(const DRMConnector& connector,
+                                                       int targetWidth, int targetHeight,
+                                                       bool preferHighest) const {
+    if (!connector.connector) {
+        return nullptr;
+    }
+    
+    const drmModeModeInfo* bestMode = nullptr;
+    int bestScore = -1;
+    
+    for (int i = 0; i < connector.connector->count_modes; ++i) {
+        const drmModeModeInfo* mode = &connector.connector->modes[i];
+        int score = 0;
+        
+        // Check if this mode matches target (if specified)
+        if (targetWidth > 0 && mode->hdisplay != static_cast<uint16_t>(targetWidth)) {
+            continue;
+        }
+        if (targetHeight > 0 && mode->vdisplay != static_cast<uint16_t>(targetHeight)) {
+            continue;
+        }
+        
+        // Calculate score
+        if (preferHighest) {
+            // Score based on total pixels
+            score = mode->hdisplay * mode->vdisplay;
+        } else {
+            // Prefer modes marked as preferred
+            if (mode->type & DRM_MODE_TYPE_PREFERRED) {
+                score = 1000000;  // High priority for preferred
+            }
+            // Add resolution as secondary factor
+            score += mode->hdisplay * mode->vdisplay / 1000;
+        }
+        
+        // Prefer higher refresh rate as tiebreaker
+        if (mode->htotal && mode->vtotal) {
+            double refresh = (double)mode->clock * 1000.0 / 
+                            ((double)mode->htotal * (double)mode->vtotal);
+            score += static_cast<int>(refresh);
+        }
+        
+        if (score > bestScore) {
+            bestScore = score;
+            bestMode = mode;
+        }
+    }
+    
+    return bestMode;
+}
+
 void DRMOutputManager::restoreOriginalModes() {
     for (auto& conn : connectors_) {
         if (conn.savedCrtc && conn.crtcId) {

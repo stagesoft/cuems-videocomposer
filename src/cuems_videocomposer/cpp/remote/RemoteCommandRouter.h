@@ -161,11 +161,18 @@ private:
     
     // Display configuration handlers (Phase 4)
     bool handleDisplayList(const std::vector<std::string>& args);
+    bool handleDisplayModes(const std::vector<std::string>& args);
     bool handleDisplayMode(const std::vector<std::string>& args);
+    bool handleDisplayResolutionMode(const std::vector<std::string>& args);
+    bool handleDisplayRegion(const std::vector<std::string>& args);
     bool handleDisplayAssign(const std::vector<std::string>& args);
     bool handleDisplayBlend(const std::vector<std::string>& args);
     bool handleDisplaySave(const std::vector<std::string>& args);
     bool handleDisplayLoad(const std::vector<std::string>& args);
+    
+    // Virtual output handlers (Phase 6)
+    bool handleOutputCapture(const std::vector<std::string>& args);
+    bool handleOutputList(const std::vector<std::string>& args);
 };
 
 } // namespace videocomposer

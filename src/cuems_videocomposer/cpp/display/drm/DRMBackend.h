@@ -33,6 +33,8 @@ class LayerManager;
 class OSDManager;
 class VirtualCanvas;
 class OutputBlitShader;
+class OutputSinkManager;
+class DisplayConfigurationManager;
 
 /**
  * DRMBackend - DRM/KMS display backend for direct rendering
@@ -94,14 +96,71 @@ public:
     // ===== DRM-Specific Methods =====
     
     /**
-     * Get all detected outputs
+     * Get all detected outputs (override)
      */
-    const std::vector<OutputInfo>& getOutputs() const;
+    std::vector<OutputInfo> getOutputs() const override;
     
     /**
-     * Get output count
+     * Get output count (override)
      */
-    size_t getOutputCount() const;
+    size_t getOutputCount() const override;
+    
+    /**
+     * Get output index by name (override)
+     */
+    int getOutputIndexByName(const std::string& name) const override;
+    
+    /**
+     * Configure output region (override)
+     */
+    bool configureOutputRegion(int outputIndex, int canvasX, int canvasY,
+                                int canvasWidth = 0, int canvasHeight = 0) override;
+    
+    /**
+     * Configure edge blending (override)
+     */
+    bool configureOutputBlend(int outputIndex, float left, float right,
+                               float top, float bottom, float gamma = 2.2f) override;
+    
+    /**
+     * Set output resolution/mode (override)
+     */
+    bool setOutputMode(int outputIndex, int width, int height, double refresh = 0.0) override;
+    
+    /**
+     * Enable/disable frame capture (override)
+     */
+    void setCaptureEnabled(bool enabled, int width = 0, int height = 0) override;
+    
+    /**
+     * Check if capture is enabled (override)
+     */
+    bool isCaptureEnabled() const override;
+    
+    /**
+     * Set output sink manager (override)
+     */
+    void setOutputSinkManager(OutputSinkManager* sinkManager) override;
+    
+    /**
+     * Set resolution mode (override)
+     */
+    bool setResolutionMode(const std::string& mode) override;
+    
+    /**
+     * Save display configuration (override)
+     */
+    bool saveConfiguration(const std::string& path = "") override;
+    
+    /**
+     * Load display configuration (override)
+     */
+    bool loadConfiguration(const std::string& path = "") override;
+    
+    /**
+     * Get configuration manager
+     */
+    DisplayConfigurationManager* getConfigManager() { return configManager_.get(); }
     
     /**
      * Get surface for a specific output
@@ -115,10 +174,9 @@ public:
     DRMSurface* getPrimarySurface();
     
     /**
-     * Set output mode
+     * Set output mode by name
      */
-    bool setOutputMode(int index, int width, int height, double refresh = 0.0);
-    bool setOutputMode(const std::string& name, int width, int height, double refresh = 0.0);
+    bool setOutputModeByName(const std::string& name, int width, int height, double refresh = 0.0);
     
     /**
      * Get DRM output manager
@@ -175,6 +233,7 @@ public:
 private:
     // DRM management
     std::unique_ptr<DRMOutputManager> outputManager_;
+    std::unique_ptr<DisplayConfigurationManager> configManager_;
     std::vector<std::unique_ptr<DRMSurface>> surfaces_;
     
     // Rendering - Legacy mode (per-output)

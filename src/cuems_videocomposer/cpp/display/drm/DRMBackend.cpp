@@ -4,6 +4,7 @@
 
 #include "DRMBackend.h"
 #include "../OpenGLRenderer.h"
+#include "../DisplayConfigurationManager.h"
 #include "../../layer/LayerManager.h"
 #include "../../layer/VideoLayer.h"
 #include "../../osd/OSDManager.h"
@@ -21,6 +22,7 @@ namespace videocomposer {
 
 DRMBackend::DRMBackend() {
     outputManager_ = std::make_unique<DRMOutputManager>();
+    configManager_ = std::make_unique<DisplayConfigurationManager>();
 }
 
 DRMBackend::~DRMBackend() {
@@ -162,21 +164,7 @@ bool DRMBackend::isWindowOpen() const {
 }
 
 void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
-    static int renderCallCount = 0;
-    renderCallCount++;
-    
-    if (renderCallCount <= 3) {
-        LOG_INFO << "DRMBackend::render called (call #" << renderCallCount << ")"
-                 << " initialized=" << initialized_
-                 << " surfaces=" << surfaces_.size()
-                 << " useVirtualCanvas=" << useVirtualCanvas_
-                 << " multiRenderer=" << (multiRenderer_ ? "yes" : "no");
-    }
-    
     if (!initialized_ || surfaces_.empty()) {
-        if (renderCallCount <= 3) {
-            LOG_ERROR << "DRMBackend::render: Early return - not initialized or no surfaces";
-        }
         return;
     }
     
@@ -189,23 +177,13 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
 
 void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osdManager) {
     if (!multiRenderer_) {
-        LOG_ERROR << "DRMBackend::renderVirtualCanvas: No multiRenderer!";
         return;
     }
     
     // Make primary surface context current for canvas rendering
     DRMSurface* primary = getPrimarySurface();
     if (!primary) {
-        LOG_ERROR << "DRMBackend::renderVirtualCanvas: No primary surface!";
         return;
-    }
-    
-    static int frameCount = 0;
-    bool debug = (frameCount++ < 5);
-    
-    if (debug) {
-        LOG_INFO << "DRMBackend::renderVirtualCanvas: Frame " << frameCount 
-                 << ", surfaces=" << surfaces_.size();
     }
     
     primary->makeCurrent();
@@ -218,31 +196,16 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     
     primary->releaseCurrent();
     
-    if (debug) {
-        LOG_INFO << "DRMBackend::renderVirtualCanvas: Scheduling page flips for " 
-                 << surfaces_.size() << " surfaces";
-    }
-    
     // Schedule page flips for all surfaces
-    for (size_t i = 0; i < surfaces_.size(); ++i) {
-        if (debug) {
-            LOG_INFO << "DRMBackend: Scheduling page flip for surface " << i;
-        }
-        surfaces_[i]->schedulePageFlip();
+    for (auto& surface : surfaces_) {
+        surface->schedulePageFlip();
     }
     
     // Wait for all flips to complete
-    for (size_t i = 0; i < surfaces_.size(); ++i) {
-        if (surfaces_[i]->isFlipPending()) {
-            if (debug) {
-                LOG_INFO << "DRMBackend: Waiting for flip on surface " << i;
-            }
-            surfaces_[i]->waitForFlip();
+    for (auto& surface : surfaces_) {
+        if (surface->isFlipPending()) {
+            surface->waitForFlip();
         }
-    }
-    
-    if (debug) {
-        LOG_INFO << "DRMBackend::renderVirtualCanvas: Frame complete";
     }
 }
 
@@ -405,12 +368,87 @@ VADisplay DRMBackend::getVADisplay() const {
 }
 #endif
 
-const std::vector<OutputInfo>& DRMBackend::getOutputs() const {
+std::vector<OutputInfo> DRMBackend::getOutputs() const {
     return outputManager_->getOutputs();
 }
 
 size_t DRMBackend::getOutputCount() const {
     return surfaces_.size();
+}
+
+int DRMBackend::getOutputIndexByName(const std::string& name) const {
+    for (size_t i = 0; i < surfaces_.size(); ++i) {
+        if (surfaces_[i]->getOutputInfo().name == name) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool DRMBackend::configureOutputRegion(int outputIndex, int canvasX, int canvasY,
+                                        int canvasWidth, int canvasHeight) {
+    if (outputIndex < 0 || outputIndex >= static_cast<int>(outputRegions_.size())) {
+        LOG_ERROR << "DRMBackend::configureOutputRegion: Invalid output index " << outputIndex;
+        return false;
+    }
+    
+    // Get output native dimensions if not specified
+    if (canvasWidth <= 0 || canvasHeight <= 0) {
+        const auto& info = surfaces_[outputIndex]->getOutputInfo();
+        if (canvasWidth <= 0) canvasWidth = info.width;
+        if (canvasHeight <= 0) canvasHeight = info.height;
+    }
+    
+    // Update the output region
+    outputRegions_[outputIndex].canvasX = canvasX;
+    outputRegions_[outputIndex].canvasY = canvasY;
+    outputRegions_[outputIndex].canvasWidth = canvasWidth;
+    outputRegions_[outputIndex].canvasHeight = canvasHeight;
+    
+    LOG_INFO << "DRMBackend: Configured output " << outputIndex 
+             << " region: " << canvasX << "," << canvasY
+             << " " << canvasWidth << "x" << canvasHeight;
+    
+    // Update MultiOutputRenderer if initialized
+    if (multiRenderer_) {
+        std::vector<OutputSurface*> surfacePtrs;
+        for (auto& surface : surfaces_) {
+            surfacePtrs.push_back(surface.get());
+        }
+        multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
+    }
+    
+    return true;
+}
+
+bool DRMBackend::configureOutputBlend(int outputIndex, float left, float right,
+                                       float top, float bottom, float gamma) {
+    if (outputIndex < 0 || outputIndex >= static_cast<int>(outputRegions_.size())) {
+        LOG_ERROR << "DRMBackend::configureOutputBlend: Invalid output index " << outputIndex;
+        return false;
+    }
+    
+    // Update blend configuration
+    outputRegions_[outputIndex].blend.left = left;
+    outputRegions_[outputIndex].blend.right = right;
+    outputRegions_[outputIndex].blend.top = top;
+    outputRegions_[outputIndex].blend.bottom = bottom;
+    outputRegions_[outputIndex].blend.gamma = gamma;
+    
+    LOG_INFO << "DRMBackend: Configured output " << outputIndex 
+             << " blend: L=" << left << " R=" << right
+             << " T=" << top << " B=" << bottom << " gamma=" << gamma;
+    
+    // Update MultiOutputRenderer if initialized
+    if (multiRenderer_) {
+        std::vector<OutputSurface*> surfacePtrs;
+        for (auto& surface : surfaces_) {
+            surfacePtrs.push_back(surface.get());
+        }
+        multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
+    }
+    
+    return true;
 }
 
 DRMSurface* DRMBackend::getSurface(int index) {
@@ -439,12 +477,157 @@ DRMSurface* DRMBackend::getPrimarySurface() {
     return nullptr;
 }
 
-bool DRMBackend::setOutputMode(int index, int width, int height, double refresh) {
-    return outputManager_->setMode(index, width, height, refresh);
+bool DRMBackend::setOutputMode(int outputIndex, int width, int height, double refresh) {
+    if (outputIndex < 0 || outputIndex >= static_cast<int>(surfaces_.size())) {
+        LOG_ERROR << "DRMBackend::setOutputMode: Invalid output index " << outputIndex;
+        return false;
+    }
+    
+    // Change the resolution via DRMOutputManager
+    if (!outputManager_->setMode(outputIndex, width, height, refresh)) {
+        LOG_ERROR << "DRMBackend::setOutputMode: Failed to set mode";
+        return false;
+    }
+    
+    LOG_INFO << "DRMBackend: Output " << outputIndex << " mode changed to "
+             << width << "x" << height;
+    
+    // Update the output region to match new resolution
+    if (outputIndex < static_cast<int>(outputRegions_.size())) {
+        outputRegions_[outputIndex].physicalWidth = width;
+        outputRegions_[outputIndex].physicalHeight = height;
+        
+        // If canvas size matches physical size, update canvas region too
+        if (outputRegions_[outputIndex].canvasWidth == 
+            static_cast<int>(surfaces_[outputIndex]->getWidth())) {
+            outputRegions_[outputIndex].canvasWidth = width;
+        }
+        if (outputRegions_[outputIndex].canvasHeight == 
+            static_cast<int>(surfaces_[outputIndex]->getHeight())) {
+            outputRegions_[outputIndex].canvasHeight = height;
+        }
+    }
+    
+    // Reconfigure MultiOutputRenderer with new regions
+    if (multiRenderer_) {
+        std::vector<OutputSurface*> surfacePtrs;
+        for (auto& surface : surfaces_) {
+            surfacePtrs.push_back(surface.get());
+        }
+        multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
+    }
+    
+    return true;
 }
 
-bool DRMBackend::setOutputMode(const std::string& name, int width, int height, double refresh) {
-    return outputManager_->setMode(name, width, height, refresh);
+bool DRMBackend::setOutputModeByName(const std::string& name, int width, int height, double refresh) {
+    int index = getOutputIndexByName(name);
+    if (index < 0) {
+        LOG_ERROR << "DRMBackend::setOutputModeByName: Unknown output '" << name << "'";
+        return false;
+    }
+    return setOutputMode(index, width, height, refresh);
+}
+
+void DRMBackend::setCaptureEnabled(bool enabled, int width, int height) {
+    if (!multiRenderer_) {
+        LOG_WARNING << "DRMBackend::setCaptureEnabled: No MultiOutputRenderer";
+        return;
+    }
+    
+    if (width > 0 && height > 0) {
+        multiRenderer_->setCaptureResolution(width, height);
+    }
+    
+    multiRenderer_->setCaptureEnabled(enabled);
+    
+    LOG_INFO << "DRMBackend: Capture " << (enabled ? "enabled" : "disabled");
+    if (enabled && width > 0 && height > 0) {
+        LOG_INFO << "  Resolution: " << width << "x" << height;
+    }
+}
+
+bool DRMBackend::isCaptureEnabled() const {
+    if (!multiRenderer_) {
+        return false;
+    }
+    return multiRenderer_->isCaptureEnabled();
+}
+
+void DRMBackend::setOutputSinkManager(OutputSinkManager* sinkManager) {
+    if (multiRenderer_) {
+        multiRenderer_->setOutputSinkManager(sinkManager);
+        LOG_INFO << "DRMBackend: Output sink manager " 
+                 << (sinkManager ? "connected" : "disconnected");
+    }
+}
+
+bool DRMBackend::setResolutionMode(const std::string& mode) {
+    if (!configManager_ || !outputManager_) {
+        return false;
+    }
+    
+    // Use config manager to parse and store the mode
+    if (!configManager_->setResolutionPolicyFromString(mode)) {
+        return false;
+    }
+    
+    // Map to DRMOutputManager's ResolutionMode
+    ResolutionPolicy policy = configManager_->getResolutionPolicy();
+    ResolutionMode resMode;
+    
+    switch (policy) {
+        case ResolutionPolicy::NATIVE:
+            resMode = ResolutionMode::NATIVE;
+            break;
+        case ResolutionPolicy::MAXIMUM:
+            resMode = ResolutionMode::MAXIMUM;
+            break;
+        case ResolutionPolicy::HD_1080P:
+            resMode = ResolutionMode::HD_1080P;
+            break;
+        case ResolutionPolicy::HD_720P:
+            resMode = ResolutionMode::HD_720P;
+            break;
+        case ResolutionPolicy::UHD_4K:
+            resMode = ResolutionMode::UHD_4K;
+            break;
+        default:
+            resMode = ResolutionMode::HD_1080P;
+            break;
+    }
+    
+    outputManager_->setResolutionMode(resMode);
+    outputManager_->applyResolutionMode();
+    
+    return true;
+}
+
+bool DRMBackend::saveConfiguration(const std::string& path) {
+    if (!configManager_) {
+        return false;
+    }
+    
+    std::string configPath = path.empty() ? 
+        DisplayConfigurationManager::getDefaultConfigPath() : path;
+    
+    return configManager_->saveToFile(configPath);
+}
+
+bool DRMBackend::loadConfiguration(const std::string& path) {
+    if (!configManager_) {
+        return false;
+    }
+    
+    std::string configPath = path.empty() ? 
+        DisplayConfigurationManager::getDefaultConfigPath() : path;
+    
+    if (!configManager_->loadFromFile(configPath)) {
+        return false;
+    }
+    
+    // Apply loaded configuration
+    return setResolutionMode(configManager_->getResolutionPolicyString());
 }
 
 void DRMBackend::initEGLExtensions() {
