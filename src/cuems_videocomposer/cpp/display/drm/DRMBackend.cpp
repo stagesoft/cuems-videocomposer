@@ -165,6 +165,11 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
             continue;
         }
         
+        // Set viewport for renderer (critical for aspect ratio calculations)
+        if (renderer_) {
+            renderer_->setViewport(0, 0, surface->getWidth(), surface->getHeight());
+        }
+        
         // Clear
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);

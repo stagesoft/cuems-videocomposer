@@ -571,7 +571,8 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 layerTextureCache_[layerId] = cache;
             }
             
-            // Upload frame data
+            // Upload frame data - ensure we're on texture unit 0
+            glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, shaderTextureId);
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
                             GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
