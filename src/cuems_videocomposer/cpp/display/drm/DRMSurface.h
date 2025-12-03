@@ -209,6 +209,7 @@ private:
     // Flip state
     bool flipPending_ = false;
     bool initialized_ = false;
+    bool modeSet_ = false;           // True if CRTC mode has been set (initial modeset done)
     
     // Ownership flags (for cleanup)
     bool ownGbmDevice_ = false;      // True if we created the GBM device

@@ -477,9 +477,48 @@ bool DRMSurface::schedulePageFlip() {
         }
     }
     
-    // Schedule page flip
-    int ret = drmModePageFlip(outputManager_->getFd(), crtcId_,
-                              nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
+    int ret;
+    
+    // First frame: use drmModeSetCrtc to set the mode and initial framebuffer
+    // Subsequent frames: use drmModePageFlip for vsync'd updates
+    if (!modeSet_) {
+        const DRMConnector* conn = outputManager_->getConnector(outputIndex_);
+        if (!conn || !conn->savedCrtc) {
+            LOG_ERROR << "DRMSurface: No connector info for initial modeset";
+            gbm_surface_release_buffer(gbmSurface_, bo);
+            return false;
+        }
+        
+        LOG_INFO << "DRMSurface: Setting initial mode for " << conn->info.name;
+        ret = drmModeSetCrtc(outputManager_->getFd(), crtcId_,
+                            nextFb_.fbId, 0, 0, &connectorId_, 1,
+                            &conn->savedCrtc->mode);
+        
+        if (ret != 0) {
+            LOG_ERROR << "DRMSurface: Initial modeset failed: " << strerror(-ret);
+            gbm_surface_release_buffer(gbmSurface_, bo);
+            return false;
+        }
+        
+        modeSet_ = true;
+        LOG_INFO << "DRMSurface: Initial modeset successful, framebuffer displayed";
+        
+        // Release previous buffer if any
+        if (currentBo_) {
+            gbm_surface_release_buffer(gbmSurface_, currentBo_);
+        }
+        currentBo_ = bo;
+        
+        // Swap framebuffers
+        std::swap(currentFb_, nextFb_);
+        
+        // No flip pending for modeset
+        return true;
+    }
+    
+    // Subsequent frames: use page flip for vsync
+    ret = drmModePageFlip(outputManager_->getFd(), crtcId_,
+                          nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
     
     if (ret != 0) {
         LOG_ERROR << "DRMSurface: Page flip failed: " << strerror(-ret);
