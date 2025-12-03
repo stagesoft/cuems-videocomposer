@@ -86,11 +86,15 @@ bool DRMSurface::init(EGLContext sharedContext) {
         { GBM_BO_USE_SCANOUT, "SCANOUT only" },
     };
     
+    // Track the format we successfully created
+    uint32_t gbmFormat = 0;
+    
     // Try all combinations
     for (const auto& fmt : formats) {
         for (const auto& usage : usageFlags) {
             gbmSurface_ = gbm_surface_create(gbmDevice_, width_, height_, fmt.format, usage.flags);
             if (gbmSurface_) {
+                gbmFormat = fmt.format;
                 LOG_INFO << "DRMSurface: Created GBM surface with format " << fmt.name 
                          << ", usage " << usage.name;
                 goto gbm_surface_created;
@@ -109,13 +113,24 @@ bool DRMSurface::init(EGLContext sharedContext) {
     
 gbm_surface_created:
     
-    // Initialize EGL
+    // Initialize EGL - prefer platform-aware functions for GBM
     PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
         (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     
+    // Also get the platform window surface function - required for GBM on Mesa/Intel
+    PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC eglCreatePlatformWindowSurfaceEXT =
+        (PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC)eglGetProcAddress("eglCreatePlatformWindowSurfaceEXT");
+    
+    bool usingPlatformDisplay = false;
     if (eglGetPlatformDisplayEXT) {
         eglDisplay_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbmDevice_, nullptr);
-    } else {
+        if (eglDisplay_ != EGL_NO_DISPLAY) {
+            usingPlatformDisplay = true;
+        }
+    }
+    
+    if (eglDisplay_ == EGL_NO_DISPLAY) {
+        // Fallback to legacy path
         eglDisplay_ = eglGetDisplay((EGLNativeDisplayType)gbmDevice_);
     }
     
@@ -144,29 +159,58 @@ gbm_surface_created:
         }
     }
     
-    // Choose EGL config
+    // Log the GBM format we're using
+    LOG_INFO << "DRMSurface: GBM surface format: 0x" << std::hex << gbmFormat << std::dec;
+    
+    // Choose EGL config that matches GBM format
+    // For GBM, we need to find a config with matching EGL_NATIVE_VISUAL_ID
     EGLint configAttribs[] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
         EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 0,
+        EGL_ALPHA_SIZE, (gbmFormat == GBM_FORMAT_ARGB8888 || gbmFormat == GBM_FORMAT_ABGR8888) ? 8 : 0,
         EGL_DEPTH_SIZE, 0,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
         EGL_NONE
     };
     
+    // Get all matching configs, then find one with matching native visual
+    EGLConfig configs[64];
     EGLint numConfigs;
-    if (!eglChooseConfig(eglDisplay_, configAttribs, &eglConfig_, 1, &numConfigs) ||
-        numConfigs == 0) {
+    if (!eglChooseConfig(eglDisplay_, configAttribs, configs, 64, &numConfigs) || numConfigs == 0) {
         // Try OpenGL ES
         configAttribs[13] = EGL_OPENGL_ES2_BIT;
-        if (!eglChooseConfig(eglDisplay_, configAttribs, &eglConfig_, 1, &numConfigs) ||
-            numConfigs == 0) {
+        if (!eglChooseConfig(eglDisplay_, configAttribs, configs, 64, &numConfigs) || numConfigs == 0) {
             LOG_ERROR << "DRMSurface: Failed to choose EGL config";
             cleanup();
             return false;
         }
+    }
+    
+    LOG_INFO << "DRMSurface: Found " << numConfigs << " matching EGL configs";
+    
+    // Find config with matching native visual ID (GBM format)
+    eglConfig_ = nullptr;
+    for (int i = 0; i < numConfigs; i++) {
+        EGLint visualId;
+        if (eglGetConfigAttrib(eglDisplay_, configs[i], EGL_NATIVE_VISUAL_ID, &visualId)) {
+            if (static_cast<uint32_t>(visualId) == gbmFormat) {
+                eglConfig_ = configs[i];
+                LOG_INFO << "DRMSurface: Found matching EGL config (visual 0x" 
+                         << std::hex << visualId << std::dec << ")";
+                break;
+            }
+        }
+    }
+    
+    // Fallback: use first config if no exact match
+    if (!eglConfig_) {
+        eglConfig_ = configs[0];
+        EGLint visualId;
+        eglGetConfigAttrib(eglDisplay_, eglConfig_, EGL_NATIVE_VISUAL_ID, &visualId);
+        LOG_WARNING << "DRMSurface: No exact format match, using config with visual 0x" 
+                    << std::hex << visualId << std::dec;
     }
     
     // Create EGL context
@@ -191,12 +235,40 @@ gbm_surface_created:
     }
     
     // Create EGL surface from GBM surface
-    eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
-                                         (EGLNativeWindowType)gbmSurface_, nullptr);
+    // Use platform-aware function if available (required for Intel/Mesa with GBM)
+    if (usingPlatformDisplay && eglCreatePlatformWindowSurfaceEXT) {
+        LOG_INFO << "DRMSurface: Using eglCreatePlatformWindowSurfaceEXT for GBM surface";
+        eglSurface_ = eglCreatePlatformWindowSurfaceEXT(eglDisplay_, eglConfig_, gbmSurface_, nullptr);
+    } else {
+        LOG_INFO << "DRMSurface: Using legacy eglCreateWindowSurface";
+        eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
+                                             (EGLNativeWindowType)gbmSurface_, nullptr);
+    }
+    
     if (eglSurface_ == EGL_NO_SURFACE) {
         EGLint eglError = eglGetError();
         LOG_ERROR << "DRMSurface: Failed to create EGL surface (EGL error: " << eglError << ")";
-        LOG_ERROR << "DRMSurface: This typically happens when the GPU is already in use by X11/Wayland";
+        
+        // Provide more specific error info
+        switch (eglError) {
+            case EGL_BAD_NATIVE_WINDOW:  // 0x3009 = 12297
+                LOG_ERROR << "DRMSurface: EGL_BAD_NATIVE_WINDOW - GBM surface not accepted as window";
+                LOG_ERROR << "DRMSurface: This can happen when:";
+                LOG_ERROR << "DRMSurface:   - GPU is already in use by X11/Wayland";
+                LOG_ERROR << "DRMSurface:   - EGL config incompatible with GBM surface format";
+                LOG_ERROR << "DRMSurface:   - Driver doesn't support EGL_PLATFORM_GBM";
+                break;
+            case EGL_BAD_MATCH:
+                LOG_ERROR << "DRMSurface: EGL_BAD_MATCH - Config/surface format mismatch";
+                break;
+            case EGL_BAD_ALLOC:
+                LOG_ERROR << "DRMSurface: EGL_BAD_ALLOC - Cannot allocate surface resources";
+                break;
+            default:
+                LOG_ERROR << "DRMSurface: Check EGL error code: " << eglError;
+                break;
+        }
+        
         LOG_ERROR << "DRMSurface: For DRM direct rendering, run from a TTY (Ctrl+Alt+F2) without X/Wayland";
         cleanup();
         return false;
