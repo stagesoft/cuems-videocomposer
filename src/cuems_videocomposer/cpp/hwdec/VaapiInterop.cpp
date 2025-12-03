@@ -54,8 +54,6 @@ VaapiInterop::VaapiInterop()
     , eglCreateImageKHR_(nullptr)
     , eglDestroyImageKHR_(nullptr)
     , glEGLImageTargetTexture2DOES_(nullptr)
-    , glEGLImageTargetTexStorageEXT_(nullptr)
-    , useTexStorage_(false)
     , eglCreateSyncKHR_(nullptr)
     , eglDestroySyncKHR_(nullptr)
     , eglClientWaitSyncKHR_(nullptr)
@@ -80,7 +78,6 @@ VaapiInterop::VaapiInterop()
     , debugLastEglImageUV_(EGL_NO_IMAGE_KHR)
     , debugReadbackEnabled_(false)  // Set to true for detailed debugging
     // Experimental fixes
-    , forceNewTexturesPerFrame_(true)  // ENABLED: Force new textures like mpv does
     , keepFDsOpen_(true)  // ENABLED: Keep DMA-BUF FDs open until frame release
     , openYFd_(-1)
     , openUVFd_(-1)
@@ -147,24 +144,13 @@ bool VaapiInterop::init(DisplayBackend* display) {
     eglDestroyImageKHR_ = display->getEglDestroyImageKHR();
     glEGLImageTargetTexture2DOES_ = display->getGlEGLImageTargetTexture2DOES();
     
-    // For desktop OpenGL, use glEGLImageTargetTexStorageEXT (GL_EXT_EGL_image_storage)
-    // This is the proper desktop GL extension (mpv uses this for desktop, Texture2DOES for ES)
-    glEGLImageTargetTexStorageEXT_ = (PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC)
-        eglGetProcAddress("glEGLImageTargetTexStorageEXT");
-    
-    // MPV approach: Prefer glEGLImageTargetTexStorageEXT (immutable textures) on Desktop GL
-    // With forceNewTexturesPerFrame_ enabled, we create new textures each frame anyway
-    // Immutable textures ensure the GPU cannot cache stale data from previous textures
-    if (glEGLImageTargetTexStorageEXT_) {
-        useTexStorage_ = true;
-        LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexStorageEXT (immutable textures - mpv approach)";
-    } else if (glEGLImageTargetTexture2DOES_) {
-        useTexStorage_ = false;
-        LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexture2DOES (mutable textures)";
-    } else {
-        LOG_ERROR << "VaapiInterop: Neither glEGLImageTargetTexture2DOES nor glEGLImageTargetTexStorageEXT available";
+    // Use glEGLImageTargetTexture2DOES exclusively - best DRM/KMS compatibility
+    // Works on ES, Desktop GL, and DRM/KMS (unlike TexStorageEXT which fails on DRM)
+    if (!glEGLImageTargetTexture2DOES_) {
+        LOG_ERROR << "VaapiInterop: glEGLImageTargetTexture2DOES not available";
         return false;
     }
+    LOG_INFO << "VaapiInterop: Using glEGLImageTargetTexture2DOES (DRM/KMS compatible)";
     
     if (!eglCreateImageKHR_ || !eglDestroyImageKHR_) {
         LOG_ERROR << "VaapiInterop: Missing EGL extension functions";
@@ -195,12 +181,9 @@ bool VaapiInterop::init(DisplayBackend* display) {
     
     // MPV approach: Textures are NOT created in init()
     // - For glEGLImageTargetTexture2DOES (ES): textures created once in init and reused
-    // - For glEGLImageTargetTexStorageEXT (Desktop): textures created per-frame in bindTexturesToImages
-    // Since we use Desktop GL (glEGLImageTargetTexStorageEXT), don't create textures here
-    // They will be created in bindTexturesToImages() for each frame
-    
+    // Textures created on first bind, reused for subsequent frames
     initialized_ = true;
-    LOG_INFO << "VaapiInterop initialized successfully (textures will be created per-frame)";
+    LOG_INFO << "VaapiInterop initialized successfully";
     
     return true;
 }
@@ -622,32 +605,9 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         return false;
     }
     
-    // MPV approach for desktop OpenGL (glEGLImageTargetTexStorageEXT):
-    //   - Textures are immutable, must recreate each frame
-    //   - Set parameters at creation time, before binding EGL image
-    //   - Keep OLD textures alive until NEW textures are bound (prevents stale texture IDs)
-    // MPV approach for OpenGL ES (glEGLImageTargetTexture2DOES):
-    //   - Textures are mutable, can be reused
-    //   - Set parameters after binding EGL image
-    
-    bool needNewTextures = (textureY_ == 0 || textureUV_ == 0);
-    
-    // Save old texture IDs to delete AFTER new textures are created
-    // This prevents GPUTextureFrameBuffer from holding stale/deleted texture IDs
-    GLuint oldTextureY = textureY_;
-    GLuint oldTextureUV = textureUV_;
-    
-    // If using glEGLImageTargetTexStorageEXT (desktop GL), textures are immutable
-    // Must create new textures for each frame (like mpv does)
-    // ALSO: If forceNewTexturesPerFrame_ is enabled, always create new textures
-    // This is an experimental fix for GPU texture caching issues
-    if (useTexStorage_ || forceNewTexturesPerFrame_) {
-        textureY_ = 0;
-        textureUV_ = 0;
-        needNewTextures = true;
-    }
-    
-    if (needNewTextures) {
+    // glEGLImageTargetTexture2DOES: textures are mutable, can be reused
+    // Create textures once, reuse for all frames
+    if (textureY_ == 0 || textureUV_ == 0) {
         glGenTextures(1, &textureY_);
         glGenTextures(1, &textureUV_);
         
@@ -656,9 +616,7 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
             return false;
         }
         
-        // IMPORTANT: Set texture parameters at creation time (like mpv does)
-        // For glEGLImageTargetTexStorageEXT, textures become immutable after binding
-        // so parameters must be set now, not after
+        // Set texture parameters
         glBindTexture(GL_TEXTURE_2D, textureY_);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -674,71 +632,26 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         glBindTexture(GL_TEXTURE_2D, 0);
     }
     
-    // Bind EGL images to OpenGL textures (like mpv does in vaapi_gl_map)
-    // Desktop GL: glEGLImageTargetTexStorageEXT - textures are immutable
-    // OpenGL ES: glEGLImageTargetTexture2DOES - textures are mutable
-    // Note: Some drivers (Intel on DRM) may fail with TexStorage, so we fallback to Texture2DOES
-    
-    // Debug: Check if we're in the same context as when EGL image was created
-    EGLDisplay bindDisplay = eglGetCurrentDisplay();
-    EGLContext bindContext = eglGetCurrentContext();
-    static bool loggedBindOnce = false;
-    if (!loggedBindOnce) {
-        LOG_INFO << "VaapiInterop: Binding textures - display=" << bindDisplay 
-                << ", context=" << bindContext;
-        loggedBindOnce = true;
-    }
-    
     glBindTexture(GL_TEXTURE_2D, textureY_);
     bool bindSuccess = false;
     
-    if (useTexStorage_ && glEGLImageTargetTexStorageEXT_) {
-        glEGLImageTargetTexStorageEXT_(GL_TEXTURE_2D, eglImageY_, nullptr);
-        GLenum glError = glGetError();
-        if (glError == GL_NO_ERROR) {
-            bindSuccess = true;
-        } else {
-            // TexStorage failed - try fallback to Texture2DOES
-            if (glEGLImageTargetTexture2DOES_) {
-                static bool warnedOnce = false;
-                if (!warnedOnce) {
-                    LOG_WARNING << "VaapiInterop: glEGLImageTargetTexStorageEXT failed (0x" 
-                               << std::hex << glError << std::dec 
-                               << "), falling back to glEGLImageTargetTexture2DOES";
-                    warnedOnce = true;
-                }
-                // Clear the error
-                glGetError();
-                // Try legacy method
-                glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageY_);
-                if (glGetError() == GL_NO_ERROR) {
-                    bindSuccess = true;
-                    useTexStorage_ = false;  // Switch to legacy mode
-                }
-            }
-        }
-    } else if (glEGLImageTargetTexture2DOES_) {
+    // Use glEGLImageTargetTexture2DOES exclusively (mpv approach for compatibility)
+    if (glEGLImageTargetTexture2DOES_) {
         glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageY_);
         GLenum err = glGetError();
         if (err == GL_NO_ERROR) {
             bindSuccess = true;
         } else {
-            LOG_WARNING << "VaapiInterop: glEGLImageTargetTexture2DOES failed with 0x" 
-                       << std::hex << err << std::dec;
+            static int errCount = 0;
+            if (errCount++ < 5) {
+                LOG_WARNING << "VaapiInterop: glEGLImageTargetTexture2DOES Y failed: 0x" 
+                           << std::hex << err << std::dec;
+            }
         }
     }
     
     if (!bindSuccess) {
-        // Debug: Check GL context and EGL state
-        EGLContext ctx = eglGetCurrentContext();
-        EGLDisplay dpy = eglGetCurrentDisplay();
-        LOG_ERROR << "VaapiInterop: Failed to bind Y plane with any method"
-                  << " - EGL context=" << (ctx != EGL_NO_CONTEXT ? "valid" : "NONE")
-                  << ", EGL display=" << (dpy != EGL_NO_DISPLAY ? "valid" : "NONE")
-                  << ", eglImageY_=" << (eglImageY_ != EGL_NO_IMAGE_KHR ? "valid" : "NONE")
-                  << ", useTexStorage_=" << useTexStorage_
-                  << ", hasTexStorageEXT=" << (glEGLImageTargetTexStorageEXT_ ? "yes" : "no")
-                  << ", hasTexture2DOES=" << (glEGLImageTargetTexture2DOES_ ? "yes" : "no");
+        LOG_ERROR << "VaapiInterop: Failed to bind Y plane";
         glBindTexture(GL_TEXTURE_2D, 0);
         return false;
     }
@@ -746,15 +659,18 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     glBindTexture(GL_TEXTURE_2D, textureUV_);
     bindSuccess = false;
     
-    if (useTexStorage_ && glEGLImageTargetTexStorageEXT_) {
-        glEGLImageTargetTexStorageEXT_(GL_TEXTURE_2D, eglImageUV_, nullptr);
-        if (glGetError() == GL_NO_ERROR) {
-            bindSuccess = true;
-        }
-    } else if (glEGLImageTargetTexture2DOES_) {
+    // Use glEGLImageTargetTexture2DOES exclusively (mpv approach)
+    if (glEGLImageTargetTexture2DOES_) {
         glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageUV_);
-        if (glGetError() == GL_NO_ERROR) {
+        GLenum err = glGetError();
+        if (err == GL_NO_ERROR) {
             bindSuccess = true;
+        } else {
+            static int errCount = 0;
+            if (errCount++ < 5) {
+                LOG_WARNING << "VaapiInterop: glEGLImageTargetTexture2DOES UV failed: 0x" 
+                           << std::hex << err << std::dec;
+            }
         }
     }
     
@@ -785,17 +701,6 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         }
     }
     
-    // CRITICAL: Delete OLD textures AFTER new textures are bound
-    // This prevents GPUTextureFrameBuffer from holding stale deleted texture IDs
-    // With glEGLImageTargetTexStorageEXT or forceNewTexturesPerFrame_, textures must be recreated
-    if (useTexStorage_ || forceNewTexturesPerFrame_) {
-        if (oldTextureY != 0) {
-            glDeleteTextures(1, &oldTextureY);
-        }
-        if (oldTextureUV != 0) {
-            glDeleteTextures(1, &oldTextureUV);
-        }
-    }
     
     // CRITICAL: NOW destroy old EGL images (after new textures are bound)
     // The GPU is now sampling from new textures, so old EGL images can be released
@@ -1031,21 +936,9 @@ EGLImageKHR VaapiInterop::createEGLImageFromDmaBuf(
         };
         
         // Use eglGetCurrentDisplay() like mpv does - must match current GL context
-        // This is critical for proper EGL image binding
         EGLDisplay currentDisplay = eglGetCurrentDisplay();
-        EGLContext currentContext = eglGetCurrentContext();
-        static bool loggedOnce = false;
-        if (!loggedOnce) {
-            LOG_INFO << "VaapiInterop: Creating EGL image - display=" << currentDisplay 
-                    << ", context=" << currentContext << " (modifier=0x" << std::hex << modifier << std::dec << ")";
-            loggedOnce = true;
-        }
         if (currentDisplay == EGL_NO_DISPLAY) {
-            LOG_ERROR << "VaapiInterop: No current EGL display when creating EGL image!";
-            return EGL_NO_IMAGE_KHR;
-        }
-        if (currentContext == EGL_NO_CONTEXT) {
-            LOG_ERROR << "VaapiInterop: No current EGL context when creating EGL image!";
+            LOG_ERROR << "VaapiInterop: No current EGL display";
             return EGL_NO_IMAGE_KHR;
         }
         EGLImageKHR image = eglCreateImageKHR_(

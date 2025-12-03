@@ -176,11 +176,8 @@ private:
     // EGL extension function pointers (from DisplayBackend)
     PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR_;
     PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR_;
-    // GL_OES_EGL_image (OpenGL ES) - may be null on desktop GL
+    // GL_OES_EGL_image - works on both ES and Desktop GL, best DRM/KMS compatibility
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES_;
-    // GL_EXT_EGL_image_storage (Desktop OpenGL) - preferred on desktop
-    PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC glEGLImageTargetTexStorageEXT_;
-    bool useTexStorage_;  // true if using EGLImageTargetTexStorageEXT
     
     // EGL sync extension functions
     PFNEGLCREATESYNCKHRPROC eglCreateSyncKHR_;
@@ -227,10 +224,6 @@ private:
     bool debugReadbackEnabled_;
     
     // ========== EXPERIMENTAL FIXES ==========
-    // Force new textures every frame (mpv approach for Desktop GL)
-    // This may fix GPU texture caching issues
-    bool forceNewTexturesPerFrame_;
-    
     // Keep DMA-BUF FDs open until frame is released (instead of closing immediately)
     // Some drivers may lose reference when FD is closed
     bool keepFDsOpen_;
