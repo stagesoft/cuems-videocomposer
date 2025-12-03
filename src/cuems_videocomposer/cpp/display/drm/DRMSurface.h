@@ -67,6 +67,14 @@ public:
     void cleanup();
     
     /**
+     * Reinitialize with new mode/resolution
+     * @param width New width
+     * @param height New height
+     * @return true on success
+     */
+    bool resize(int width, int height);
+    
+    /**
      * Check if initialized
      */
     bool isInitialized() const { return initialized_; }

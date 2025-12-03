@@ -483,39 +483,83 @@ bool DRMBackend::setOutputMode(int outputIndex, int width, int height, double re
         return false;
     }
     
-    // Change the resolution via DRMOutputManager
-    if (!outputManager_->setMode(outputIndex, width, height, refresh)) {
-        LOG_ERROR << "DRMBackend::setOutputMode: Failed to set mode";
+    DRMSurface* surface = surfaces_[outputIndex].get();
+    if (!surface) {
+        LOG_ERROR << "DRMBackend::setOutputMode: No surface for output " << outputIndex;
         return false;
     }
     
-    LOG_INFO << "DRMBackend: Output " << outputIndex << " mode changed to "
-             << width << "x" << height;
+    // Check if resolution is actually changing
+    int oldWidth = static_cast<int>(surface->getWidth());
+    int oldHeight = static_cast<int>(surface->getHeight());
     
-    // Update the output region to match new resolution
+    if (width == oldWidth && height == oldHeight) {
+        LOG_INFO << "DRMBackend::setOutputMode: Already at " << width << "x" << height;
+        return true;
+    }
+    
+    LOG_INFO << "DRMBackend: Changing output " << outputIndex << " from "
+             << oldWidth << "x" << oldHeight << " to " << width << "x" << height;
+    
+    // Step 1: Set DRM mode (performs drmModeSetCrtc)
+    if (!outputManager_->setMode(outputIndex, width, height, refresh)) {
+        LOG_ERROR << "DRMBackend::setOutputMode: Failed to set DRM mode";
+        return false;
+    }
+    
+    // Step 2: Resize the GBM/EGL surface
+    if (!surface->resize(width, height)) {
+        LOG_ERROR << "DRMBackend::setOutputMode: Failed to resize surface";
+        return false;
+    }
+    
+    // Step 3: Update output regions
     if (outputIndex < static_cast<int>(outputRegions_.size())) {
-        outputRegions_[outputIndex].physicalWidth = width;
-        outputRegions_[outputIndex].physicalHeight = height;
+        OutputRegion& region = outputRegions_[outputIndex];
         
-        // If canvas size matches physical size, update canvas region too
-        if (outputRegions_[outputIndex].canvasWidth == 
-            static_cast<int>(surfaces_[outputIndex]->getWidth())) {
-            outputRegions_[outputIndex].canvasWidth = width;
+        // Update physical size
+        region.physicalWidth = width;
+        region.physicalHeight = height;
+        
+        // Update canvas region if it was matching physical size
+        if (region.canvasWidth == oldWidth) {
+            region.canvasWidth = width;
         }
-        if (outputRegions_[outputIndex].canvasHeight == 
-            static_cast<int>(surfaces_[outputIndex]->getHeight())) {
-            outputRegions_[outputIndex].canvasHeight = height;
+        if (region.canvasHeight == oldHeight) {
+            region.canvasHeight = height;
         }
     }
     
-    // Reconfigure MultiOutputRenderer with new regions
+    // Step 4: Recalculate canvas size and reconfigure renderer
     if (multiRenderer_) {
+        // Recalculate total canvas size
+        int canvasWidth = 0, canvasHeight = 0;
+        for (const auto& region : outputRegions_) {
+            int right = region.canvasX + region.canvasWidth;
+            int bottom = region.canvasY + region.canvasHeight;
+            canvasWidth = std::max(canvasWidth, right);
+            canvasHeight = std::max(canvasHeight, bottom);
+        }
+        
+        // Resize virtual canvas if needed
+        VirtualCanvas* canvas = multiRenderer_->getCanvas();
+        if (canvas && (canvasWidth != canvas->getWidth() || 
+                       canvasHeight != canvas->getHeight())) {
+            LOG_INFO << "DRMBackend: Resizing virtual canvas to " 
+                     << canvasWidth << "x" << canvasHeight;
+            canvas->configure(canvasWidth, canvasHeight);
+        }
+        
+        // Reconfigure renderer with new regions
         std::vector<OutputSurface*> surfacePtrs;
-        for (auto& surface : surfaces_) {
-            surfacePtrs.push_back(surface.get());
+        for (auto& s : surfaces_) {
+            surfacePtrs.push_back(s.get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
+    
+    LOG_INFO << "DRMBackend: Output " << outputIndex << " successfully changed to "
+             << width << "x" << height;
     
     return true;
 }

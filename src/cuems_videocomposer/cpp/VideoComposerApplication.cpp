@@ -193,6 +193,11 @@ bool VideoComposerApplication::initializeDisplay() {
         LOG_INFO << "No display server detected - attempting DRM/KMS direct rendering";
         auto drmBackend = std::make_unique<DRMBackend>();
         
+        // Apply resolution mode from command line
+        std::string resMode = config_->getString("resolution_mode", "1080p");
+        drmBackend->setResolutionMode(resMode);
+        LOG_INFO << "Resolution mode: " << resMode;
+        
         if (drmBackend->openWindow()) {
             LOG_INFO << "DRM/KMS backend initialized with " << drmBackend->getOutputCount() << " output(s)";
             displayBackend_ = std::move(drmBackend);

@@ -32,6 +32,7 @@ void ConfigurationManager::loadDefaults() {
     setBool("start_ontop", false);
     setBool("want_noindex", false); // Index frames by default for frame-accurate seeking
     setString("hardware_decoder", "auto");
+    setString("resolution_mode", "1080p"); // Default resolution mode
 }
 
 bool ConfigurationManager::loadFromFile(const std::string& filename) {
@@ -143,6 +144,14 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
                 // Optional timeout argument
                 setInt("ndi_discovery_timeout", std::atoi(argv[++i]));
             }
+        } else if (arg == "--resolution" || arg == "--res" || arg == "-r") {
+            if (i + 1 < argc) {
+                std::string value = argv[++i];
+                // Store lowercase for consistency
+                std::transform(value.begin(), value.end(), value.begin(), 
+                              [](unsigned char c) { return std::tolower(c); });
+                setString("resolution_mode", value);
+            }
         } else if (arg[0] != '-') {
             // Assume it's a movie file
             if (movieFile_.empty()) {
@@ -232,6 +241,12 @@ void ConfigurationManager::printUsage() const {
     printf("  -s, --fullscreen        start in fullscreen mode\n");
     printf("  -a, --ontop             start window on top\n");
     printf("  --hw-decode MODE      select hardware decoder: auto (default), software, vaapi, cuda\n");
+    printf("  -r, --resolution MODE set display resolution mode:\n");
+    printf("                         native  - use panel's true pixels (EDID preferred)\n");
+    printf("                         maximum - use highest available resolution\n");
+    printf("                         1080p   - force 1920x1080 (default)\n");
+    printf("                         720p    - force 1280x720\n");
+    printf("                         4k      - force 3840x2160\n");
 #ifdef HAVE_NDI_SDK
     printf("  --discover-ndi [SEC]  discover and list available NDI sources (optional timeout in seconds)\n");
 #endif

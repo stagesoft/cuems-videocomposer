@@ -379,6 +379,80 @@ void DRMSurface::cleanup() {
     initialized_ = false;
 }
 
+bool DRMSurface::resize(int width, int height) {
+    if (!outputManager_ || !gbmDevice_) {
+        LOG_ERROR << "DRMSurface::resize: Not properly initialized";
+        return false;
+    }
+    
+    if (width <= 0 || height <= 0) {
+        LOG_ERROR << "DRMSurface::resize: Invalid dimensions " << width << "x" << height;
+        return false;
+    }
+    
+    if (width == static_cast<int>(width_) && height == static_cast<int>(height_)) {
+        LOG_INFO << "DRMSurface::resize: Already at " << width << "x" << height;
+        return true;
+    }
+    
+    LOG_INFO << "DRMSurface::resize: Resizing from " << width_ << "x" << height_ 
+             << " to " << width << "x" << height;
+    
+    // Wait for pending flip
+    if (flipPending_) {
+        waitForFlip();
+    }
+    
+    // Destroy old framebuffers
+    destroyFramebuffer(currentFb_);
+    destroyFramebuffer(nextFb_);
+    
+    // Release current BO
+    if (currentBo_ && gbmSurface_) {
+        gbm_surface_release_buffer(gbmSurface_, currentBo_);
+        currentBo_ = nullptr;
+    }
+    
+    // Destroy old EGL surface
+    if (eglDisplay_ != EGL_NO_DISPLAY && eglSurface_ != EGL_NO_SURFACE) {
+        eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroySurface(eglDisplay_, eglSurface_);
+        eglSurface_ = EGL_NO_SURFACE;
+    }
+    
+    // Destroy old GBM surface
+    if (gbmSurface_) {
+        gbm_surface_destroy(gbmSurface_);
+        gbmSurface_ = nullptr;
+    }
+    
+    // Update dimensions
+    width_ = static_cast<uint32_t>(width);
+    height_ = static_cast<uint32_t>(height);
+    
+    // Create new GBM surface
+    gbmSurface_ = gbm_surface_create(gbmDevice_, width_, height_,
+                                      GBM_FORMAT_XRGB8888,
+                                      GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+    if (!gbmSurface_) {
+        LOG_ERROR << "DRMSurface::resize: Failed to create new GBM surface";
+        return false;
+    }
+    
+    // Create new EGL surface
+    eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
+                                          (EGLNativeWindowType)gbmSurface_, nullptr);
+    if (eglSurface_ == EGL_NO_SURFACE) {
+        LOG_ERROR << "DRMSurface::resize: Failed to create new EGL surface";
+        gbm_surface_destroy(gbmSurface_);
+        gbmSurface_ = nullptr;
+        return false;
+    }
+    
+    LOG_INFO << "DRMSurface::resize: Successfully resized to " << width << "x" << height;
+    return true;
+}
+
 const OutputInfo& DRMSurface::getOutputInfo() const {
     static OutputInfo defaultInfo;
     const DRMConnector* conn = outputManager_->getConnector(outputIndex_);
