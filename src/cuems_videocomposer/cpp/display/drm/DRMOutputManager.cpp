@@ -50,6 +50,14 @@ DRMOutputManager::~DRMOutputManager() {
 }
 
 bool DRMOutputManager::init(const std::string& devicePath) {
+    // Initialize seat manager (for user-space DRM master access)
+    seatManager_ = std::make_unique<SeatManager>();
+    if (!seatManager_->init()) {
+        LOG_WARNING << "DRMOutputManager: Failed to initialize seat manager";
+        LOG_WARNING << "DRMOutputManager: Will attempt direct device access (may require root)";
+        // Continue anyway - might work with root or proper permissions
+    }
+    
     // Determine device path
     std::string path = devicePath;
     if (path.empty()) {
@@ -137,10 +145,21 @@ void DRMOutputManager::cleanup() {
         resources_ = nullptr;
     }
     
-    // Close device
+    // Close device (via seat manager if available)
     if (drmFd_ >= 0) {
-        close(drmFd_);
+        if (seatManager_ && seatManager_->isInitialized()) {
+            seatManager_->disableDevice(drmFd_);
+            seatManager_->closeDevice(drmFd_);
+        } else {
+            close(drmFd_);
+        }
         drmFd_ = -1;
+    }
+    
+    // Cleanup seat manager
+    if (seatManager_) {
+        seatManager_->cleanup();
+        seatManager_.reset();
     }
     
     devicePath_.clear();
@@ -215,28 +234,39 @@ std::string DRMOutputManager::autoDetectDevice() {
 }
 
 bool DRMOutputManager::openDRMDevice(const std::string& path) {
-    drmFd_ = open(path.c_str(), O_RDWR | O_CLOEXEC);
-    if (drmFd_ < 0) {
-        LOG_ERROR << "DRMOutputManager: Cannot open " << path 
-                  << ": " << strerror(errno);
-        LOG_ERROR << "Ensure user is in 'video' group or running as root";
-        return false;
-    }
-    
-    // Check if this is a master DRM device
-    drm_magic_t magic;
-    if (drmGetMagic(drmFd_, &magic) == 0) {
-        if (drmAuthMagic(drmFd_, magic) != 0) {
-            // Not master, try to become master
-            if (drmSetMaster(drmFd_) != 0) {
-                LOG_WARNING << "DRMOutputManager: Could not become DRM master";
-                // Continue anyway - might work for rendering
-            }
+    // Open device via seat manager if available, otherwise direct open
+    if (seatManager_ && seatManager_->isInitialized()) {
+        drmFd_ = seatManager_->openDevice(path);
+        if (drmFd_ < 0) {
+            LOG_ERROR << "DRMOutputManager: Cannot open " << path << " via seat manager";
+            return false;
+        }
+        
+        // Enable device (acquire DRM master)
+        if (!seatManager_->enableDevice(drmFd_)) {
+            LOG_WARNING << "DRMOutputManager: Could not acquire DRM master via seat manager";
+            LOG_WARNING << "DRMOutputManager: Modesetting may fail, but rendering might work";
+        }
+    } else {
+        // Fallback: direct open (requires root or proper permissions)
+        drmFd_ = open(path.c_str(), O_RDWR | O_CLOEXEC);
+        if (drmFd_ < 0) {
+            LOG_ERROR << "DRMOutputManager: Cannot open " << path 
+                      << ": " << strerror(errno);
+            LOG_ERROR << "Ensure user is in 'video' group or running as root";
+            LOG_ERROR << "Or install libseat-dev for user-space DRM master access";
+            return false;
+        }
+        
+        // Try to become master (may fail if another process holds it)
+        if (drmSetMaster(drmFd_) != 0) {
+            LOG_WARNING << "DRMOutputManager: Could not become DRM master";
+            LOG_WARNING << "DRMOutputManager: Modesetting may fail, but rendering might work";
         }
     }
     
     devicePath_ = path;
-    LOG_INFO << "DRMOutputManager: Opened " << path;
+    LOG_INFO << "DRMOutputManager: Opened " << path << " (fd=" << drmFd_ << ")";
     
     return true;
 }

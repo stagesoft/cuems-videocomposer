@@ -139,6 +139,7 @@ if(ENABLE_OPENGL)
             pkg_check_modules(EGL egl)
             pkg_check_modules(VAAPI libva libva-drm libva-x11)
             pkg_check_modules(DRM libdrm)
+            pkg_check_modules(LIBSEAT libseat)
             
             if(EGL_FOUND AND VAAPI_FOUND AND DRM_FOUND)
                 add_definitions(-DHAVE_EGL)
@@ -146,6 +147,17 @@ if(ENABLE_OPENGL)
                 include_directories(${EGL_INCLUDE_DIRS} ${VAAPI_INCLUDE_DIRS} ${DRM_INCLUDE_DIRS})
                 list(APPEND GL_LIBS ${EGL_LIBRARIES} ${VAAPI_LIBRARIES} ${DRM_LIBRARIES})
                 message(STATUS "VAAPI zero-copy interop enabled (EGL + VAAPI + DRM)")
+                
+                # libseat for DRM master access (optional but recommended)
+                if(LIBSEAT_FOUND)
+                    add_definitions(-DHAVE_LIBSEAT)
+                    include_directories(${LIBSEAT_INCLUDE_DIRS})
+                    list(APPEND GL_LIBS ${LIBSEAT_LIBRARIES})
+                    message(STATUS "libseat enabled - DRM master access for regular users")
+                else()
+                    message(STATUS "libseat not found - DRM will require root or logind session")
+                    message(STATUS "  Install libseat-dev for user-space DRM master access")
+                endif()
             else()
                 if(NOT EGL_FOUND)
                     message(STATUS "EGL not found - install libegl-dev for VAAPI zero-copy")
@@ -630,6 +642,7 @@ if(ENABLE_DRM_BACKEND AND DRM_FOUND AND EGL_FOUND)
         list(APPEND CPP_SOURCES
             src/cuems_videocomposer/cpp/display/drm/DRMOutputManager.cpp
             src/cuems_videocomposer/cpp/display/drm/DRMSurface.cpp
+            src/cuems_videocomposer/cpp/display/drm/SeatManager.cpp
             src/cuems_videocomposer/cpp/display/drm/DRMBackend.cpp
         )
         

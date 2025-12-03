@@ -16,12 +16,14 @@
 #define VIDEOCOMPOSER_DRMOUTPUTMANAGER_H
 
 #include "../OutputInfo.h"
+#include "SeatManager.h"
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <vector>
 #include <map>
 #include <string>
 #include <functional>
+#include <memory>
 
 namespace videocomposer {
 
@@ -211,6 +213,9 @@ public:
     void pollHotplug();
     
 private:
+    // Seat management (for user-space DRM master)
+    std::unique_ptr<SeatManager> seatManager_;
+    
     // DRM device
     int drmFd_ = -1;
     std::string devicePath_;
