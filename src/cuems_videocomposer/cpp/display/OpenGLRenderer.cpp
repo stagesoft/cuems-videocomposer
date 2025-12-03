@@ -473,15 +473,6 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
             const GPUTextureFrameBuffer* gpuBuffer = nullptr;
             bool isOnGPU = layer->getPreparedFrame(cpuBuffer, gpuBuffer);
             
-            // Debug logging for DRM
-            static int debugCount = 0;
-            if (debugCount < 5) {
-                LOG_INFO << "OpenGLRenderer::renderLayer - isOnGPU=" << isOnGPU 
-                        << ", cpuBuffer=" << (cpuBuffer ? "valid" : "null")
-                        << ", cpuBuffer->isValid()=" << (cpuBuffer ? cpuBuffer->isValid() : false)
-                        << ", gpuBuffer=" << (gpuBuffer ? "valid" : "null");
-                debugCount++;
-            }
             
             if (isOnGPU && gpuBuffer && gpuBuffer->isValid()) {
                 // Frame is on GPU - use GPU rendering path
@@ -529,13 +520,6 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
         // This provides consistent behavior and supports color correction
         // The uniform branch (uColorCorrectionEnabled) has negligible overhead (~0.02%)
         // compared to the potential visual artifacts from switching render paths mid-playback
-        static int shaderPathDebug = 0;
-        if (shaderPathDebug < 3) {
-            LOG_INFO << "OpenGLRenderer: CPU frame path - useShaders_=" << useShaders_ 
-                    << ", rgbaShader_=" << (rgbaShader_ ? "valid" : "null")
-                    << ", frame size=" << layerTextureWidth << "x" << layerTextureHeight;
-            shaderPathDebug++;
-        }
         if (useShaders_ && rgbaShader_) {
             // Shader-based rendering path for CPU frames
             // Uses GL_TEXTURE_2D for shader compatibility
@@ -620,29 +604,8 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
             shader->setUniformMatrix4fv("uMVP", mvp);
             
             // Draw using VAO
-            static int drawDebug = 0;
-            if (drawDebug < 3) {
-                GLenum err = glGetError();
-                if (err != GL_NO_ERROR) {
-                    LOG_ERROR << "OpenGLRenderer: GL error before draw: 0x" << std::hex << err << std::dec;
-                }
-                LOG_INFO << "OpenGLRenderer: Drawing quad - VAO=" << quadVAO_ 
-                        << ", texture=" << shaderTextureId
-                        << ", shader=" << shader->getProgramId();
-                drawDebug++;
-            }
-            
             glBindVertexArray(quadVAO_);
             glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-            
-            GLenum drawErr = glGetError();
-            if (drawErr != GL_NO_ERROR) {
-                static int errCount = 0;
-                if (errCount++ < 5) {
-                    LOG_ERROR << "OpenGLRenderer: GL error after draw: 0x" << std::hex << drawErr << std::dec;
-                }
-            }
-            
             glBindVertexArray(0);
             
             shader->unbind();
@@ -818,8 +781,6 @@ void OpenGLRenderer::cleanupDeferredTextures() {
 }
 
 bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, const LayerProperties& properties, const FrameInfo& frameInfo) {
-    static int gpuDebug = 0;
-    
     if (!gpuFrame.isValid()) {
         LOG_VERBOSE << "renderLayerFromGPU: gpuFrame is invalid";
         return false;
@@ -830,12 +791,6 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
     }
 
     TexturePlaneType planeType = gpuFrame.getPlaneType();
-    
-    if (gpuDebug < 5) {
-        LOG_INFO << "renderLayerFromGPU: planeType=" << static_cast<int>(planeType) 
-                << ", textureId=" << gpuFrame.getTextureId(0);
-        gpuDebug++;
-    }
 
     // For multi-plane formats (NV12, YUV420P), skip bindGPUTexture
     // We'll bind textures manually in the shader path

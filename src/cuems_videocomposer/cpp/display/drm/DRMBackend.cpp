@@ -185,13 +185,6 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
                     bool visible = layer->properties().visible;
                     bool ready = layer->isReady();
                     
-                    // Debug: log first few frames
-                    static int debugCounter = 0;
-                    if (debugCounter < 10) {
-                        LOG_INFO << "DRMBackend: Layer " << layer->getLayerId() << " - visible=" << visible 
-                                << ", ready=" << ready << ", frame=" << layer->getCurrentFrame();
-                        debugCounter++;
-                    }
                     
                     if (visible && ready) {
                         bool renderOk = renderer_->renderLayer(layer);
@@ -207,12 +200,6 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
                 }
             }
             
-            static bool firstRender = true;
-            if (firstRender && !layers.empty()) {
-                LOG_INFO << "DRMBackend: First render pass - " << layers.size() << " layer(s), " 
-                        << renderedCount << " rendered";
-                firstRender = false;
-            }
         }
         
         // End frame

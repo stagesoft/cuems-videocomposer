@@ -679,6 +679,16 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     // OpenGL ES: glEGLImageTargetTexture2DOES - textures are mutable
     // Note: Some drivers (Intel on DRM) may fail with TexStorage, so we fallback to Texture2DOES
     
+    // Debug: Check if we're in the same context as when EGL image was created
+    EGLDisplay bindDisplay = eglGetCurrentDisplay();
+    EGLContext bindContext = eglGetCurrentContext();
+    static bool loggedBindOnce = false;
+    if (!loggedBindOnce) {
+        LOG_INFO << "VaapiInterop: Binding textures - display=" << bindDisplay 
+                << ", context=" << bindContext;
+        loggedBindOnce = true;
+    }
+    
     glBindTexture(GL_TEXTURE_2D, textureY_);
     bool bindSuccess = false;
     
@@ -709,13 +719,26 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         }
     } else if (glEGLImageTargetTexture2DOES_) {
         glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageY_);
-        if (glGetError() == GL_NO_ERROR) {
+        GLenum err = glGetError();
+        if (err == GL_NO_ERROR) {
             bindSuccess = true;
+        } else {
+            LOG_WARNING << "VaapiInterop: glEGLImageTargetTexture2DOES failed with 0x" 
+                       << std::hex << err << std::dec;
         }
     }
     
     if (!bindSuccess) {
-        LOG_ERROR << "VaapiInterop: Failed to bind Y plane with any method";
+        // Debug: Check GL context and EGL state
+        EGLContext ctx = eglGetCurrentContext();
+        EGLDisplay dpy = eglGetCurrentDisplay();
+        LOG_ERROR << "VaapiInterop: Failed to bind Y plane with any method"
+                  << " - EGL context=" << (ctx != EGL_NO_CONTEXT ? "valid" : "NONE")
+                  << ", EGL display=" << (dpy != EGL_NO_DISPLAY ? "valid" : "NONE")
+                  << ", eglImageY_=" << (eglImageY_ != EGL_NO_IMAGE_KHR ? "valid" : "NONE")
+                  << ", useTexStorage_=" << useTexStorage_
+                  << ", hasTexStorageEXT=" << (glEGLImageTargetTexStorageEXT_ ? "yes" : "no")
+                  << ", hasTexture2DOES=" << (glEGLImageTargetTexture2DOES_ ? "yes" : "no");
         glBindTexture(GL_TEXTURE_2D, 0);
         return false;
     }
@@ -1010,8 +1033,19 @@ EGLImageKHR VaapiInterop::createEGLImageFromDmaBuf(
         // Use eglGetCurrentDisplay() like mpv does - must match current GL context
         // This is critical for proper EGL image binding
         EGLDisplay currentDisplay = eglGetCurrentDisplay();
+        EGLContext currentContext = eglGetCurrentContext();
+        static bool loggedOnce = false;
+        if (!loggedOnce) {
+            LOG_INFO << "VaapiInterop: Creating EGL image - display=" << currentDisplay 
+                    << ", context=" << currentContext << " (modifier=0x" << std::hex << modifier << std::dec << ")";
+            loggedOnce = true;
+        }
         if (currentDisplay == EGL_NO_DISPLAY) {
-            LOG_ERROR << "VaapiInterop: No current EGL display!";
+            LOG_ERROR << "VaapiInterop: No current EGL display when creating EGL image!";
+            return EGL_NO_IMAGE_KHR;
+        }
+        if (currentContext == EGL_NO_CONTEXT) {
+            LOG_ERROR << "VaapiInterop: No current EGL context when creating EGL image!";
             return EGL_NO_IMAGE_KHR;
         }
         EGLImageKHR image = eglCreateImageKHR_(

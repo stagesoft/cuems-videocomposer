@@ -517,12 +517,6 @@ bool DRMSurface::schedulePageFlip() {
     }
     
     // Subsequent frames: use page flip for vsync
-    static int flipCount = 0;
-    if (flipCount < 5) {
-        LOG_INFO << "DRMSurface: Scheduling page flip #" << flipCount << " for fb " << nextFb_.fbId;
-        flipCount++;
-    }
-    
     ret = drmModePageFlip(outputManager_->getFd(), crtcId_,
                           nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
     
