@@ -14,6 +14,7 @@ Requires MTC timecode to play videos.
 import subprocess
 import time
 import sys
+import os
 from pathlib import Path
 import argparse
 
@@ -32,8 +33,8 @@ except ImportError:
 
 
 class ResolutionModesTest:
-    def __init__(self, videocomposer_bin, video_file=None, osc_port=7770, fps=25.0, mtc_port=0):
-        self.videocomposer_bin = Path(videocomposer_bin)
+    def __init__(self, videocomposer_bin=None, video_file=None, osc_port=7770, fps=25.0, mtc_port=0):
+        self.videocomposer_bin = self._find_videocomposer(videocomposer_bin)
         self.video_file = video_file
         self.osc_port = osc_port
         self.fps = fps
@@ -44,6 +45,38 @@ class ResolutionModesTest:
         
         if MTC_AVAILABLE:
             self.mtc_helper = MTCHelper(fps=fps, port=mtc_port, portname="ResolutionTest")
+    
+    def _find_videocomposer(self, provided_path=None):
+        """Find videocomposer binary or wrapper script."""
+        if provided_path:
+            path = Path(provided_path)
+            if path.exists():
+                print(f"Using provided videocomposer path: {path}")
+                return path
+            else:
+                print(f"WARNING: Provided path not found: {provided_path}, trying auto-detect...")
+        
+        # Try wrapper script first (handles library paths - preferred)
+        script_dir = Path(__file__).parent.parent
+        possible_paths = [
+            script_dir / "scripts" / "cuems-videocomposer-wrapper.sh",
+            script_dir / "cuems-videocomposer.sh",
+            script_dir / "build" / "cuems-videocomposer",
+            Path("/usr/bin/cuems-videocomposer"),
+            Path("/usr/local/bin/cuems-videocomposer"),
+        ]
+        
+        for path in possible_paths:
+            if path.exists():
+                # Check if executable (for scripts) or is a file (for binaries)
+                if path.is_file() and (os.access(path, os.X_OK) or path.suffix == ''):
+                    print(f"Found videocomposer: {path}")
+                    return path
+        
+        raise FileNotFoundError(
+            "videocomposer not found. Build the application first.\n"
+            f"  Checked: {[str(p) for p in possible_paths]}"
+        )
     
     def start_videocomposer(self):
         """Start videocomposer process."""
@@ -56,11 +89,17 @@ class ResolutionModesTest:
             cmd.append(str(self.video_file))
         
         print(f"Starting videocomposer: {' '.join(cmd)}")
+        print(f"  Using: {self.videocomposer_bin}")
+        
+        # Copy environment to preserve LD_LIBRARY_PATH set by wrapper script
+        env = os.environ.copy()
+        
         self.videocomposer_process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            env=env
         )
         time.sleep(2)
         
@@ -271,7 +310,7 @@ class ResolutionModesTest:
 
 def main():
     parser = argparse.ArgumentParser(description="Test resolution modes")
-    parser.add_argument("videocomposer_bin", help="Path to cuems-videocomposer binary")
+    parser.add_argument("--videocomposer", help="Path to cuems-videocomposer binary or wrapper (auto-detected if not provided)")
     parser.add_argument("--video", help="Video file for playback test (optional)")
     parser.add_argument("--osc-port", type=int, default=7770, help="OSC port (default: 7770)")
     parser.add_argument("--fps", type=float, default=25.0, help="MTC framerate (default: 25.0)")
@@ -279,13 +318,17 @@ def main():
     
     args = parser.parse_args()
     
-    test = ResolutionModesTest(
-        videocomposer_bin=args.videocomposer_bin,
-        video_file=args.video,
-        osc_port=args.osc_port,
-        fps=args.fps,
-        mtc_port=args.mtc_port
-    )
+    try:
+        test = ResolutionModesTest(
+            videocomposer_bin=args.videocomposer,
+            video_file=args.video,
+            osc_port=args.osc_port,
+            fps=args.fps,
+            mtc_port=args.mtc_port
+        )
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
     
     success = test.run_tests()
     sys.exit(0 if success else 1)
