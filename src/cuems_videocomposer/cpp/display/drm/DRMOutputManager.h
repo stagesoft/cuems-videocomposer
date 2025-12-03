@@ -118,12 +118,6 @@ public:
     size_t getOutputCount() const;
     
     /**
-     * Get output info by name (direct access to connector info)
-     */
-    const OutputInfo* getOutputByName(const std::string& name) const;
-    OutputInfo* getOutputByName(const std::string& name);
-    
-    /**
      * Get DRM connector by index
      */
     const DRMConnector* getConnector(int index) const;

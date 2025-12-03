@@ -707,22 +707,6 @@ size_t DRMOutputManager::getOutputCount() const {
     return count;
 }
 
-const OutputInfo* DRMOutputManager::getOutputByName(const std::string& name) const {
-    const DRMConnector* conn = getConnectorByName(name);
-    if (conn && conn->info.connected && conn->info.enabled) {
-        return &conn->info;
-    }
-    return nullptr;
-}
-
-OutputInfo* DRMOutputManager::getOutputByName(const std::string& name) {
-    DRMConnector* conn = getConnectorByName(name);
-    if (conn && conn->info.connected && conn->info.enabled) {
-        return &conn->info;
-    }
-    return nullptr;
-}
-
 bool DRMOutputManager::refreshOutputs() {
     // Re-probe connectors for hotplug changes
     bool changed = false;
