@@ -624,12 +624,24 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         return false;
     }
     
-    // CRITICAL: Destroy old EGL images FIRST (like mpv's unmap before map)
-    // This ensures old images don't interfere with rebinding
+    // MPV order: delete textures FIRST, then destroy EGL images
+    // The texture was bound to the old EGL image, so delete it before destroying the image
     EGLDisplay currentDisplay = eglGetCurrentDisplay();
     if (currentDisplay == EGL_NO_DISPLAY) {
         currentDisplay = eglDisplay_;
     }
+    
+    // Step 1: Delete old textures (they were bound to old EGL images)
+    if (textureY_ != 0) {
+        glDeleteTextures(1, &textureY_);
+        textureY_ = 0;
+    }
+    if (textureUV_ != 0) {
+        glDeleteTextures(1, &textureUV_);
+        textureUV_ = 0;
+    }
+    
+    // Step 2: Now safe to destroy the old EGL images
     if (prevEglImageY_ != EGL_NO_IMAGE_KHR) {
         eglDestroyImageKHR_(currentDisplay, prevEglImageY_);
         prevEglImageY_ = EGL_NO_IMAGE_KHR;
@@ -637,15 +649,6 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     if (prevEglImageUV_ != EGL_NO_IMAGE_KHR) {
         eglDestroyImageKHR_(currentDisplay, prevEglImageUV_);
         prevEglImageUV_ = EGL_NO_IMAGE_KHR;
-    }
-    
-    // Create fresh textures for each frame - more reliable on DRM/KMS
-    // Delete old textures first
-    if (textureY_ != 0) {
-        glDeleteTextures(1, &textureY_);
-    }
-    if (textureUV_ != 0) {
-        glDeleteTextures(1, &textureUV_);
     }
     
     glGenTextures(1, &textureY_);
