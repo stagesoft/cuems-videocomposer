@@ -540,6 +540,12 @@ bool DRMBackend::setOutputMode(int outputIndex, int width, int height, double re
     
     // Step 4: Recalculate canvas size and reconfigure renderer
     if (multiRenderer_) {
+        // Make GL context current before any GL operations
+        // Use the first surface's context (they're all shared)
+        if (!surfaces_.empty() && surfaces_[0]) {
+            surfaces_[0]->makeCurrent();
+        }
+        
         // Recalculate total canvas size
         int canvasWidth = 0, canvasHeight = 0;
         for (const auto& region : outputRegions_) {
