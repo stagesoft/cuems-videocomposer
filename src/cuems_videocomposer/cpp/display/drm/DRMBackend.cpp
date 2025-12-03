@@ -478,6 +478,10 @@ DRMSurface* DRMBackend::getPrimarySurface() {
 }
 
 bool DRMBackend::setOutputMode(int outputIndex, int width, int height, double refresh) {
+    LOG_INFO << "DRMBackend::setOutputMode called: index=" << outputIndex 
+             << " width=" << width << " height=" << height << " refresh=" << refresh;
+    LOG_INFO << "  surfaces_.size()=" << surfaces_.size();
+    
     if (outputIndex < 0 || outputIndex >= static_cast<int>(surfaces_.size())) {
         LOG_ERROR << "DRMBackend::setOutputMode: Invalid output index " << outputIndex;
         return false;
@@ -492,6 +496,8 @@ bool DRMBackend::setOutputMode(int outputIndex, int width, int height, double re
     // Check if resolution is actually changing
     int oldWidth = static_cast<int>(surface->getWidth());
     int oldHeight = static_cast<int>(surface->getHeight());
+    
+    LOG_INFO << "  Current surface size: " << oldWidth << "x" << oldHeight;
     
     if (width == oldWidth && height == oldHeight) {
         LOG_INFO << "DRMBackend::setOutputMode: Already at " << width << "x" << height;

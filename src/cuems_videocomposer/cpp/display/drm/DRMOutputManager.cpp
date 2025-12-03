@@ -802,11 +802,16 @@ drmModeModeInfo* DRMOutputManager::findMode(drmModeConnector* conn,
 }
 
 bool DRMOutputManager::setMode(int index, int width, int height, double refreshRate) {
+    LOG_INFO << "DRMOutputManager::setMode called: index=" << index 
+             << " " << width << "x" << height << "@" << refreshRate;
+    
     DRMConnector* conn = getConnector(index);
     if (!conn || !conn->connector || !conn->crtcId) {
         LOG_ERROR << "DRMOutputManager: Invalid output index " << index;
         return false;
     }
+    
+    LOG_INFO << "  Connector: " << conn->info.name << " crtcId=" << conn->crtcId;
     
     drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate);
     if (!mode) {
@@ -815,7 +820,11 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
         return false;
     }
     
+    LOG_INFO << "  Found mode: " << mode->hdisplay << "x" << mode->vdisplay 
+             << " clock=" << mode->clock;
+    
     // Set mode (with fb_id=0 to just configure mode, actual framebuffer set in schedulePageFlip)
+    LOG_INFO << "  Calling drmModeSetCrtc...";
     int ret = drmModeSetCrtc(drmFd_, conn->crtcId, 0, 0, 0,
                              &conn->connectorId, 1, mode);
     

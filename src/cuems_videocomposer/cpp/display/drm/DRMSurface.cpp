@@ -380,6 +380,9 @@ void DRMSurface::cleanup() {
 }
 
 bool DRMSurface::resize(int width, int height) {
+    LOG_INFO << "DRMSurface::resize called: " << width << "x" << height;
+    LOG_INFO << "  outputManager_=" << (void*)outputManager_ << " gbmDevice_=" << (void*)gbmDevice_;
+    
     if (!outputManager_ || !gbmDevice_) {
         LOG_ERROR << "DRMSurface::resize: Not properly initialized";
         return false;

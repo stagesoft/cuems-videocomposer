@@ -1652,6 +1652,11 @@ bool RemoteCommandRouter::handleDisplayModes(const std::vector<std::string>& arg
 
 bool RemoteCommandRouter::handleDisplayMode(const std::vector<std::string>& args) {
     // Expected: /videocomposer/display/mode <name> <width> <height> [refresh]
+    LOG_INFO << "handleDisplayMode called with " << args.size() << " args";
+    for (size_t i = 0; i < args.size(); ++i) {
+        LOG_INFO << "  arg[" << i << "] = '" << args[i] << "'";
+    }
+    
     if (args.size() < 3) {
         LOG_WARNING << "display/mode requires: <name> <width> <height> [refresh]";
         return false;
@@ -1667,6 +1672,8 @@ bool RemoteCommandRouter::handleDisplayMode(const std::vector<std::string>& args
     int width = std::atoi(args[1].c_str());
     int height = std::atoi(args[2].c_str());
     double refresh = (args.size() > 3) ? std::atof(args[3].c_str()) : 0.0;
+    
+    LOG_INFO << "Parsed: name=" << name << " width=" << width << " height=" << height << " refresh=" << refresh;
     
     // Validate mode exists
     auto outputs = backend->getOutputs();
