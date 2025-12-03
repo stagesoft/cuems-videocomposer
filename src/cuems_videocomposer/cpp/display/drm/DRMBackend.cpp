@@ -125,6 +125,15 @@ bool DRMBackend::openWindow() {
     LOG_INFO << "DRMBackend: Initialized with " << surfaces_.size() << " output(s)"
              << (useVirtualCanvas_ ? " (Virtual Canvas mode)" : " (Legacy mode)");
     
+    // Apply resolution mode that was set before initialization
+    if (configManager_) {
+        std::string pendingMode = configManager_->getResolutionPolicyString();
+        if (!pendingMode.empty() && pendingMode != "1080p") {
+            LOG_INFO << "DRMBackend: Applying pending resolution mode: " << pendingMode;
+            setResolutionMode(pendingMode);
+        }
+    }
+    
     return true;
 }
 
@@ -621,13 +630,21 @@ void DRMBackend::setOutputSinkManager(OutputSinkManager* sinkManager) {
 }
 
 bool DRMBackend::setResolutionMode(const std::string& mode) {
-    if (!configManager_ || !outputManager_) {
+    if (!configManager_) {
         return false;
     }
     
     // Use config manager to parse and store the mode
     if (!configManager_->setResolutionPolicyFromString(mode)) {
         return false;
+    }
+    
+    LOG_INFO << "Resolution mode set to: " << mode;
+    
+    // If not initialized yet, just store the mode - it will be applied in openWindow()
+    if (!initialized_ || !outputManager_ || surfaces_.empty()) {
+        LOG_INFO << "  (will be applied when display is initialized)";
+        return true;
     }
     
     // Map to DRMOutputManager's ResolutionMode
@@ -655,10 +672,41 @@ bool DRMBackend::setResolutionMode(const std::string& mode) {
             break;
     }
     
+    // Set the mode in output manager (updates internal state)
     outputManager_->setResolutionMode(resMode);
+    
+    // Apply mode to determine target resolutions for each output
     outputManager_->applyResolutionMode();
     
-    return true;
+    // Now actually change each output to the new resolution
+    bool success = true;
+    auto outputs = outputManager_->getOutputs();
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        const auto& info = outputs[i];
+        if (!info.connected || !info.enabled) {
+            continue;
+        }
+        
+        // Get current surface dimensions
+        if (i < surfaces_.size() && surfaces_[i]) {
+            int currentW = static_cast<int>(surfaces_[i]->getWidth());
+            int currentH = static_cast<int>(surfaces_[i]->getHeight());
+            
+            // If the target resolution differs, apply the change
+            if (info.width != currentW || info.height != currentH) {
+                LOG_INFO << "Applying resolution mode to " << info.name << ": "
+                         << currentW << "x" << currentH << " -> " 
+                         << info.width << "x" << info.height;
+                
+                if (!setOutputMode(static_cast<int>(i), info.width, info.height, info.refreshRate)) {
+                    LOG_ERROR << "Failed to apply resolution mode to " << info.name;
+                    success = false;
+                }
+            }
+        }
+    }
+    
+    return success;
 }
 
 bool DRMBackend::saveConfiguration(const std::string& path) {
