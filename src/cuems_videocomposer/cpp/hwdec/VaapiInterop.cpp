@@ -599,38 +599,57 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     }
     
     // Check if we have a current EGL context
-    // With pure EGL rendering, eglGetCurrentContext() should return a valid context
     EGLContext currentContext = eglGetCurrentContext();
     if (currentContext == EGL_NO_CONTEXT) {
         return false;
     }
     
-    // glEGLImageTargetTexture2DOES: textures are mutable, can be reused
-    // Create textures once, reuse for all frames
-    if (textureY_ == 0 || textureUV_ == 0) {
-        glGenTextures(1, &textureY_);
-        glGenTextures(1, &textureUV_);
-        
-        if (textureY_ == 0 || textureUV_ == 0) {
-            LOG_ERROR << "VaapiInterop: Failed to create textures";
-            return false;
-        }
-        
-        // Set texture parameters
-        glBindTexture(GL_TEXTURE_2D, textureY_);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        
-        glBindTexture(GL_TEXTURE_2D, textureUV_);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        
-        glBindTexture(GL_TEXTURE_2D, 0);
+    // CRITICAL: Destroy old EGL images FIRST (like mpv's unmap before map)
+    // This ensures old images don't interfere with rebinding
+    EGLDisplay currentDisplay = eglGetCurrentDisplay();
+    if (currentDisplay == EGL_NO_DISPLAY) {
+        currentDisplay = eglDisplay_;
     }
+    if (prevEglImageY_ != EGL_NO_IMAGE_KHR) {
+        eglDestroyImageKHR_(currentDisplay, prevEglImageY_);
+        prevEglImageY_ = EGL_NO_IMAGE_KHR;
+    }
+    if (prevEglImageUV_ != EGL_NO_IMAGE_KHR) {
+        eglDestroyImageKHR_(currentDisplay, prevEglImageUV_);
+        prevEglImageUV_ = EGL_NO_IMAGE_KHR;
+    }
+    
+    // Create fresh textures for each frame - more reliable on DRM/KMS
+    // Delete old textures first
+    if (textureY_ != 0) {
+        glDeleteTextures(1, &textureY_);
+    }
+    if (textureUV_ != 0) {
+        glDeleteTextures(1, &textureUV_);
+    }
+    
+    glGenTextures(1, &textureY_);
+    glGenTextures(1, &textureUV_);
+    
+    if (textureY_ == 0 || textureUV_ == 0) {
+        LOG_ERROR << "VaapiInterop: Failed to create textures";
+        return false;
+    }
+    
+    // Set texture parameters before binding EGL image
+    glBindTexture(GL_TEXTURE_2D, textureY_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    
+    glBindTexture(GL_TEXTURE_2D, textureUV_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    
+    glBindTexture(GL_TEXTURE_2D, 0);
     
     glBindTexture(GL_TEXTURE_2D, textureY_);
     bool bindSuccess = false;
@@ -699,23 +718,6 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
                 eglDestroySyncKHR_(currentDisplay, sync);
             }
         }
-    }
-    
-    
-    // CRITICAL: NOW destroy old EGL images (after new textures are bound)
-    // The GPU is now sampling from new textures, so old EGL images can be released
-    EGLDisplay currentDisplay = eglGetCurrentDisplay();
-    if (currentDisplay == EGL_NO_DISPLAY) {
-        currentDisplay = eglDisplay_;
-    }
-    
-    if (prevEglImageY_ != EGL_NO_IMAGE_KHR) {
-        eglDestroyImageKHR_(currentDisplay, prevEglImageY_);
-        prevEglImageY_ = EGL_NO_IMAGE_KHR;
-    }
-    if (prevEglImageUV_ != EGL_NO_IMAGE_KHR) {
-        eglDestroyImageKHR_(currentDisplay, prevEglImageUV_);
-        prevEglImageUV_ = EGL_NO_IMAGE_KHR;
     }
     
     // Close old DMA-BUF FDs if keepFDsOpen_ mode was used
