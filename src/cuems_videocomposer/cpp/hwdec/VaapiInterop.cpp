@@ -677,38 +677,66 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     // Bind EGL images to OpenGL textures (like mpv does in vaapi_gl_map)
     // Desktop GL: glEGLImageTargetTexStorageEXT - textures are immutable
     // OpenGL ES: glEGLImageTargetTexture2DOES - textures are mutable
+    // Note: Some drivers (Intel on DRM) may fail with TexStorage, so we fallback to Texture2DOES
+    
     glBindTexture(GL_TEXTURE_2D, textureY_);
+    bool bindSuccess = false;
+    
     if (useTexStorage_ && glEGLImageTargetTexStorageEXT_) {
         glEGLImageTargetTexStorageEXT_(GL_TEXTURE_2D, eglImageY_, nullptr);
+        GLenum glError = glGetError();
+        if (glError == GL_NO_ERROR) {
+            bindSuccess = true;
+        } else {
+            // TexStorage failed - try fallback to Texture2DOES
+            if (glEGLImageTargetTexture2DOES_) {
+                static bool warnedOnce = false;
+                if (!warnedOnce) {
+                    LOG_WARNING << "VaapiInterop: glEGLImageTargetTexStorageEXT failed (0x" 
+                               << std::hex << glError << std::dec 
+                               << "), falling back to glEGLImageTargetTexture2DOES";
+                    warnedOnce = true;
+                }
+                // Clear the error
+                glGetError();
+                // Try legacy method
+                glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageY_);
+                if (glGetError() == GL_NO_ERROR) {
+                    bindSuccess = true;
+                    useTexStorage_ = false;  // Switch to legacy mode
+                }
+            }
+        }
     } else if (glEGLImageTargetTexture2DOES_) {
         glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageY_);
-    } else {
-        LOG_ERROR << "VaapiInterop: No EGL image target function available";
-        glBindTexture(GL_TEXTURE_2D, 0);
-        return false;
+        if (glGetError() == GL_NO_ERROR) {
+            bindSuccess = true;
+        }
     }
     
-    GLenum glError = glGetError();
-    if (glError != GL_NO_ERROR) {
-        LOG_ERROR << "VaapiInterop: GL error binding Y plane: 0x" << std::hex << glError << std::dec;
+    if (!bindSuccess) {
+        LOG_ERROR << "VaapiInterop: Failed to bind Y plane with any method";
         glBindTexture(GL_TEXTURE_2D, 0);
         return false;
     }
     
     glBindTexture(GL_TEXTURE_2D, textureUV_);
+    bindSuccess = false;
+    
     if (useTexStorage_ && glEGLImageTargetTexStorageEXT_) {
         glEGLImageTargetTexStorageEXT_(GL_TEXTURE_2D, eglImageUV_, nullptr);
+        if (glGetError() == GL_NO_ERROR) {
+            bindSuccess = true;
+        }
     } else if (glEGLImageTargetTexture2DOES_) {
         glEGLImageTargetTexture2DOES_(GL_TEXTURE_2D, eglImageUV_);
-    } else {
-        LOG_ERROR << "VaapiInterop: No EGL image target function available for UV";
-        glBindTexture(GL_TEXTURE_2D, 0);
-        return false;
+        if (glGetError() == GL_NO_ERROR) {
+            bindSuccess = true;
+        }
     }
     
-    glError = glGetError();
-    if (glError != GL_NO_ERROR) {
-        LOG_ERROR << "VaapiInterop: GL error binding UV plane: 0x" << std::hex << glError << std::dec;
+    if (!bindSuccess) {
+        LOG_ERROR << "VaapiInterop: Failed to bind UV plane with any method";
         glBindTexture(GL_TEXTURE_2D, 0);
         return false;
     }

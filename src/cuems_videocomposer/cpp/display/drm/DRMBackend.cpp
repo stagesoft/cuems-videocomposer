@@ -165,18 +165,58 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
             continue;
         }
         
-        // Clear
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        // Clear with visible test color for first few frames
+        static int frameCount = 0;
+        if (frameCount < 60) {
+            // Cycle through colors: Red -> Green -> Blue
+            float r = (frameCount % 3 == 0) ? 1.0f : 0.0f;
+            float g = (frameCount % 3 == 1) ? 1.0f : 0.0f;
+            float b = (frameCount % 3 == 2) ? 1.0f : 0.0f;
+            glClearColor(r, g, b, 1.0f);
+            frameCount++;
+        } else {
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        }
         glClear(GL_COLOR_BUFFER_BIT);
         
-        // Render layers
+        // Render layers (use getLayersSortedByZOrder like X11/Wayland backends do)
         if (renderer_ && layerManager) {
-            // Render each visible layer
-            for (size_t i = 0; i < layerManager->getLayerCount(); ++i) {
-                VideoLayer* layer = layerManager->getLayer(static_cast<int>(i));
-                if (layer && layer->properties().visible && layer->isReady()) {
-                    renderer_->renderLayer(layer);
+            auto layers = layerManager->getLayersSortedByZOrder();
+            size_t renderedCount = 0;
+            
+            for (size_t i = 0; i < layers.size(); ++i) {
+                VideoLayer* layer = layers[i];
+                if (layer) {
+                    bool visible = layer->properties().visible;
+                    bool ready = layer->isReady();
+                    
+                    // Debug: log first few frames
+                    static int debugCounter = 0;
+                    if (debugCounter < 10) {
+                        LOG_INFO << "DRMBackend: Layer " << layer->getLayerId() << " - visible=" << visible 
+                                << ", ready=" << ready << ", frame=" << layer->getCurrentFrame();
+                        debugCounter++;
+                    }
+                    
+                    if (visible && ready) {
+                        bool renderOk = renderer_->renderLayer(layer);
+                        if (renderOk) {
+                            renderedCount++;
+                        } else {
+                            static int renderFailCounter = 0;
+                            if (renderFailCounter++ < 5) {
+                                LOG_ERROR << "DRMBackend: renderLayer() returned false for layer " << layer->getLayerId();
+                            }
+                        }
+                    }
                 }
+            }
+            
+            static bool firstRender = true;
+            if (firstRender && !layers.empty()) {
+                LOG_INFO << "DRMBackend: First render pass - " << layers.size() << " layer(s), " 
+                        << renderedCount << " rendered";
+                firstRender = false;
             }
         }
         

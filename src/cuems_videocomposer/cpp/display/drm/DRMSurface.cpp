@@ -517,11 +517,17 @@ bool DRMSurface::schedulePageFlip() {
     }
     
     // Subsequent frames: use page flip for vsync
+    static int flipCount = 0;
+    if (flipCount < 5) {
+        LOG_INFO << "DRMSurface: Scheduling page flip #" << flipCount << " for fb " << nextFb_.fbId;
+        flipCount++;
+    }
+    
     ret = drmModePageFlip(outputManager_->getFd(), crtcId_,
                           nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
     
     if (ret != 0) {
-        LOG_ERROR << "DRMSurface: Page flip failed: " << strerror(-ret);
+        LOG_ERROR << "DRMSurface: Page flip failed: " << strerror(-ret) << " (errno=" << -ret << ")";
         
         // Fallback: try drmModeSetCrtc instead
         const DRMConnector* conn = outputManager_->getConnector(outputIndex_);
