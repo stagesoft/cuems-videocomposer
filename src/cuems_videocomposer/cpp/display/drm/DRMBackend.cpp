@@ -237,8 +237,18 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     // for many use cases but should be improved for professional multi-projector setups.
     
     // Traditional double-buffering: wait for previous flip before rendering
+    // MPV-STYLE RENDER-AHEAD: Only wait when we need a buffer
+    // Instead of waiting for ALL flips before rendering, we:
+    // 1. Process any completed flip events (non-blocking)
+    // 2. Only wait if there's no free buffer available
+    // This allows rendering to happen while the previous frame is being displayed,
+    // reducing frame delivery jitter and improving perceived smoothness.
     for (auto& [name, surface] : surfaces_) {
-        if (surface->isFlipPending()) {
+        // First, process any completed flip events (non-blocking)
+        surface->processFlipEvents();
+        
+        // Only wait if we don't have a free buffer to render to
+        if (surface->isFlipPending() && !surface->hasFreeBuffers()) {
             surface->waitForFlip();
         }
     }
@@ -260,12 +270,13 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately
     
-    // Traditional double-buffering: wait for previous flip before rendering
+    // MPV-STYLE RENDER-AHEAD: Only wait when we need a buffer
     for (auto& [name, surface] : surfaces_) {
-        if (surface->isFlipPending()) {
+        surface->processFlipEvents();
+        if (surface->isFlipPending() && !surface->hasFreeBuffers()) {
             surface->waitForFlip();
+        }
     }
-}
     
     // Render to each output
     for (auto& [name, surface] : surfaces_) {
