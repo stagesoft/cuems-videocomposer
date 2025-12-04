@@ -1461,11 +1461,13 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
             swsCtx_ = nullptr;
         }
         
-        // Convert from source format to BGRA32 for OpenGL (matches original xjadeo)
+        // Convert from source format to BGRA32 for OpenGL
+        // Use SWS_BILINEAR for better real-time performance (mpv default for scaling)
+        // SWS_BICUBIC is higher quality but significantly slower for 10-bit content
         swsCtx_ = sws_getContext(
             codecCtx_->width, codecCtx_->height, codecCtx_->pix_fmt,
             frameInfo_.width, frameInfo_.height, AV_PIX_FMT_BGRA,
-            SWS_BICUBIC, nullptr, nullptr, nullptr
+            SWS_BILINEAR, nullptr, nullptr, nullptr
         );
         if (!swsCtx_) {
             return false;
@@ -2020,10 +2022,11 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
             swsCtx_ = nullptr;
         }
         
+        // Use SWS_BILINEAR for better real-time performance
         swsCtx_ = sws_getContext(
             sourceFrame->width, sourceFrame->height, srcFormat,
             frameInfo_.width, frameInfo_.height, AV_PIX_FMT_RGBA,
-            SWS_BICUBIC, nullptr, nullptr, nullptr
+            SWS_BILINEAR, nullptr, nullptr, nullptr
         );
         if (!swsCtx_) {
             return false;

@@ -432,6 +432,11 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
     
     // Update MultiOutputRenderer if initialized
     if (multiRenderer_) {
+        // Make GL context current before any GL operations (FBO creation, etc.)
+        if (!surfaces_.empty()) {
+            surfaces_.begin()->second->makeCurrent();
+        }
+        
         std::vector<OutputSurface*> surfacePtrs;
         for (auto& [name, surface] : surfaces_) {
             surfacePtrs.push_back(surface.get());
@@ -472,6 +477,11 @@ bool DRMBackend::configureOutputBlend(const std::string& outputName,
     
     // Update MultiOutputRenderer if initialized
     if (multiRenderer_) {
+        // Make GL context current before any GL operations (FBO creation, etc.)
+        if (!surfaces_.empty()) {
+            surfaces_.begin()->second->makeCurrent();
+        }
+        
         std::vector<OutputSurface*> surfacePtrs;
         for (auto& [name, surface] : surfaces_) {
             surfacePtrs.push_back(surface.get());
@@ -936,6 +946,11 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
     
     // Reconfigure if already initialized
     if (multiRenderer_ && multiRenderer_->isInitialized()) {
+        // Make GL context current before any GL operations (FBO creation, etc.)
+        if (!surfaces_.empty()) {
+            surfaces_.begin()->second->makeCurrent();
+        }
+        
         std::vector<OutputSurface*> surfacePtrs;
         for (auto& [name, surf] : surfaces_) {
             surfacePtrs.push_back(surf.get());
@@ -956,6 +971,11 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName, const Outp
             
             // Reconfigure if initialized
             if (multiRenderer_ && multiRenderer_->isInitialized()) {
+                // Make GL context current before any GL operations (FBO creation, etc.)
+                if (!surfaces_.empty()) {
+                    surfaces_.begin()->second->makeCurrent();
+                }
+                
                 std::vector<OutputSurface*> surfacePtrs;
                 for (auto& [name, surf] : surfaces_) {
                     surfacePtrs.push_back(surf.get());
