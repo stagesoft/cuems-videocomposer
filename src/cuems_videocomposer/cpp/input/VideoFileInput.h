@@ -9,6 +9,11 @@
 #include <string>
 #include <memory>
 #include <cstdint>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <deque>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -158,6 +163,30 @@ private:
     // Internal state
     bool ready_;
     AVRational frameRateQ_;
+    
+    // Async frame pre-buffering (like mpv's decode-ahead)
+    struct CachedFrame {
+        int64_t frameNumber;
+        FrameBuffer buffer;
+        bool valid;
+    };
+    
+    static constexpr size_t FRAME_CACHE_SIZE = 4;  // Pre-buffer up to 4 frames
+    std::deque<CachedFrame> frameCache_;
+    std::mutex cacheMutex_;
+    
+    // Async decode thread
+    std::unique_ptr<std::thread> decodeThread_;
+    std::condition_variable decodeCond_;
+    std::atomic<bool> decodeThreadRunning_{false};
+    std::atomic<int64_t> decodeTargetFrame_{-1};
+    std::atomic<bool> decodeThreadStop_{false};
+    
+    void decodeThreadFunc();
+    bool decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffer);
+    void startAsyncDecode(int64_t startFrame);
+    void stopAsyncDecode();
+    CachedFrame* findCachedFrame(int64_t frameNumber);
 };
 
 } // namespace videocomposer

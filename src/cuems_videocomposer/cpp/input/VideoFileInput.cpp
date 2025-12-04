@@ -67,6 +67,7 @@ VideoFileInput::VideoFileInput()
 }
 
 VideoFileInput::~VideoFileInput() {
+    stopAsyncDecode();
     close();
 }
 
@@ -193,6 +194,15 @@ bool VideoFileInput::open(const std::string& source) {
 }
 
 void VideoFileInput::close() {
+    // Stop async decode thread first
+    stopAsyncDecode();
+    
+    // Clear frame cache
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        frameCache_.clear();
+    }
+    
     cleanup();
     currentFile_.clear();
     ready_ = false;
@@ -1280,6 +1290,33 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         return false;
     }
 
+    // Check frame cache first (async pre-buffered frames)
+    if (!useHardwareDecoding_) {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        CachedFrame* cached = findCachedFrame(frameNumber);
+        if (cached && cached->valid) {
+            // Found in cache - copy to output buffer
+            if (!buffer.isValid() || buffer.info().width != cached->buffer.info().width ||
+                buffer.info().height != cached->buffer.info().height) {
+                buffer.allocate(cached->buffer.info());
+            }
+            memcpy(buffer.data(), cached->buffer.data(), 
+                   cached->buffer.info().width * cached->buffer.info().height * 4);
+            currentFrame_ = frameNumber;
+            
+            // Remove from cache (frame consumed)
+            frameCache_.erase(
+                std::remove_if(frameCache_.begin(), frameCache_.end(),
+                    [frameNumber](const CachedFrame& cf) { return cf.frameNumber == frameNumber; }),
+                frameCache_.end());
+            
+            // Start async decode for next frames
+            startAsyncDecode(frameNumber);
+            
+            return true;
+        }
+    }
+
     // Check if we need to seek (optimize for sequential frame access)
     bool needSeek = false;
     if (currentFrame_ < 0 || currentFrame_ != frameNumber) {
@@ -1290,6 +1327,12 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         } else {
             // Non-sequential frame - need to seek
             needSeek = true;
+            
+            // Clear cache on seek (frames are no longer valid)
+            if (!useHardwareDecoding_) {
+                std::lock_guard<std::mutex> lock(cacheMutex_);
+                frameCache_.clear();
+            }
         }
     }
     
@@ -1500,6 +1543,12 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     }
 
     currentFrame_ = frameNumber;
+    
+    // Start async decode for next frames (software decoding only)
+    if (!useHardwareDecoding_) {
+        startAsyncDecode(frameNumber);
+    }
+    
     return true;
 }
 
@@ -2150,6 +2199,266 @@ void VideoFileInput::cleanup() {
     currentFrame_ = -1;
     useHardwareDecoding_ = false;
     hwDecoderType_ = HardwareDecoder::Type::NONE;
+}
+
+// ============================================================================
+// Async Frame Pre-buffering (like mpv's decode-ahead)
+// ============================================================================
+
+void VideoFileInput::stopAsyncDecode() {
+    if (decodeThread_) {
+        decodeThreadStop_ = true;
+        decodeCond_.notify_all();
+        if (decodeThread_->joinable()) {
+            decodeThread_->join();
+        }
+        decodeThread_.reset();
+        decodeThreadRunning_ = false;
+        decodeThreadStop_ = false;
+    }
+}
+
+void VideoFileInput::startAsyncDecode(int64_t startFrame) {
+    // Only use async decode for software decoding (hardware decode is already fast)
+    if (useHardwareDecoding_) {
+        return;
+    }
+    
+    // Start decode thread if not running
+    if (!decodeThread_) {
+        decodeThreadStop_ = false;
+        decodeThreadRunning_ = true;
+        decodeTargetFrame_ = startFrame + 1;  // Start decoding next frame
+        decodeThread_ = std::make_unique<std::thread>(&VideoFileInput::decodeThreadFunc, this);
+    } else {
+        // Update target and wake thread
+        decodeTargetFrame_ = startFrame + 1;
+        decodeCond_.notify_one();
+    }
+}
+
+VideoFileInput::CachedFrame* VideoFileInput::findCachedFrame(int64_t frameNumber) {
+    for (auto& cf : frameCache_) {
+        if (cf.frameNumber == frameNumber && cf.valid) {
+            return &cf;
+        }
+    }
+    return nullptr;
+}
+
+void VideoFileInput::decodeThreadFunc() {
+    LOG_INFO << "Async decode thread started";
+    
+    while (!decodeThreadStop_) {
+        int64_t targetFrame = decodeTargetFrame_.load();
+        
+        // Check if we should decode this frame
+        bool shouldDecode = false;
+        {
+            std::lock_guard<std::mutex> lock(cacheMutex_);
+            // Only decode if frame not already cached and cache not full
+            if (frameCache_.size() < FRAME_CACHE_SIZE && !findCachedFrame(targetFrame)) {
+                shouldDecode = true;
+            }
+        }
+        
+        if (shouldDecode && targetFrame >= 0 && targetFrame < frameCount_) {
+            // Decode the frame
+            CachedFrame cf;
+            cf.frameNumber = targetFrame;
+            cf.valid = false;
+            
+            if (decodeFrameInternal(targetFrame, cf.buffer)) {
+                cf.valid = true;
+                
+                // Add to cache
+                std::lock_guard<std::mutex> lock(cacheMutex_);
+                // Remove old frames if cache is full
+                while (frameCache_.size() >= FRAME_CACHE_SIZE) {
+                    frameCache_.pop_front();
+                }
+                frameCache_.push_back(std::move(cf));
+                
+                // Move to next frame
+                decodeTargetFrame_ = targetFrame + 1;
+            } else {
+                // Decode failed, wait a bit and try again
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        } else {
+            // Nothing to decode, wait for signal
+            std::unique_lock<std::mutex> lock(cacheMutex_);
+            decodeCond_.wait_for(lock, std::chrono::milliseconds(10), [this] {
+                return decodeThreadStop_.load();
+            });
+        }
+    }
+    
+    LOG_INFO << "Async decode thread stopped";
+}
+
+bool VideoFileInput::decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffer) {
+    // This is a copy of the decoding logic from readFrame, but without cache check
+    // Used by the async decode thread
+    
+    if (!isReady()) {
+        return false;
+    }
+
+    // Check if we need to seek
+    bool needSeek = false;
+    if (currentFrame_ < 0 || currentFrame_ != frameNumber) {
+        if (currentFrame_ >= 0 && frameNumber == currentFrame_ + 1) {
+            needSeek = false;  // Sequential
+        } else {
+            needSeek = true;
+        }
+    }
+    
+    if (needSeek) {
+        if (!seek(frameNumber)) {
+            return false;
+        }
+    }
+
+    // Decode frame
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        return false;
+    }
+
+    // Get target timestamp
+    int64_t targetTimestamp = -1;
+    if (frameIndex_ && frameNumber >= 0 && frameNumber < frameCount_) {
+        if (frameIndex_[frameNumber].frame_pts >= 0) {
+            targetTimestamp = frameIndex_[frameNumber].frame_pts;
+        } else {
+            targetTimestamp = frameIndex_[frameNumber].timestamp;
+        }
+    }
+
+    int64_t oneFrame = 1;
+    if (frameIndex_ && frameNumber > 0 && frameNumber < frameCount_) {
+        if (frameIndex_[frameNumber-1].timestamp >= 0 && 
+            frameIndex_[frameNumber].timestamp >= 0) {
+            oneFrame = frameIndex_[frameNumber].timestamp - frameIndex_[frameNumber-1].timestamp;
+            if (oneFrame <= 0) oneFrame = 1;
+        }
+    }
+    const int64_t prefuzz = oneFrame > 10 ? 1 : 0;
+    
+    int bailout = 64;
+    bool frameFinished = false;
+
+    while (bailout > 0 && !decodeThreadStop_) {
+        av_packet_unref(packet);
+        int err = mediaReader_.readPacket(packet);
+        if (err < 0) {
+            if (err == AVERROR_EOF) {
+                --bailout;
+                continue;
+            } else {
+                av_packet_free(&packet);
+                return false;
+            }
+        }
+
+        if (packet->stream_index != videoStream_) {
+            continue;
+        }
+
+        err = videoDecoder_.sendPacket(packet);
+        if (err < 0 && err != AVERROR(EAGAIN)) {
+            --bailout;
+            continue;
+        }
+
+        err = videoDecoder_.receiveFrame(frame_);
+        bool gotFrame = (err == 0);
+        if (err == AVERROR(EAGAIN)) {
+            --bailout;
+            continue;
+        } else if (err < 0) {
+            --bailout;
+            continue;
+        }
+
+        if (!gotFrame) {
+            --bailout;
+            continue;
+        }
+
+        int64_t pts = parsePTSFromFrame(frame_);
+        if (pts == AV_NOPTS_VALUE) {
+            --bailout;
+            continue;
+        }
+
+        lastDecodedPTS_ = pts;
+
+        if (targetTimestamp >= 0) {
+            if (pts + prefuzz >= targetTimestamp) {
+                if (pts - targetTimestamp < oneFrame) {
+                    frameFinished = true;
+                    break;
+                }
+            }
+        } else {
+            frameFinished = true;
+            break;
+        }
+
+        --bailout;
+    }
+
+    av_packet_free(&packet);
+
+    if (!frameFinished) {
+        return false;
+    }
+
+    // Allocate buffer if needed
+    if (!buffer.isValid() || buffer.info().width != frameInfo_.width || 
+        buffer.info().height != frameInfo_.height) {
+        if (!buffer.allocate(frameInfo_)) {
+            return false;
+        }
+    }
+
+    // Convert frame format
+    if (!swsCtx_ || swsCtxWidth_ != frameInfo_.width || swsCtxHeight_ != frameInfo_.height) {
+        if (swsCtx_) {
+            sws_freeContext(swsCtx_);
+            swsCtx_ = nullptr;
+        }
+        
+        swsCtx_ = sws_getContext(
+            codecCtx_->width, codecCtx_->height, codecCtx_->pix_fmt,
+            frameInfo_.width, frameInfo_.height, AV_PIX_FMT_BGRA,
+            SWS_BILINEAR, nullptr, nullptr, nullptr
+        );
+        if (!swsCtx_) {
+            return false;
+        }
+        swsCtxWidth_ = frameInfo_.width;
+        swsCtxHeight_ = frameInfo_.height;
+    }
+
+    int bgraStride = frameInfo_.width * 4;
+    uint8_t* dstData[4] = {buffer.data(), nullptr, nullptr, nullptr};
+    int dstLinesize[4] = {bgraStride, 0, 0, 0};
+    
+    int result = sws_scale(swsCtx_,
+              (const uint8_t* const*)frame_->data, frame_->linesize,
+              0, codecCtx_->height,
+              dstData, dstLinesize);
+    
+    if (result <= 0) {
+        return false;
+    }
+
+    currentFrame_ = frameNumber;
+    return true;
 }
 
 } // namespace videocomposer
