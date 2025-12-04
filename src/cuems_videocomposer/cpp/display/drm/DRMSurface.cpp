@@ -75,13 +75,8 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
     
     // Log GBM backend info
     const char* gbmBackend = gbm_device_get_backend_name(gbmDevice_);
-    LOG_INFO << "DRMSurface: GBM backend: " << (gbmBackend ? gbmBackend : "unknown");
-    
     // Check if this is NVIDIA - it requires explicit modifiers
     bool isNvidia = gbmBackend && (std::string(gbmBackend).find("nvidia") != std::string::npos);
-    if (isNvidia) {
-        LOG_INFO << "DRMSurface: NVIDIA GBM detected - will use explicit modifiers";
-    }
     
     // TODO: Implement full mpv-style IN_FORMATS probing for all drivers.
     // Currently we only use explicit modifiers for NVIDIA with hardcoded list. Improvements:
@@ -233,7 +228,7 @@ gbm_surface_created:
         
         EGLint major, minor;
         if (!eglInitialize(eglDisplay_, &major, &minor)) {
-            LOG_ERROR << "DRMSurface: Failed to initialize EGL";
+            LOG_ERROR << "DRMSurface: Failed to initialize EGL - check permissions on /dev/nvidia* and /dev/dri/*";
             cleanup();
             return false;
         }
@@ -257,7 +252,7 @@ gbm_surface_created:
     }
     
     // Log the GBM format we're using
-    LOG_INFO << "DRMSurface: GBM surface format: 0x" << std::hex << gbmFormat << std::dec;
+    LOG_DEBUG << "DRMSurface: GBM surface format: 0x" << std::hex << gbmFormat << std::dec;
     
     // Choose EGL config that matches GBM format
     // For GBM, we need to find a config with matching EGL_NATIVE_VISUAL_ID
@@ -285,7 +280,7 @@ gbm_surface_created:
         }
     }
     
-    LOG_INFO << "DRMSurface: Found " << numConfigs << " matching EGL configs";
+    LOG_DEBUG << "DRMSurface: Found " << numConfigs << " matching EGL configs";
     
     // Find config with matching native visual ID (GBM format)
     eglConfig_ = nullptr;
@@ -294,7 +289,7 @@ gbm_surface_created:
         if (eglGetConfigAttrib(eglDisplay_, configs[i], EGL_NATIVE_VISUAL_ID, &visualId)) {
             if (static_cast<uint32_t>(visualId) == gbmFormat) {
                 eglConfig_ = configs[i];
-                LOG_INFO << "DRMSurface: Found matching EGL config (visual 0x" 
+                LOG_DEBUG << "DRMSurface: Found matching EGL config (visual 0x" 
                          << std::hex << visualId << std::dec << ")";
                 break;
             }
@@ -345,12 +340,10 @@ gbm_surface_created:
     // Create EGL surface from GBM surface
     // Use platform-aware function if available (required for Intel/Mesa with GBM)
     if (usingPlatformDisplay && eglCreatePlatformWindowSurfaceEXT) {
-        LOG_INFO << "DRMSurface: Using eglCreatePlatformWindowSurfaceEXT for GBM surface";
         eglSurface_ = eglCreatePlatformWindowSurfaceEXT(eglDisplay_, eglConfig_, gbmSurface_, nullptr);
     } else {
-        LOG_INFO << "DRMSurface: Using legacy eglCreateWindowSurface";
-    eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
-                                         (EGLNativeWindowType)gbmSurface_, nullptr);
+        eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
+                                             (EGLNativeWindowType)gbmSurface_, nullptr);
     }
     
     if (eglSurface_ == EGL_NO_SURFACE) {
@@ -459,7 +452,7 @@ void DRMSurface::cleanup() {
 }
 
 bool DRMSurface::resize(int width, int height) {
-    LOG_INFO << "DRMSurface::resize called: " << width << "x" << height;
+    LOG_DEBUG << "DRMSurface::resize called: " << width << "x" << height;
     LOG_INFO << "  outputManager_=" << (void*)outputManager_ << " gbmDevice_=" << (void*)gbmDevice_;
     
     if (!outputManager_ || !gbmDevice_) {
@@ -473,7 +466,7 @@ bool DRMSurface::resize(int width, int height) {
     }
     
     if (width == static_cast<int>(width_) && height == static_cast<int>(height_)) {
-        LOG_INFO << "DRMSurface::resize: Already at " << width << "x" << height;
+        LOG_DEBUG << "DRMSurface::resize: Already at " << width << "x" << height;
         return true;
     }
     
@@ -827,7 +820,7 @@ bool DRMSurface::schedulePageFlip() {
         }
         
         modeSet_ = true;
-        LOG_INFO << "DRMSurface: Modeset successful, framebuffer displayed";
+        LOG_DEBUG << "DRMSurface: Modeset successful, framebuffer displayed";
         
         // Release previous buffer if any
         if (currentBo_) {
