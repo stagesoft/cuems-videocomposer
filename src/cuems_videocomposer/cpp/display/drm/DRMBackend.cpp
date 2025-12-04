@@ -211,6 +211,31 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
         return;
     }
     
+    // TODO: DUAL OUTPUT PERFORMANCE
+    // Current approach: Traditional double-buffering (wait for each flip sequentially)
+    // Problem: With 2 outputs at 60Hz and shared GL context, we get ~30fps because:
+    //   - Render to output 1, swap, wait for flip (~16ms)
+    //   - Render to output 2, swap, wait for flip (~16ms)
+    //   - Total: ~32ms per frame = 30fps
+    //
+    // Solutions (in order of effectiveness):
+    // 1. ATOMIC MODESETTING: Use drmModeAtomicCommit() to submit both page flips
+    //    in a single atomic request. This would allow both outputs to flip on the
+    //    same vsync, achieving 60fps. Requires building an atomic request with
+    //    FB_ID properties for both CRTCs and committing once.
+    //
+    // 2. MPV-STYLE BUFFER QUEUE: Implement explicit buffer queue tracking like mpv:
+    //    - Maintain a queue of GBM buffer objects per surface
+    //    - Only wait when queue exceeds swapchain_depth
+    //    - Release buffers after flip completes (not immediately)
+    //    This enables render-ahead but still has shared context serialization.
+    //
+    // 3. SEPARATE GL CONTEXTS: Create independent GL contexts per output for
+    //    truly parallel rendering. Requires careful resource sharing setup.
+    //
+    // For now, single-output works at 60fps. Dual-output at 30fps is acceptable
+    // for many use cases but should be improved for professional multi-projector setups.
+    
     // Traditional double-buffering: wait for previous flip before rendering
     for (auto& [name, surface] : surfaces_) {
         if (surface->isFlipPending()) {
