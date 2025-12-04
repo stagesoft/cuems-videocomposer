@@ -662,14 +662,26 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
              << " planes=" << num_planes
              << " handle=" << handles[0] << " stride=" << strides[0];
     
-    // mpv approach: set DRM_MODE_FB_MODIFIERS only for non-zero/non-INVALID modifiers
-    // but ALWAYS try drmModeAddFB2WithModifiers first (this is key for NVIDIA)
-    if (modifier != 0 && modifier != DRM_FORMAT_MOD_INVALID) {
-        flags = DRM_MODE_FB_MODIFIERS;
+    // Check if NVIDIA - it requires DRM_MODE_FB_MODIFIERS even for LINEAR
+    const char* gbmBackend = gbm_device_get_backend_name(gbmDevice_);
+    bool isNvidia = gbmBackend && (std::string(gbmBackend).find("nvidia") != std::string::npos);
+    
+    // For NVIDIA: when we created surface with explicit modifiers (even LINEAR=0),
+    // we MUST pass DRM_MODE_FB_MODIFIERS flag. Otherwise kernel rejects the buffer.
+    // For other drivers: only set flag for non-zero/non-INVALID modifiers (mpv approach)
+    if (isNvidia) {
+        // NVIDIA: always use modifiers when the buffer has any modifier (including LINEAR)
+        if (modifier != DRM_FORMAT_MOD_INVALID) {
+            flags = DRM_MODE_FB_MODIFIERS;
+        }
+    } else {
+        // Mesa/Intel/AMD: only use modifiers for non-zero values
+        if (modifier != 0 && modifier != DRM_FORMAT_MOD_INVALID) {
+            flags = DRM_MODE_FB_MODIFIERS;
+        }
     }
     
-    // Always try drmModeAddFB2WithModifiers first (mpv approach)
-    // Even with LINEAR (modifier=0), this path works when flags=0
+    // Always try drmModeAddFB2WithModifiers first
     int ret = drmModeAddFB2WithModifiers(outputManager_->getFd(), width, height,
                                           format, handles, strides, offsets,
                                           modifiers, &fb.fbId, flags);
