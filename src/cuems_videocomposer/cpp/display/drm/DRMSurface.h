@@ -113,6 +113,18 @@ public:
      */
     bool isFlipPending() const { return flipPending_; }
     
+    /**
+     * Check if GBM surface has free buffers available
+     * Used to determine if we need to wait for a flip
+     */
+    bool hasFreeBuffers() const;
+    
+    /**
+     * Process flip events without blocking
+     * Returns true if a flip completed
+     */
+    bool processFlipEvents();
+    
     // ===== Output Information (OutputSurface interface) =====
     
     /**

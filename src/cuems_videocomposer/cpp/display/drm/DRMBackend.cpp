@@ -203,6 +203,22 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
         return;
     }
     
+    // mpv approach: only wait for flip when we MUST (no free buffers)
+    // This allows rendering ahead while previous frame is being displayed
+    // Process any pending flip events first (non-blocking)
+    for (auto& [name, surface] : surfaces_) {
+        surface->processFlipEvents();
+    }
+    
+    // Check if any surface needs to wait for a free buffer
+    // Only block if GBM has no free buffers available
+    for (auto& [name, surface] : surfaces_) {
+        if (surface->isFlipPending() && !surface->hasFreeBuffers()) {
+            // Must wait - no free buffers to render into
+            surface->waitForFlip();
+        }
+    }
+    
     primary->makeCurrent();
     
     // MultiOutputRenderer::render() handles:
@@ -213,21 +229,25 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     
     primary->releaseCurrent();
     
-    // Schedule page flips for all surfaces
+    // Schedule page flips for all surfaces (non-blocking)
     for (auto& [name, surface] : surfaces_) {
         surface->schedulePageFlip();
     }
     
-    // Wait for all flips to complete
-    for (auto& [name, surface] : surfaces_) {
-        if (surface->isFlipPending()) {
-            surface->waitForFlip();
-        }
-    }
+    // Don't wait here - let the next frame's check handle it
+    // This is the key difference from before: we render ahead
 }
 
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately
+    
+    // mpv approach: process pending flip events and only wait when necessary
+    for (auto& [name, surface] : surfaces_) {
+        surface->processFlipEvents();
+        if (surface->isFlipPending() && !surface->hasFreeBuffers()) {
+            surface->waitForFlip();
+        }
+    }
     
     // Render to each output
     for (auto& [name, surface] : surfaces_) {
@@ -269,16 +289,11 @@ void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager
         // End frame
         surface->endFrame();
         
-        // Schedule page flip
+        // Schedule page flip (non-blocking)
         surface->schedulePageFlip();
     }
     
-    // Wait for all flips to complete
-    for (auto& [name, surface] : surfaces_) {
-        if (surface->isFlipPending()) {
-            surface->waitForFlip();
-        }
-    }
+    // Don't wait here - let next frame's check handle it (render ahead like mpv)
 }
 
 void DRMBackend::handleEvents() {

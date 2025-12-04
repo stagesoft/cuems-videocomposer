@@ -334,14 +334,13 @@ int VideoComposerApplication::run() {
     LOG_INFO << "Starting cuems-videocomposer application";
 
     // Main event loop
-    // Use high-resolution clock for timing
-    auto lastFrameTime = std::chrono::high_resolution_clock::now();
-    const auto targetFrameTime = std::chrono::microseconds(16667); // ~60 FPS default (16.67ms)
+    // For DRM/KMS: vsync-driven (page flip waiting provides timing)
+    // For X11/Wayland: would need software timing, but we focus on DRM
+    //
+    // mpv approach: render as fast as possible, let vsync/page-flip provide throttling
+    // Old approach had software timer + vsync wait = double-waiting = stuttering
     
     while (running_ && shouldContinue()) {
-        auto currentTime = std::chrono::high_resolution_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - lastFrameTime);
-        
         processEvents();
         
         // Make OpenGL context current before updating layers
@@ -359,14 +358,9 @@ int VideoComposerApplication::run() {
         
         render();
         
-        // Frame rate limiting - sleep if we're ahead of target frame time
-        // This prevents busy-waiting while still allowing sync sources to drive timing
-        auto sleepTime = targetFrameTime - elapsed;
-        if (sleepTime.count() > 0) {
-            std::this_thread::sleep_for(sleepTime);
-        }
-        
-        lastFrameTime = std::chrono::high_resolution_clock::now();
+        // No software frame timer needed for DRM - vsync/page-flip provides timing
+        // The DRMBackend::render() -> waitForFlip() already blocks until vsync
+        // Adding a software sleep here would cause double-waiting and stuttering
     }
 
     return 0;

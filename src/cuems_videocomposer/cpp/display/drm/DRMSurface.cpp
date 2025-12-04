@@ -926,10 +926,43 @@ void DRMSurface::waitForFlip() {
 void DRMSurface::pageFlipHandler(int fd, unsigned int frame,
                                   unsigned int sec, unsigned int usec,
                                   void* data) {
+    (void)fd; (void)frame; (void)sec; (void)usec;
     DRMSurface* surface = static_cast<DRMSurface*>(data);
     if (surface) {
         surface->flipPending_ = false;
     }
+}
+
+bool DRMSurface::hasFreeBuffers() const {
+    if (!gbmSurface_) {
+        return false;
+    }
+    return gbm_surface_has_free_buffers(gbmSurface_) != 0;
+}
+
+bool DRMSurface::processFlipEvents() {
+    if (!flipPending_ || !outputManager_) {
+        return false;
+    }
+    
+    int fd = outputManager_->getFd();
+    
+    // Non-blocking poll for flip events
+    struct pollfd pfd = {};
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    
+    int ret = poll(&pfd, 1, 0);  // timeout=0 for non-blocking
+    
+    if (ret > 0 && (pfd.revents & POLLIN)) {
+        drmEventContext evctx = {};
+        evctx.version = 2;
+        evctx.page_flip_handler = pageFlipHandler;
+        drmHandleEvent(fd, &evctx);
+        return !flipPending_;  // Return true if flip completed
+    }
+    
+    return false;
 }
 
 } // namespace videocomposer

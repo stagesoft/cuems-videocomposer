@@ -2219,6 +2219,16 @@ void VideoFileInput::stopAsyncDecode() {
 }
 
 void VideoFileInput::startAsyncDecode(int64_t startFrame) {
+    // DISABLED: Async decode has race conditions with shared FFmpeg objects
+    // The decode thread and main thread share frame_, codecCtx_, swsCtx_, etc.
+    // without proper synchronization, causing corrupted frames.
+    // 
+    // TODO: Implement properly with separate decoder instance per thread,
+    // or use a producer-consumer pattern with proper synchronization.
+    (void)startFrame;
+    return;
+    
+#if 0  // Original implementation - disabled due to race conditions
     // Only use async decode for software decoding (hardware decode is already fast)
     if (useHardwareDecoding_) {
         return;
@@ -2235,6 +2245,7 @@ void VideoFileInput::startAsyncDecode(int64_t startFrame) {
         decodeTargetFrame_ = startFrame + 1;
         decodeCond_.notify_one();
     }
+#endif
 }
 
 VideoFileInput::CachedFrame* VideoFileInput::findCachedFrame(int64_t frameNumber) {
