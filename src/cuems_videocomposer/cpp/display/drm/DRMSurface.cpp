@@ -7,6 +7,7 @@
 #include "../../utils/Logger.h"
 
 #include <cstring>
+#include <string>
 #include <unistd.h>
 #include <poll.h>
 #include <iomanip>
@@ -76,18 +77,62 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
     const char* gbmBackend = gbm_device_get_backend_name(gbmDevice_);
     LOG_INFO << "DRMSurface: GBM backend: " << (gbmBackend ? gbmBackend : "unknown");
     
-    // Try different formats - NVIDIA may prefer ARGB over XRGB
+    // Check if this is NVIDIA - it requires explicit modifiers
+    bool isNvidia = gbmBackend && (std::string(gbmBackend).find("nvidia") != std::string::npos);
+    if (isNvidia) {
+        LOG_INFO << "DRMSurface: NVIDIA GBM detected - will use explicit modifiers";
+    }
+    
+    // TODO: Implement full mpv-style IN_FORMATS probing for all drivers.
+    // Currently we only use explicit modifiers for NVIDIA. A more robust approach
+    // (like mpv does) would be to:
+    //   1. Query the DRM plane's "IN_FORMATS" property blob
+    //   2. Parse all supported format+modifier combinations from drm_format_modifier_blob
+    //   3. Use gbm_surface_create_with_modifiers() with the probed modifiers
+    // This would provide optimal tiled formats on Intel/AMD and proper support for all
+    // NVIDIA modifier variants. See mpv's probe_gbm_modifiers() in context_drm_egl.c
+    
+    // Formats to try - prefer ARGB for NVIDIA (better compatibility)
     static const struct {
         uint32_t format;
         const char* name;
     } formats[] = {
-        { GBM_FORMAT_XRGB8888, "XRGB8888" },
         { GBM_FORMAT_ARGB8888, "ARGB8888" },
-        { GBM_FORMAT_XBGR8888, "XBGR8888" },
+        { GBM_FORMAT_XRGB8888, "XRGB8888" },
         { GBM_FORMAT_ABGR8888, "ABGR8888" },
+        { GBM_FORMAT_XBGR8888, "XBGR8888" },
     };
     
-    // Try different usage flags - some drivers don't support all combinations
+    // Track the format we successfully created
+    uint32_t gbmFormat = 0;
+    
+    // NVIDIA requires explicit modifiers - try gbm_surface_create_with_modifiers first
+    // DRM_FORMAT_MOD_LINEAR (0x0) is universally supported
+    if (isNvidia) {
+        // Modifiers to try - LINEAR is safest, then NVIDIA tiled formats
+        uint64_t modifiers[] = {
+            DRM_FORMAT_MOD_LINEAR,  // 0x0 - always works
+            DRM_FORMAT_MOD_INVALID  // Sentinel
+        };
+        
+        for (const auto& fmt : formats) {
+            // Try with LINEAR modifier first (most compatible)
+            gbmSurface_ = gbm_surface_create_with_modifiers(
+                gbmDevice_, width_, height_, fmt.format,
+                modifiers, 1);  // Just LINEAR
+            
+            if (gbmSurface_) {
+                gbmFormat = fmt.format;
+                LOG_INFO << "DRMSurface: Created GBM surface with format " << fmt.name 
+                         << " using DRM_FORMAT_MOD_LINEAR (NVIDIA path)";
+                goto gbm_surface_created;
+            }
+        }
+        
+        LOG_WARNING << "DRMSurface: gbm_surface_create_with_modifiers failed, trying legacy path";
+    }
+    
+    // Legacy path - try without explicit modifiers (works on Mesa/Intel/AMD)
     static const struct {
         uint32_t flags;
         const char* name;
@@ -95,12 +140,9 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
         { GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING, "SCANOUT|RENDERING" },
         { GBM_BO_USE_RENDERING, "RENDERING only" },
         { GBM_BO_USE_SCANOUT, "SCANOUT only" },
+        { 0, "no flags" },  // Last resort
     };
     
-    // Track the format we successfully created
-    uint32_t gbmFormat = 0;
-    
-    // Try all combinations
     for (const auto& fmt : formats) {
         for (const auto& usage : usageFlags) {
             gbmSurface_ = gbm_surface_create(gbmDevice_, width_, height_, fmt.format, usage.flags);
@@ -119,6 +161,9 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
     LOG_ERROR << "DRMSurface:   - GPU driver doesn't support GBM scanout";
     LOG_ERROR << "DRMSurface:   - Another process (X11/Wayland) holds the display";
     LOG_ERROR << "DRMSurface:   - NVIDIA: ensure nvidia-drm.modeset=1 is set";
+    if (isNvidia) {
+        LOG_ERROR << "DRMSurface:   - NVIDIA: try running from a TTY without X11/Wayland";
+    }
     cleanup();
     return false;
     
@@ -441,17 +486,40 @@ bool DRMSurface::resize(int width, int height) {
     // instead of just drmModePageFlip (which would fail since CRTC was cleared)
     modeSet_ = false;
     
-    // Try different formats - same approach as init()
+    // Check if NVIDIA (same approach as init)
+    const char* gbmBackend = gbm_device_get_backend_name(gbmDevice_);
+    bool isNvidia = gbmBackend && (std::string(gbmBackend).find("nvidia") != std::string::npos);
+    
+    // Formats to try - prefer ARGB for NVIDIA
     static const struct {
         uint32_t format;
         const char* name;
     } formats[] = {
-        { GBM_FORMAT_XRGB8888, "XRGB8888" },
         { GBM_FORMAT_ARGB8888, "ARGB8888" },
-        { GBM_FORMAT_XBGR8888, "XBGR8888" },
+        { GBM_FORMAT_XRGB8888, "XRGB8888" },
         { GBM_FORMAT_ABGR8888, "ABGR8888" },
+        { GBM_FORMAT_XBGR8888, "XBGR8888" },
     };
     
+    // NVIDIA requires explicit modifiers (see TODO in init() for full IN_FORMATS probing)
+    if (isNvidia) {
+        uint64_t modifiers[] = { DRM_FORMAT_MOD_LINEAR };
+        
+        for (const auto& fmt : formats) {
+            gbmSurface_ = gbm_surface_create_with_modifiers(
+                gbmDevice_, width_, height_, fmt.format,
+                modifiers, 1);
+            
+            if (gbmSurface_) {
+                LOG_INFO << "DRMSurface::resize: Created GBM surface with format " << fmt.name 
+                         << " using DRM_FORMAT_MOD_LINEAR (NVIDIA path)";
+                goto gbm_resize_surface_created;
+            }
+        }
+        LOG_WARNING << "DRMSurface::resize: NVIDIA modifiers failed, trying legacy path";
+    }
+    
+    // Legacy path
     static const struct {
         uint32_t flags;
         const char* name;
@@ -459,9 +527,9 @@ bool DRMSurface::resize(int width, int height) {
         { GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING, "SCANOUT|RENDERING" },
         { GBM_BO_USE_RENDERING, "RENDERING only" },
         { GBM_BO_USE_SCANOUT, "SCANOUT only" },
+        { 0, "no flags" },
     };
     
-    // Create new GBM surface - try all format/usage combinations
     for (const auto& fmt : formats) {
         for (const auto& usage : usageFlags) {
             gbmSurface_ = gbm_surface_create(gbmDevice_, width_, height_, fmt.format, usage.flags);
