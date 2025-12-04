@@ -106,25 +106,33 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
     // Track the format we successfully created
     uint32_t gbmFormat = 0;
     
-    // NVIDIA requires explicit modifiers - try gbm_surface_create_with_modifiers first
-    // DRM_FORMAT_MOD_LINEAR (0x0) is universally supported
+    // NVIDIA requires explicit modifiers - try gbm_surface_create_with_modifiers
+    // Based on drm_info, NVIDIA supports BLOCK_LINEAR_2D modifiers
     if (isNvidia) {
-        // Modifiers to try - LINEAR is safest, then NVIDIA tiled formats
-        uint64_t modifiers[] = {
-            DRM_FORMAT_MOD_LINEAR,  // 0x0 - always works
-            DRM_FORMAT_MOD_INVALID  // Sentinel
+        // NVIDIA modifiers from drm_info: NVIDIA_BLOCK_LINEAR_2D(h=0..5, k=254, g=0, s=1, c=0)
+        // These are: 0x3000000004fe010 to 0x3000000004fe015
+        // Also LINEAR (0x0) is listed but may not work with DRM_MODE_FB_MODIFIERS flag
+        uint64_t nvidiaModifiers[] = {
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 0),  // h=0 (0x3000000004fe010)
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 1),  // h=1
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 2),  // h=2
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 3),  // h=3
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 4),  // h=4
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 5),  // h=5
+            DRM_FORMAT_MOD_LINEAR,  // Try LINEAR last
         };
+        const int numModifiers = sizeof(nvidiaModifiers) / sizeof(nvidiaModifiers[0]);
         
         for (const auto& fmt : formats) {
-            // Try with LINEAR modifier first (most compatible)
+            // Try with all NVIDIA modifiers at once - GBM will pick the best one
             gbmSurface_ = gbm_surface_create_with_modifiers(
                 gbmDevice_, width_, height_, fmt.format,
-                modifiers, 1);  // Just LINEAR
+                nvidiaModifiers, numModifiers);
             
             if (gbmSurface_) {
                 gbmFormat = fmt.format;
                 LOG_INFO << "DRMSurface: Created GBM surface with format " << fmt.name 
-                         << " using DRM_FORMAT_MOD_LINEAR (NVIDIA path)";
+                         << " using NVIDIA modifiers (NVIDIA path)";
                 goto gbm_surface_created;
             }
         }
@@ -503,16 +511,26 @@ bool DRMSurface::resize(int width, int height) {
     
     // NVIDIA requires explicit modifiers (see TODO in init() for full IN_FORMATS probing)
     if (isNvidia) {
-        uint64_t modifiers[] = { DRM_FORMAT_MOD_LINEAR };
+        // Same NVIDIA modifiers as in init()
+        uint64_t nvidiaModifiers[] = {
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 0),
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 1),
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 2),
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 3),
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 4),
+            DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 1, 0, 254, 5),
+            DRM_FORMAT_MOD_LINEAR,
+        };
+        const int numModifiers = sizeof(nvidiaModifiers) / sizeof(nvidiaModifiers[0]);
         
         for (const auto& fmt : formats) {
             gbmSurface_ = gbm_surface_create_with_modifiers(
                 gbmDevice_, width_, height_, fmt.format,
-                modifiers, 1);
+                nvidiaModifiers, numModifiers);
             
             if (gbmSurface_) {
                 LOG_INFO << "DRMSurface::resize: Created GBM surface with format " << fmt.name 
-                         << " using DRM_FORMAT_MOD_LINEAR (NVIDIA path)";
+                         << " using NVIDIA modifiers";
                 goto gbm_resize_surface_created;
             }
         }
