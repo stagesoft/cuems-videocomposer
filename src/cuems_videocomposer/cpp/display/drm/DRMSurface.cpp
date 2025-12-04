@@ -629,7 +629,7 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
     uint32_t format = gbm_bo_get_format(bo);
     uint64_t modifier = gbm_bo_get_modifier(bo);
     
-    // Use modern multi-plane aware API (required for NVIDIA and many modern drivers)
+    // Use multi-plane aware API (like mpv does for NVIDIA and modern drivers)
     uint32_t handles[4] = {0};
     uint32_t strides[4] = {0};
     uint32_t offsets[4] = {0};
@@ -655,34 +655,37 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
         offsets[0] = 0;
     }
     
-    int ret = -1;
+    // Debug: log buffer info
+    LOG_INFO << "DRMSurface: Creating FB: " << width << "x" << height 
+             << " format=0x" << std::hex << format << std::dec
+             << " modifier=0x" << std::hex << modifier << std::dec
+             << " planes=" << num_planes
+             << " handle=" << handles[0] << " stride=" << strides[0];
     
-    // Try with modifiers first (NVIDIA and modern drivers prefer this)
+    // mpv approach: set DRM_MODE_FB_MODIFIERS only for non-zero/non-INVALID modifiers
+    // but ALWAYS try drmModeAddFB2WithModifiers first (this is key for NVIDIA)
     if (modifier != 0 && modifier != DRM_FORMAT_MOD_INVALID) {
         flags = DRM_MODE_FB_MODIFIERS;
-        LOG_INFO << "DRMSurface: Creating framebuffer with modifier 0x" << std::hex << modifier << std::dec;
-        
-        ret = drmModeAddFB2WithModifiers(outputManager_->getFd(), width, height,
+    }
+    
+    // Always try drmModeAddFB2WithModifiers first (mpv approach)
+    // Even with LINEAR (modifier=0), this path works when flags=0
+    int ret = drmModeAddFB2WithModifiers(outputManager_->getFd(), width, height,
                                           format, handles, strides, offsets,
                                           modifiers, &fb.fbId, flags);
-        if (ret != 0) {
-            LOG_WARNING << "DRMSurface: drmModeAddFB2WithModifiers failed: " << strerror(-ret) 
-                       << ", trying without modifiers";
-        }
-    }
     
-    // Try drmModeAddFB2 without modifiers
+    // Fallback: try drmModeAddFB2 without modifiers array
     if (ret != 0) {
+        LOG_WARNING << "DRMSurface: drmModeAddFB2WithModifiers failed: " << strerror(-ret) 
+                   << ", trying drmModeAddFB2";
         ret = drmModeAddFB2(outputManager_->getFd(), width, height,
                             format, handles, strides, offsets, &fb.fbId, 0);
-        if (ret != 0) {
-            LOG_WARNING << "DRMSurface: drmModeAddFB2 failed: " << strerror(-ret) 
-                       << ", trying legacy API";
-        }
     }
     
-    // Final fallback to legacy drmModeAddFB (should rarely be needed)
+    // Final fallback to legacy drmModeAddFB (for very old kernels)
     if (ret != 0) {
+        LOG_WARNING << "DRMSurface: drmModeAddFB2 failed: " << strerror(-ret) 
+                   << ", trying legacy drmModeAddFB";
         uint32_t depth = 24;
         uint32_t bpp = 32;
         
@@ -699,7 +702,9 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
     if (ret != 0) {
         LOG_ERROR << "DRMSurface: Failed to create framebuffer with all methods: " << strerror(-ret);
         LOG_ERROR << "DRMSurface: Format=0x" << std::hex << format << std::dec 
-                 << " Size=" << width << "x" << height;
+                 << " Size=" << width << "x" << height
+                 << " Modifier=0x" << std::hex << modifier << std::dec
+                 << " Handle=" << handles[0] << " Stride=" << strides[0];
         fb.bo = nullptr;
         fb.fbId = 0;
         return false;
