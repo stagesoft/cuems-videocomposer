@@ -210,11 +210,11 @@ gbm_surface_created:
         usingPlatformDisplay = true;
     } else {
         // Initialize EGL - prefer platform-aware functions for GBM
-    PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
-        (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
-    
-    if (eglGetPlatformDisplayEXT) {
-        eglDisplay_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbmDevice_, nullptr);
+        PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
+            (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+        
+        if (eglGetPlatformDisplayEXT) {
+            eglDisplay_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbmDevice_, nullptr);
             if (eglDisplay_ != EGL_NO_DISPLAY) {
                 usingPlatformDisplay = true;
             }
@@ -222,23 +222,23 @@ gbm_surface_created:
         
         if (eglDisplay_ == EGL_NO_DISPLAY) {
             // Fallback to legacy path
-        eglDisplay_ = eglGetDisplay((EGLNativeDisplayType)gbmDevice_);
-    }
-    
-    if (eglDisplay_ == EGL_NO_DISPLAY) {
-        LOG_ERROR << "DRMSurface: Failed to get EGL display";
-        cleanup();
-        return false;
-    }
-    
-    EGLint major, minor;
-    if (!eglInitialize(eglDisplay_, &major, &minor)) {
-        LOG_ERROR << "DRMSurface: Failed to initialize EGL";
-        cleanup();
-        return false;
-    }
-    
-    LOG_INFO << "DRMSurface: EGL " << major << "." << minor;
+            eglDisplay_ = eglGetDisplay((EGLNativeDisplayType)gbmDevice_);
+        }
+        
+        if (eglDisplay_ == EGL_NO_DISPLAY) {
+            LOG_ERROR << "DRMSurface: Failed to get EGL display";
+            cleanup();
+            return false;
+        }
+        
+        EGLint major, minor;
+        if (!eglInitialize(eglDisplay_, &major, &minor)) {
+            LOG_ERROR << "DRMSurface: Failed to initialize EGL";
+            cleanup();
+            return false;
+        }
+        
+        LOG_INFO << "DRMSurface: EGL " << major << "." << minor;
         ownEglDisplay_ = true;
     }
     
