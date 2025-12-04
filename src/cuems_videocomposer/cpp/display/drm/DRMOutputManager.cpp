@@ -83,6 +83,14 @@ bool DRMOutputManager::init(const std::string& devicePath) {
     // Enable atomic modesetting if available
     enableAtomic();
     
+    // TODO: Implement plane enumeration for format/modifier probing.
+    // Currently we only enumerate connectors/CRTCs. For full mpv-style support:
+    //   1. Call drmModeGetPlaneResources() to get all planes
+    //   2. For each CRTC, find associated primary/overlay planes via drmModeGetPlane()
+    //   3. Store plane IDs in DRMConnector structure for later use
+    //   4. This enables format/modifier probing in DRMSurface (see TODOs there)
+    // See mpv's drm_atomic_create_context() in video/out/drm_atomic.c:145
+    
     // Get DRM resources
     resources_ = drmModeGetResources(drmFd_);
     if (!resources_) {

@@ -84,13 +84,26 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
     }
     
     // TODO: Implement full mpv-style IN_FORMATS probing for all drivers.
-    // Currently we only use explicit modifiers for NVIDIA. A more robust approach
-    // (like mpv does) would be to:
-    //   1. Query the DRM plane's "IN_FORMATS" property blob
-    //   2. Parse all supported format+modifier combinations from drm_format_modifier_blob
-    //   3. Use gbm_surface_create_with_modifiers() with the probed modifiers
-    // This would provide optimal tiled formats on Intel/AMD and proper support for all
-    // NVIDIA modifier variants. See mpv's probe_gbm_modifiers() in context_drm_egl.c
+    // Currently we only use explicit modifiers for NVIDIA with hardcoded list. Improvements:
+    //   1. Query DRM plane resources via drmModeGetPlaneResources() to find primary plane
+    //   2. Query plane's "IN_FORMATS" property blob (drmModePropertyBlobPtr)
+    //   3. Parse drm_format_modifier_blob structure to get all supported format+modifier pairs
+    //   4. Filter modifiers for the selected format (ARGB8888/XRGB8888)
+    //   5. Pass complete probed modifier list to gbm_surface_create_with_modifiers()
+    // Benefits:
+    //   - Optimal tiled formats on Intel/AMD (may improve performance)
+    //   - Support for all NVIDIA modifier variants (not just h=0..5)
+    //   - Automatic adaptation to driver updates/new modifiers
+    //   - Works correctly for all GPU vendors without hardcoded lists
+    // See mpv's probe_gbm_modifiers() in video/out/opengl/context_drm_egl.c:473
+    
+    // TODO: Probe plane formats instead of hardcoded list.
+    // Currently we try hardcoded formats. Better approach (mpv-style):
+    //   1. Get primary plane via drmModeGetPlane() for the CRTC
+    //   2. Check plane->formats[] array for supported formats
+    //   3. Prefer ARGB if available, fallback to XRGB (like mpv's probe_gbm_format())
+    //   4. This ensures we only try formats the hardware actually supports
+    // See mpv's probe_gbm_format() in video/out/opengl/context_drm_egl.c:441
     
     // Formats to try - prefer ARGB for NVIDIA (better compatibility)
     static const struct {
@@ -124,7 +137,16 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
         const int numModifiers = sizeof(nvidiaModifiers) / sizeof(nvidiaModifiers[0]);
         
         for (const auto& fmt : formats) {
-            // Try with all NVIDIA modifiers at once - GBM will pick the best one
+            // TODO: GBM modifier selection optimization.
+            // Currently GBM picks "a" modifier from our list (works, but not necessarily optimal).
+            // GBM's selection may not be performance-optimal. Improvements:
+            //   1. After gbm_surface_create_with_modifiers(), query which modifier was actually used
+            //   2. Log the selected modifier for debugging (gbm_bo_get_modifier() after lock_front_buffer)
+            //   3. Consider reordering modifier list by preference (e.g., prefer h=4 for HD/QHD)
+            //   4. With IN_FORMATS probing, we could prioritize GPU-preferred modifiers
+            // Note: Current approach works correctly, but modifier choice could be optimized
+            
+            // Try with all NVIDIA modifiers at once - GBM will pick one that works
             gbmSurface_ = gbm_surface_create_with_modifiers(
                 gbmDevice_, width_, height_, fmt.format,
                 nvidiaModifiers, numModifiers);
@@ -673,36 +695,28 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
         offsets[0] = 0;
     }
     
-    // Debug: log buffer info
-    LOG_INFO << "DRMSurface: Creating FB: " << width << "x" << height 
-             << " format=0x" << std::hex << format << std::dec
-             << " modifier=0x" << std::hex << modifier << std::dec
-             << " planes=" << num_planes
-             << " handle=" << handles[0] << " stride=" << strides[0];
-    
-    // Check if NVIDIA - it requires DRM_MODE_FB_MODIFIERS even for LINEAR
+    // Check if NVIDIA - requires DRM_MODE_FB_MODIFIERS with tiled modifiers
     const char* gbmBackend = gbm_device_get_backend_name(gbmDevice_);
     bool isNvidia = gbmBackend && (std::string(gbmBackend).find("nvidia") != std::string::npos);
     
-    LOG_INFO << "DRMSurface: isNvidia=" << isNvidia << " gbmBackend=" << (gbmBackend ? gbmBackend : "null");
+    // TODO: Improve modifier flag logic.
+    // Current approach works but could be more robust:
+    //   1. For NVIDIA: We know tiled modifiers require DRM_MODE_FB_MODIFIERS flag
+    //   2. For LINEAR on NVIDIA: Currently fails (kernel rejects), but could be handled
+    //   3. Consider checking modifier vendor bits instead of driver name
+    //   4. With IN_FORMATS probing, we'd know exactly which modifiers need the flag
     
-    // For NVIDIA: when we created surface with explicit modifiers (even LINEAR=0),
-    // we MUST pass DRM_MODE_FB_MODIFIERS flag. Otherwise kernel rejects the buffer.
+    // For NVIDIA with tiled modifiers: MUST pass DRM_MODE_FB_MODIFIERS flag
     // For other drivers: only set flag for non-zero/non-INVALID modifiers (mpv approach)
     if (isNvidia) {
-        // NVIDIA: always use modifiers when the buffer has any modifier (including LINEAR)
         if (modifier != DRM_FORMAT_MOD_INVALID) {
             flags = DRM_MODE_FB_MODIFIERS;
-            LOG_INFO << "DRMSurface: NVIDIA path - setting DRM_MODE_FB_MODIFIERS flag";
         }
     } else {
-        // Mesa/Intel/AMD: only use modifiers for non-zero values
         if (modifier != 0 && modifier != DRM_FORMAT_MOD_INVALID) {
             flags = DRM_MODE_FB_MODIFIERS;
         }
     }
-    
-    LOG_INFO << "DRMSurface: Calling drmModeAddFB2WithModifiers with flags=" << flags;
     
     // Always try drmModeAddFB2WithModifiers first
     int ret = drmModeAddFB2WithModifiers(outputManager_->getFd(), width, height,
@@ -711,16 +725,14 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
     
     // Fallback: try drmModeAddFB2 without modifiers array
     if (ret != 0) {
-        LOG_WARNING << "DRMSurface: drmModeAddFB2WithModifiers failed: ret=" << ret 
-                   << " errno=" << errno << " (" << strerror(errno) << ")";
+        LOG_DEBUG << "DRMSurface: drmModeAddFB2WithModifiers failed, trying drmModeAddFB2";
         ret = drmModeAddFB2(outputManager_->getFd(), width, height,
                             format, handles, strides, offsets, &fb.fbId, 0);
     }
     
     // Final fallback to legacy drmModeAddFB (for very old kernels)
     if (ret != 0) {
-        LOG_WARNING << "DRMSurface: drmModeAddFB2 failed: " << strerror(-ret) 
-                   << ", trying legacy drmModeAddFB";
+        LOG_DEBUG << "DRMSurface: drmModeAddFB2 failed, trying legacy drmModeAddFB";
         uint32_t depth = 24;
         uint32_t bpp = 32;
         
