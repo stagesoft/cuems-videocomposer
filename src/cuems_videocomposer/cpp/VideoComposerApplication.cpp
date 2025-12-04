@@ -343,18 +343,10 @@ int VideoComposerApplication::run() {
     while (running_ && shouldContinue()) {
         processEvents();
         
-        // Make OpenGL context current before updating layers
-        // This is needed because hardware decoding may allocate GPU textures during frame loading
-        if (displayBackend_ && displayBackend_->isWindowOpen()) {
-            displayBackend_->makeCurrent();
-        }
-        
+        // Update layers - MTC polling and frame loading happens here
+        // Note: For VAAPI, frames are already on GPU (zero-copy)
+        // DRMBackend::render() will make GL context current before rendering
         updateLayers();
-        
-        // Clear OpenGL context after updating (render will make it current again)
-        if (displayBackend_ && displayBackend_->isWindowOpen()) {
-            displayBackend_->clearCurrent();
-        }
         
         render();
         
