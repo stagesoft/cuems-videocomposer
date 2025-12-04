@@ -666,6 +666,8 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
     const char* gbmBackend = gbm_device_get_backend_name(gbmDevice_);
     bool isNvidia = gbmBackend && (std::string(gbmBackend).find("nvidia") != std::string::npos);
     
+    LOG_INFO << "DRMSurface: isNvidia=" << isNvidia << " gbmBackend=" << (gbmBackend ? gbmBackend : "null");
+    
     // For NVIDIA: when we created surface with explicit modifiers (even LINEAR=0),
     // we MUST pass DRM_MODE_FB_MODIFIERS flag. Otherwise kernel rejects the buffer.
     // For other drivers: only set flag for non-zero/non-INVALID modifiers (mpv approach)
@@ -673,6 +675,7 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
         // NVIDIA: always use modifiers when the buffer has any modifier (including LINEAR)
         if (modifier != DRM_FORMAT_MOD_INVALID) {
             flags = DRM_MODE_FB_MODIFIERS;
+            LOG_INFO << "DRMSurface: NVIDIA path - setting DRM_MODE_FB_MODIFIERS flag";
         }
     } else {
         // Mesa/Intel/AMD: only use modifiers for non-zero values
@@ -681,6 +684,8 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
         }
     }
     
+    LOG_INFO << "DRMSurface: Calling drmModeAddFB2WithModifiers with flags=" << flags;
+    
     // Always try drmModeAddFB2WithModifiers first
     int ret = drmModeAddFB2WithModifiers(outputManager_->getFd(), width, height,
                                           format, handles, strides, offsets,
@@ -688,8 +693,8 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
     
     // Fallback: try drmModeAddFB2 without modifiers array
     if (ret != 0) {
-        LOG_WARNING << "DRMSurface: drmModeAddFB2WithModifiers failed: " << strerror(-ret) 
-                   << ", trying drmModeAddFB2";
+        LOG_WARNING << "DRMSurface: drmModeAddFB2WithModifiers failed: ret=" << ret 
+                   << " errno=" << errno << " (" << strerror(errno) << ")";
         ret = drmModeAddFB2(outputManager_->getFd(), width, height,
                             format, handles, strides, offsets, &fb.fbId, 0);
     }
