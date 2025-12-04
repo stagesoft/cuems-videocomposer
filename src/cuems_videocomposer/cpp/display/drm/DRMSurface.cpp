@@ -418,7 +418,11 @@ void DRMSurface::cleanup() {
     destroyFramebuffer(currentFb_);
     destroyFramebuffer(nextFb_);
     
-    // Release current BO
+    // Release BOs
+    if (previousBo_ && gbmSurface_) {
+        gbm_surface_release_buffer(gbmSurface_, previousBo_);
+        previousBo_ = nullptr;
+    }
     if (currentBo_ && gbmSurface_) {
         gbm_surface_release_buffer(gbmSurface_, currentBo_);
         currentBo_ = nullptr;
@@ -885,10 +889,11 @@ bool DRMSurface::schedulePageFlip() {
     
     flipPending_ = true;
     
-    // Release previous buffer
-    if (currentBo_) {
-        gbm_surface_release_buffer(gbmSurface_, currentBo_);
-    }
+    // DON'T release previous buffer yet - it's still being displayed!
+    // Store it for release after the flip completes (in pageFlipHandler)
+    // This is critical for render-ahead: if we release immediately,
+    // hasFreeBuffers() returns true and we render to the displayed buffer = corruption
+    previousBo_ = currentBo_;
     currentBo_ = bo;
     
     // Swap framebuffers
@@ -946,6 +951,14 @@ void DRMSurface::pageFlipHandler(int fd, unsigned int frame,
         // Record presentation timing (like mpv's drm_pflip_cb)
         // frame = msc (vsync counter), sec/usec = presentation timestamp
         surface->presentationTiming_.recordFlip(sec, usec, frame);
+        
+        // NOW it's safe to release the previous buffer - flip is complete,
+        // so previousBo_ is no longer being displayed
+        if (surface->previousBo_ && surface->gbmSurface_) {
+            gbm_surface_release_buffer(surface->gbmSurface_, surface->previousBo_);
+            surface->previousBo_ = nullptr;
+        }
+        
         surface->flipPending_ = false;
     }
 }

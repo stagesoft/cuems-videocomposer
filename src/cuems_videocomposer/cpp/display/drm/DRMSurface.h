@@ -228,7 +228,8 @@ private:
     // Framebuffers for page flipping
     Framebuffer currentFb_;
     Framebuffer nextFb_;
-    gbm_bo* currentBo_ = nullptr;
+    gbm_bo* currentBo_ = nullptr;    // Buffer currently being displayed
+    gbm_bo* previousBo_ = nullptr;   // Buffer to release after flip completes
     
     // Flip state
     bool flipPending_ = false;
