@@ -382,6 +382,11 @@ gbm_surface_created:
         return false;
     }
     
+    // Disable EGL's internal vsync - we handle vsync via DRM page flips
+    // This prevents double-waiting (EGL vsync + DRM page flip) which causes jitter
+    // mpv does this in context_drm_egl.c
+    eglSwapInterval(eglDisplay_, 0);
+    
     // Log GL info
     LOG_INFO << "DRMSurface: GL Vendor: " << (const char*)glGetString(GL_VENDOR);
     LOG_INFO << "DRMSurface: GL Renderer: " << (const char*)glGetString(GL_RENDERER);
