@@ -175,6 +175,10 @@ private:
     std::deque<CachedFrame> frameCache_;
     std::mutex cacheMutex_;
     
+    // Mutex to protect FFmpeg decode resources (frame_, codecCtx_, swsCtx_, etc.)
+    // This serializes decode operations between main thread and async decode thread
+    std::mutex decodeMutex_;
+    
     // Async decode thread
     std::unique_ptr<std::thread> decodeThread_;
     std::condition_variable decodeCond_;
