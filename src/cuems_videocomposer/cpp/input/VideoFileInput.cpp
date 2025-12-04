@@ -1336,10 +1336,6 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         }
     }
     
-    // Lock decode mutex to serialize access to FFmpeg resources
-    // This allows async decode thread and main thread to safely share codecCtx_, frame_, swsCtx_, etc.
-    std::unique_lock<std::mutex> decodeLock(decodeMutex_);
-    
     // Seek only if needed
     if (needSeek) {
     if (!seek(frameNumber)) {
@@ -2223,22 +2219,15 @@ void VideoFileInput::stopAsyncDecode() {
 }
 
 void VideoFileInput::startAsyncDecode(int64_t startFrame) {
-    // Only use async decode for software decoding (hardware decode is already fast)
-    if (useHardwareDecoding_) {
-        return;
-    }
-    
-    // Start decode thread if not running
-    if (!decodeThread_) {
-        decodeThreadStop_ = false;
-        decodeThreadRunning_ = true;
-        decodeTargetFrame_ = startFrame + 1;  // Start decoding next frame
-        decodeThread_ = std::make_unique<std::thread>(&VideoFileInput::decodeThreadFunc, this);
-    } else {
-        // Update target and wake thread
-        decodeTargetFrame_ = startFrame + 1;
-        decodeCond_.notify_one();
-    }
+    // DISABLED: Async decode with simple mutex causes deadlock
+    // The main thread waits for mutex while async thread decodes = blocked playback
+    // 
+    // Proper fix requires separate AVCodecContext per thread (like mpv):
+    //   - Main thread has its own decoder for on-demand frames
+    //   - Async thread has separate decoder for pre-buffering
+    //   - No mutex needed between them, just atomic cache access
+    (void)startFrame;
+    return;
 }
 
 VideoFileInput::CachedFrame* VideoFileInput::findCachedFrame(int64_t frameNumber) {
@@ -2303,14 +2292,11 @@ void VideoFileInput::decodeThreadFunc() {
 
 bool VideoFileInput::decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffer) {
     // This is a copy of the decoding logic from readFrame, but without cache check
-    // Used by the async decode thread
+    // Used by the async decode thread (currently disabled)
     
     if (!isReady()) {
         return false;
     }
-
-    // Lock decode mutex to serialize access to FFmpeg resources
-    std::unique_lock<std::mutex> decodeLock(decodeMutex_);
 
     // Check if we need to seek
     bool needSeek = false;
