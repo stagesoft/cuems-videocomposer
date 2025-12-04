@@ -343,11 +343,16 @@ int VideoComposerApplication::run() {
     while (running_ && shouldContinue()) {
         processEvents();
         
-        // Update layers - MTC polling and frame loading happens here
-        // Note: For VAAPI, frames are already on GPU (zero-copy)
-        // DRMBackend::render() will make GL context current before rendering
+        // Make OpenGL context current before updating layers
+        // Required for VAAPI: EGL image creation needs current EGL context
+        if (displayBackend_ && displayBackend_->isWindowOpen()) {
+            displayBackend_->makeCurrent();
+        }
+        
         updateLayers();
         
+        // Keep context current for render() - avoid extra context switch
+        // DRMBackend::render() will use the already-current context
         render();
         
         // No software frame timer needed for DRM - vsync/page-flip provides timing
