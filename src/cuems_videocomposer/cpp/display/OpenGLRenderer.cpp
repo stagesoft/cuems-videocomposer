@@ -157,11 +157,12 @@ void OpenGLRenderer::cleanup() {
         textureId_ = 0;
     }
     
-    // Cleanup all cached layer textures
+    // Cleanup all cached layer textures and PBOs
     for (auto& pair : layerTextureCache_) {
         if (pair.second.textureId != 0) {
             glDeleteTextures(1, &pair.second.textureId);
         }
+        cleanupLayerPBOs(pair.second);
     }
     layerTextureCache_.clear();
     
@@ -175,6 +176,44 @@ void OpenGLRenderer::cleanup() {
     cleanupMasterFBO();
     
     initialized_ = false;
+}
+
+// PBO helper methods for async texture upload
+bool OpenGLRenderer::initLayerPBOs(LayerTextureCache& cache, int width, int height) {
+    if (cache.pboInitialized) {
+        return true;
+    }
+    
+    // Calculate buffer size (BGRA = 4 bytes per pixel)
+    size_t bufferSize = static_cast<size_t>(width) * height * 4;
+    
+    glGenBuffers(2, cache.pbo);
+    if (cache.pbo[0] == 0 || cache.pbo[1] == 0) {
+        LOG_ERROR << "Failed to create PBOs for layer texture upload";
+        return false;
+    }
+    
+    // Initialize both PBOs with empty storage
+    for (int i = 0; i < 2; i++) {
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cache.pbo[i]);
+        glBufferData(GL_PIXEL_UNPACK_BUFFER, bufferSize, nullptr, GL_STREAM_DRAW);
+    }
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    
+    cache.pboIndex = 0;
+    cache.pboInitialized = true;
+    
+    LOG_DEBUG << "Initialized PBO double-buffering for layer (" << width << "x" << height << ")";
+    return true;
+}
+
+void OpenGLRenderer::cleanupLayerPBOs(LayerTextureCache& cache) {
+    if (cache.pboInitialized) {
+        glDeleteBuffers(2, cache.pbo);
+        cache.pbo[0] = 0;
+        cache.pbo[1] = 0;
+        cache.pboInitialized = false;
+    }
 }
 
 void OpenGLRenderer::setViewport(int x, int y, int width, int height) {
@@ -528,14 +567,17 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
             GLuint shaderTextureId = 0;
             auto cacheIt = layerTextureCache_.find(layerId);
             
+            LayerTextureCache* cachePtr = nullptr;
             if (cacheIt != layerTextureCache_.end() &&
                 cacheIt->second.width == layerTextureWidth &&
                 cacheIt->second.height == layerTextureHeight) {
                 shaderTextureId = cacheIt->second.textureId;
+                cachePtr = &cacheIt->second;
             } else {
                 // Create new GL_TEXTURE_2D
                 if (cacheIt != layerTextureCache_.end()) {
                     texturesToDelete_.push_back(cacheIt->second.textureId);
+                    cleanupLayerPBOs(cacheIt->second);
                     layerTextureCache_.erase(cacheIt);
                 }
                 
@@ -552,14 +594,50 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 cache.textureId = shaderTextureId;
                 cache.width = layerTextureWidth;
                 cache.height = layerTextureHeight;
+                cache.pbo[0] = 0;
+                cache.pbo[1] = 0;
+                cache.pboIndex = 0;
+                cache.pboInitialized = false;
                 layerTextureCache_[layerId] = cache;
+                cachePtr = &layerTextureCache_[layerId];
             }
             
-            // Upload frame data - ensure we're on texture unit 0
+            // Upload frame data using PBO double-buffering for async transfer
+            // This avoids blocking the render thread during CPU→GPU copy
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, shaderTextureId);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
-                            GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
+            
+            size_t dataSize = static_cast<size_t>(layerTextureWidth) * layerTextureHeight * 4;
+            
+            if (cachePtr && initLayerPBOs(*cachePtr, layerTextureWidth, layerTextureHeight)) {
+                // PBO path: async upload
+                int currentPBO = cachePtr->pboIndex;
+                int nextPBO = 1 - currentPBO;
+                
+                // Bind the "next" PBO for texture upload (data was copied last frame)
+                // On first frame, this will upload uninitialized data, but that's ok
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cachePtr->pbo[nextPBO]);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
+                                GL_BGRA, GL_UNSIGNED_BYTE, nullptr);  // offset 0 in PBO
+                
+                // Now copy new frame data to "current" PBO (async DMA)
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cachePtr->pbo[currentPBO]);
+                // Use GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT for best performance
+                void* ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, dataSize,
+                                             GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+                if (ptr) {
+                    memcpy(ptr, cpuBuffer->data(), dataSize);
+                    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+                }
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+                
+                // Swap PBO index for next frame
+                cachePtr->pboIndex = nextPBO;
+            } else {
+                // Fallback: direct upload (no PBO)
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
+                                GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
+            }
             
             // Apply blend mode
             applyBlendModeFromProps(props);

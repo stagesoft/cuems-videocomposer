@@ -2223,8 +2223,17 @@ void VideoFileInput::startAsyncDecode(int64_t startFrame) {
     // The decode thread and main thread share frame_, codecCtx_, swsCtx_, etc.
     // without proper synchronization, causing corrupted frames.
     // 
-    // TODO: Implement properly with separate decoder instance per thread,
-    // or use a producer-consumer pattern with proper synchronization.
+    // TODO: SMOOTHNESS FIX #2 - Implement proper async decode like mpv
+    // The fix requires:
+    //   1. Create separate AVCodecContext for decode thread (or use mutex)
+    //   2. Separate AVFrame and SwsContext per thread
+    //   3. Producer-consumer queue: decode thread produces, render thread consumes
+    //   4. Pre-buffer 2-4 frames ahead of current playback position
+    // 
+    // mpv's approach in video/decode/vd_lavc.c:
+    //   - Uses mp_dispatch for thread-safe decode requests
+    //   - Maintains internal frame queue in filters/f_decoder_wrapper.c
+    //   - Decodes ahead based on display timing requirements
     (void)startFrame;
     return;
     

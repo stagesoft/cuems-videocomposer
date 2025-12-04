@@ -102,8 +102,16 @@ private:
         GLuint textureId;
         int width;
         int height;
+        // PBO double-buffering for async texture upload
+        GLuint pbo[2];          // Double-buffered PBOs
+        int pboIndex;           // Current PBO index (0 or 1)
+        bool pboInitialized;    // PBOs have been created
     };
     std::map<int, LayerTextureCache> layerTextureCache_;
+    
+    // PBO helper methods
+    bool initLayerPBOs(LayerTextureCache& cache, int width, int height);
+    void cleanupLayerPBOs(LayerTextureCache& cache);
     
     // Master layer properties (for composite output)
     MasterProperties masterProperties_;

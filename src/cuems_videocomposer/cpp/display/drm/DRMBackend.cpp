@@ -255,8 +255,8 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     
     // Page flips are now scheduled immediately after swap in blitToOutput()
     // This matches mpv's approach: swap then immediately lock_front_buffer
-}
-
+    }
+    
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately
     
@@ -264,8 +264,8 @@ void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager
     for (auto& [name, surface] : surfaces_) {
         if (surface->isFlipPending()) {
             surface->waitForFlip();
-        }
     }
+}
     
     // Render to each output
     for (auto& [name, surface] : surfaces_) {
