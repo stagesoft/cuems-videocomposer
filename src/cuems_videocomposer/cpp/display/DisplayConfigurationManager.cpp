@@ -68,7 +68,7 @@ bool DisplayConfigurationManager::setResolutionPolicyFromString(const std::strin
     } else if (p == "custom") {
         setResolutionPolicy(ResolutionPolicy::CUSTOM);
     } else {
-        LOG_WARNING << "DisplayConfigurationManager: Unknown resolution policy: " << policy;
+        // Don't log here - caller will provide better error message
         return false;
     }
     

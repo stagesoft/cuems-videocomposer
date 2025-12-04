@@ -935,18 +935,6 @@ bool DRMOutputManager::setMode(const std::string& name, int width, int height, d
 
 void DRMOutputManager::setResolutionMode(ResolutionMode mode) {
     resolutionMode_ = mode;
-    
-    const char* modeName = "UNKNOWN";
-    switch (mode) {
-        case ResolutionMode::NATIVE:    modeName = "NATIVE"; break;
-        case ResolutionMode::MAXIMUM:   modeName = "MAXIMUM"; break;
-        case ResolutionMode::HD_1080P:  modeName = "1080P"; break;
-        case ResolutionMode::HD_720P:   modeName = "720P"; break;
-        case ResolutionMode::UHD_4K:    modeName = "4K"; break;
-        case ResolutionMode::CUSTOM:    modeName = "CUSTOM"; break;
-    }
-    
-    LOG_INFO << "DRMOutputManager: Resolution mode set to " << modeName;
 }
 
 bool DRMOutputManager::applyResolutionMode() {

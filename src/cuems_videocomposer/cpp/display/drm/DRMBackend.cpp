@@ -43,7 +43,24 @@ bool DRMBackend::openWindow() {
         return false;
     }
     
-    // Get connected outputs
+    // Apply resolution mode before creating surfaces
+    // This modifies the output dimensions in outputManager_
+    if (configManager_) {
+        ResolutionPolicy policy = configManager_->getResolutionPolicy();
+        ResolutionMode resMode;
+        switch (policy) {
+            case ResolutionPolicy::NATIVE:   resMode = ResolutionMode::NATIVE; break;
+            case ResolutionPolicy::MAXIMUM:  resMode = ResolutionMode::MAXIMUM; break;
+            case ResolutionPolicy::HD_1080P: resMode = ResolutionMode::HD_1080P; break;
+            case ResolutionPolicy::HD_720P:  resMode = ResolutionMode::HD_720P; break;
+            case ResolutionPolicy::UHD_4K:   resMode = ResolutionMode::UHD_4K; break;
+            default:                         resMode = ResolutionMode::HD_1080P; break;
+        }
+        outputManager_->setResolutionMode(resMode);
+        outputManager_->applyResolutionMode();
+    }
+    
+    // Get connected outputs (with resolution mode applied)
     const auto& outputs = outputManager_->getOutputs();
     if (outputs.empty()) {
         LOG_ERROR << "DRMBackend: No connected outputs found";
@@ -124,15 +141,6 @@ bool DRMBackend::openWindow() {
     initialized_ = true;
     LOG_INFO << "DRMBackend: Initialized with " << surfaces_.size() << " output(s)"
              << (useVirtualCanvas_ ? " (Virtual Canvas mode)" : " (Legacy mode)");
-    
-    // Apply resolution mode that was set before initialization
-    if (configManager_) {
-        std::string pendingMode = configManager_->getResolutionPolicyString();
-        if (!pendingMode.empty() && pendingMode != "1080p") {
-            LOG_INFO << "DRMBackend: Applying pending resolution mode: " << pendingMode;
-            setResolutionMode(pendingMode);
-        }
-    }
     
     return true;
 }
@@ -633,13 +641,13 @@ bool DRMBackend::setResolutionMode(const std::string& mode) {
         return false;
     }
     
-    LOG_INFO << "Resolution mode set to: " << mode;
-    
     // If not initialized yet, just store the mode - it will be applied in openWindow()
     if (!initialized_ || !outputManager_ || surfaces_.empty()) {
-        LOG_INFO << "  (will be applied when display is initialized)";
+        LOG_INFO << "Resolution mode set to: " << mode << " (will be applied when display is initialized)";
         return true;
     }
+    
+    LOG_INFO << "Resolution mode: " << mode;
     
     // Map to DRMOutputManager's ResolutionMode
     ResolutionPolicy policy = configManager_->getResolutionPolicy();

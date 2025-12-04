@@ -195,8 +195,11 @@ bool VideoComposerApplication::initializeDisplay() {
         
         // Apply resolution mode from command line
         std::string resMode = config_->getString("resolution_mode", "1080p");
-        drmBackend->setResolutionMode(resMode);
-        LOG_INFO << "Resolution mode: " << resMode;
+        if (!drmBackend->setResolutionMode(resMode)) {
+            LOG_ERROR << "Invalid resolution mode: " << resMode;
+            LOG_ERROR << "Valid modes: native, maximum, 1080p, 720p, 4k";
+            return false;
+        }
         
         if (drmBackend->openWindow()) {
             LOG_INFO << "DRM/KMS backend initialized with " << drmBackend->getOutputCount() << " output(s)";
