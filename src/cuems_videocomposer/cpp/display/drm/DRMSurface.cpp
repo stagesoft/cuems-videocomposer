@@ -9,6 +9,10 @@
 #include <cstring>
 #include <unistd.h>
 #include <poll.h>
+#include <iomanip>
+
+// DRM fourcc and modifiers
+#include <drm_fourcc.h>
 
 // OpenGL headers
 #include <GL/gl.h>
@@ -437,18 +441,57 @@ bool DRMSurface::resize(int width, int height) {
     // instead of just drmModePageFlip (which would fail since CRTC was cleared)
     modeSet_ = false;
     
-    // Create new GBM surface
-    gbmSurface_ = gbm_surface_create(gbmDevice_, width_, height_,
-                                      GBM_FORMAT_XRGB8888,
-                                      GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
-    if (!gbmSurface_) {
-        LOG_ERROR << "DRMSurface::resize: Failed to create new GBM surface";
-        return false;
+    // Try different formats - same approach as init()
+    static const struct {
+        uint32_t format;
+        const char* name;
+    } formats[] = {
+        { GBM_FORMAT_XRGB8888, "XRGB8888" },
+        { GBM_FORMAT_ARGB8888, "ARGB8888" },
+        { GBM_FORMAT_XBGR8888, "XBGR8888" },
+        { GBM_FORMAT_ABGR8888, "ABGR8888" },
+    };
+    
+    static const struct {
+        uint32_t flags;
+        const char* name;
+    } usageFlags[] = {
+        { GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING, "SCANOUT|RENDERING" },
+        { GBM_BO_USE_RENDERING, "RENDERING only" },
+        { GBM_BO_USE_SCANOUT, "SCANOUT only" },
+    };
+    
+    // Create new GBM surface - try all format/usage combinations
+    for (const auto& fmt : formats) {
+        for (const auto& usage : usageFlags) {
+            gbmSurface_ = gbm_surface_create(gbmDevice_, width_, height_, fmt.format, usage.flags);
+            if (gbmSurface_) {
+                LOG_INFO << "DRMSurface::resize: Created GBM surface with format " << fmt.name 
+                         << ", usage " << usage.name;
+                goto gbm_resize_surface_created;
+            }
+        }
     }
     
-    // Create new EGL surface
-    eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
-                                          (EGLNativeWindowType)gbmSurface_, nullptr);
+    LOG_ERROR << "DRMSurface::resize: Failed to create new GBM surface with any format";
+    return false;
+    
+gbm_resize_surface_created:
+    
+    // Try platform-aware EGL surface creation first, then fallback
+    PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC eglCreatePlatformWindowSurfaceEXT =
+        (PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC)eglGetProcAddress("eglCreatePlatformWindowSurfaceEXT");
+    
+    if (eglCreatePlatformWindowSurfaceEXT) {
+        eglSurface_ = eglCreatePlatformWindowSurfaceEXT(eglDisplay_, eglConfig_, gbmSurface_, nullptr);
+    }
+    
+    if (eglSurface_ == EGL_NO_SURFACE) {
+        // Fallback to legacy
+        eglSurface_ = eglCreateWindowSurface(eglDisplay_, eglConfig_,
+                                              (EGLNativeWindowType)gbmSurface_, nullptr);
+    }
+    
     if (eglSurface_ == EGL_NO_SURFACE) {
         LOG_ERROR << "DRMSurface::resize: Failed to create new EGL surface";
         gbm_surface_destroy(gbmSurface_);
@@ -515,25 +558,80 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
     
     uint32_t width = gbm_bo_get_width(bo);
     uint32_t height = gbm_bo_get_height(bo);
-    uint32_t stride = gbm_bo_get_stride(bo);
-    uint32_t handle = gbm_bo_get_handle(bo).u32;
     uint32_t format = gbm_bo_get_format(bo);
+    uint64_t modifier = gbm_bo_get_modifier(bo);
     
-    // Determine depth and bpp from format
-    uint32_t depth = 24;
-    uint32_t bpp = 32;
+    // Use modern multi-plane aware API (required for NVIDIA and many modern drivers)
+    uint32_t handles[4] = {0};
+    uint32_t strides[4] = {0};
+    uint32_t offsets[4] = {0};
+    uint64_t modifiers[4] = {0};
+    uint32_t flags = 0;
     
-    if (format == GBM_FORMAT_ARGB8888 || format == GBM_FORMAT_XRGB8888) {
-        depth = 24;
-        bpp = 32;
+    int num_planes = gbm_bo_get_plane_count(bo);
+    if (num_planes <= 0) {
+        num_planes = 1;  // Fallback for older GBM
     }
     
-    // Create DRM framebuffer
-    int ret = drmModeAddFB(outputManager_->getFd(), width, height,
-                           depth, bpp, stride, handle, &fb.fbId);
+    for (int i = 0; i < num_planes && i < 4; ++i) {
+        handles[i] = gbm_bo_get_handle_for_plane(bo, i).u32;
+        strides[i] = gbm_bo_get_stride_for_plane(bo, i);
+        offsets[i] = gbm_bo_get_offset(bo, i);
+        modifiers[i] = modifier;
+    }
+    
+    // If plane-aware functions failed, fall back to legacy single-plane
+    if (handles[0] == 0) {
+        handles[0] = gbm_bo_get_handle(bo).u32;
+        strides[0] = gbm_bo_get_stride(bo);
+        offsets[0] = 0;
+    }
+    
+    int ret = -1;
+    
+    // Try with modifiers first (NVIDIA and modern drivers prefer this)
+    if (modifier != 0 && modifier != DRM_FORMAT_MOD_INVALID) {
+        flags = DRM_MODE_FB_MODIFIERS;
+        LOG_INFO << "DRMSurface: Creating framebuffer with modifier 0x" << std::hex << modifier << std::dec;
+        
+        ret = drmModeAddFB2WithModifiers(outputManager_->getFd(), width, height,
+                                          format, handles, strides, offsets,
+                                          modifiers, &fb.fbId, flags);
+        if (ret != 0) {
+            LOG_WARNING << "DRMSurface: drmModeAddFB2WithModifiers failed: " << strerror(-ret) 
+                       << ", trying without modifiers";
+        }
+    }
+    
+    // Try drmModeAddFB2 without modifiers
+    if (ret != 0) {
+        ret = drmModeAddFB2(outputManager_->getFd(), width, height,
+                            format, handles, strides, offsets, &fb.fbId, 0);
+        if (ret != 0) {
+            LOG_WARNING << "DRMSurface: drmModeAddFB2 failed: " << strerror(-ret) 
+                       << ", trying legacy API";
+        }
+    }
+    
+    // Final fallback to legacy drmModeAddFB (should rarely be needed)
+    if (ret != 0) {
+        uint32_t depth = 24;
+        uint32_t bpp = 32;
+        
+        if (format == GBM_FORMAT_ARGB8888 || format == GBM_FORMAT_XRGB8888 ||
+            format == GBM_FORMAT_ABGR8888 || format == GBM_FORMAT_XBGR8888) {
+            depth = 24;
+            bpp = 32;
+        }
+        
+        ret = drmModeAddFB(outputManager_->getFd(), width, height,
+                           depth, bpp, strides[0], handles[0], &fb.fbId);
+    }
     
     if (ret != 0) {
-        LOG_ERROR << "DRMSurface: Failed to create framebuffer: " << strerror(-ret);
+        LOG_ERROR << "DRMSurface: Failed to create framebuffer with all methods: " << strerror(-ret);
+        LOG_ERROR << "DRMSurface: Format=0x" << std::hex << format << std::dec 
+                 << " Size=" << width << "x" << height;
         fb.bo = nullptr;
         fb.fbId = 0;
         return false;
