@@ -775,6 +775,7 @@ bool DRMSurface::schedulePageFlip() {
     }
     
     // Lock front buffer from GBM surface
+    // Note: glFinish() is called before swapBuffers to ensure rendering is complete
     gbm_bo* bo = gbm_surface_lock_front_buffer(gbmSurface_);
     if (!bo) {
         LOG_ERROR << "DRMSurface: Failed to lock front buffer";

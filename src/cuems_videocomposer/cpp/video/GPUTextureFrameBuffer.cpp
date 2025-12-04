@@ -637,7 +637,6 @@ bool GPUTextureFrameBuffer::uploadHapQAlphaData(const uint8_t* colorData, size_t
     
     glBindTexture(GL_TEXTURE_2D, 0);
     
-    
     return true;
 }
 

@@ -10,6 +10,7 @@
 #include "../../osd/OSDManager.h"
 #include "../../utils/Logger.h"
 
+#include <cstdlib>  // for getenv
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
@@ -119,6 +120,13 @@ bool DRMBackend::openWindow() {
     if (primary) {
         primary->makeCurrent();
         
+        // Check for environment variable to disable Virtual Canvas (for debugging)
+        const char* disableVC = std::getenv("VIDEOCOMPOSER_NO_VIRTUAL_CANVAS");
+        if (disableVC && (std::string(disableVC) == "1" || std::string(disableVC) == "true")) {
+            LOG_INFO << "DRMBackend: Virtual Canvas disabled via VIDEOCOMPOSER_NO_VIRTUAL_CANVAS";
+            useVirtualCanvas_ = false;
+        }
+        
         if (useVirtualCanvas_) {
             // Virtual Canvas mode: use MultiOutputRenderer
             if (!initVirtualCanvas()) {
@@ -203,18 +211,9 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
         return;
     }
     
-    // mpv approach: only wait for flip when we MUST (no free buffers)
-    // This allows rendering ahead while previous frame is being displayed
-    // Process any pending flip events first (non-blocking)
+    // Traditional double-buffering: wait for previous flip before rendering
     for (auto& [name, surface] : surfaces_) {
-        surface->processFlipEvents();
-    }
-    
-    // Check if any surface needs to wait for a free buffer
-    // Only block if GBM has no free buffers available
-    for (auto& [name, surface] : surfaces_) {
-        if (surface->isFlipPending() && !surface->hasFreeBuffers()) {
-            // Must wait - no free buffers to render into
+        if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
     }
@@ -229,22 +228,16 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     
     primary->releaseCurrent();
     
-    // Schedule page flips for all surfaces (non-blocking)
-    for (auto& [name, surface] : surfaces_) {
-        surface->schedulePageFlip();
-    }
-    
-    // Don't wait here - let the next frame's check handle it
-    // This is the key difference from before: we render ahead
+    // Page flips are now scheduled immediately after swap in blitToOutput()
+    // This matches mpv's approach: swap then immediately lock_front_buffer
 }
 
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately
     
-    // mpv approach: process pending flip events and only wait when necessary
+    // Traditional double-buffering: wait for previous flip before rendering
     for (auto& [name, surface] : surfaces_) {
-        surface->processFlipEvents();
-        if (surface->isFlipPending() && !surface->hasFreeBuffers()) {
+        if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
     }

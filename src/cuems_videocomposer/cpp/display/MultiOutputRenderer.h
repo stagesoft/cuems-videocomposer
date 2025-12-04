@@ -90,6 +90,10 @@ public:
     virtual void releaseCurrent() = 0;
     virtual void swapBuffers() = 0;
     
+    // Schedule page flip (DRM-specific, no-op for X11/Wayland)
+    // Called immediately after swapBuffers to minimize latency
+    virtual bool schedulePageFlip() { return true; }
+    
     virtual uint32_t getWidth() const = 0;
     virtual uint32_t getHeight() const = 0;
     virtual const OutputInfo& getOutputInfo() const = 0;

@@ -142,7 +142,7 @@ void VirtualCanvas::endFrame() {
         return;
     }
     
-    // Ensure all rendering is complete
+    // Flush GL commands (glFinish not needed - waitForFlip provides sync)
     glFlush();
     
     // Unbind FBO (restore default framebuffer)

@@ -52,8 +52,11 @@ void PresentationTiming::recordFlip(unsigned int sec, unsigned int usec, unsigne
             
             if (current_.skipped_vsyncs > 0) {
                 totalDroppedFrames_ += current_.skipped_vsyncs;
-                LOG_WARNING << "PresentationTiming: Dropped " << current_.skipped_vsyncs 
-                           << " frame(s) (total: " << totalDroppedFrames_ << ")";
+                // Only log occasionally to avoid spam (every 60 drops = ~1 per second at 60Hz)
+                if (totalDroppedFrames_ <= 5 || totalDroppedFrames_ % 60 == 0) {
+                    LOG_WARNING << "PresentationTiming: Dropped " << current_.skipped_vsyncs 
+                               << " frame(s) (total: " << totalDroppedFrames_ << ")";
+                }
             }
         } else if (msc_delta == 0) {
             // Same vsync - this shouldn't happen with proper page flipping

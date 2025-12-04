@@ -223,8 +223,11 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
         output.region
     );
     
-    // Swap buffers (EGL swap for DRM surfaces)
+    // Swap buffers
     output.surface->swapBuffers();
+    
+    // Schedule page flip immediately after swap
+    output.surface->schedulePageFlip();
     
     output.surface->releaseCurrent();
 }

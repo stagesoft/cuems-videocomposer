@@ -101,7 +101,7 @@ public:
      * Schedule page flip (non-blocking)
      * @return true on success
      */
-    bool schedulePageFlip();
+    bool schedulePageFlip() override;
     
     /**
      * Wait for pending page flip to complete
