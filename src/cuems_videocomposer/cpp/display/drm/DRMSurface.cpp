@@ -389,6 +389,14 @@ gbm_surface_created:
     
     eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     
+    // Initialize presentation timing with display refresh rate
+    const OutputInfo& outputInfo = getOutputInfo();
+    if (outputInfo.refreshRate > 0) {
+        presentationTiming_.init(outputInfo.refreshRate);
+    } else {
+        presentationTiming_.init(60.0);  // Fallback to 60Hz
+    }
+    
     initialized_ = true;
     LOG_INFO << "DRMSurface: Initialized successfully for " << outputName_;
     
@@ -926,9 +934,12 @@ void DRMSurface::waitForFlip() {
 void DRMSurface::pageFlipHandler(int fd, unsigned int frame,
                                   unsigned int sec, unsigned int usec,
                                   void* data) {
-    (void)fd; (void)frame; (void)sec; (void)usec;
+    (void)fd;
     DRMSurface* surface = static_cast<DRMSurface*>(data);
     if (surface) {
+        // Record presentation timing (like mpv's drm_pflip_cb)
+        // frame = msc (vsync counter), sec/usec = presentation timestamp
+        surface->presentationTiming_.recordFlip(sec, usec, frame);
         surface->flipPending_ = false;
     }
 }

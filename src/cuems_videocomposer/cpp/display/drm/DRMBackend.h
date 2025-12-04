@@ -200,6 +200,11 @@ public:
     MultiOutputRenderer* getMultiOutputRenderer() { return multiRenderer_.get(); }
     
     /**
+     * Get total dropped frames across all outputs (frame pacing stats)
+     */
+    int64_t getTotalDroppedFrames() const;
+    
+    /**
      * Configure output region in the virtual canvas
      * @param outputName Output name (e.g., "HDMI-A-1")
      * @param region Output region configuration

@@ -647,6 +647,7 @@ if(ENABLE_DRM_BACKEND AND DRM_FOUND AND EGL_FOUND)
             src/cuems_videocomposer/cpp/display/drm/DRMSurface.cpp
             src/cuems_videocomposer/cpp/display/drm/SeatManager.cpp
             src/cuems_videocomposer/cpp/display/drm/DRMBackend.cpp
+            src/cuems_videocomposer/cpp/display/drm/PresentationTiming.cpp
         )
         
         message(STATUS "DRM/KMS backend enabled (GBM + EGL)")

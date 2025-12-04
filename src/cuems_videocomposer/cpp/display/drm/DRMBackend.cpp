@@ -1007,5 +1007,15 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName, const Outp
     return false;
 }
 
+int64_t DRMBackend::getTotalDroppedFrames() const {
+    int64_t total = 0;
+    for (const auto& [name, surface] : surfaces_) {
+        if (surface) {
+            total += surface->getPresentationTiming().getTotalDroppedFrames();
+        }
+    }
+    return total;
+}
+
 } // namespace videocomposer
 

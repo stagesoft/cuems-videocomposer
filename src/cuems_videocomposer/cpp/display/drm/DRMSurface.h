@@ -17,6 +17,7 @@
 
 #include "../OutputInfo.h"
 #include "../MultiOutputRenderer.h"  // For OutputSurface base class
+#include "PresentationTiming.h"
 #include <gbm.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -242,6 +243,16 @@ private:
     // DRM IDs (cached)
     uint32_t connectorId_ = 0;
     uint32_t crtcId_ = 0;
+    
+    // Presentation timing (frame pacing like mpv)
+    PresentationTiming presentationTiming_;
+    
+public:
+    /**
+     * Get presentation timing information
+     */
+    const PresentationTiming& getPresentationTiming() const { return presentationTiming_; }
+    PresentationTiming& getPresentationTiming() { return presentationTiming_; }
 };
 
 } // namespace videocomposer
