@@ -237,18 +237,22 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     // for many use cases but should be improved for professional multi-projector setups.
     
     // Traditional double-buffering: wait for previous flip before rendering
-    // MPV-STYLE RENDER-AHEAD: Only wait when we need a buffer
-    // Instead of waiting for ALL flips before rendering, we:
-    // 1. Process any completed flip events (non-blocking)
-    // 2. Only wait if there's no free buffer available
-    // This allows rendering to happen while the previous frame is being displayed,
-    // reducing frame delivery jitter and improving perceived smoothness.
+    // Wait for previous flip to complete before rendering
+    // 
+    // Why we can't do full render-ahead with 2 buffers:
+    // - Buffer A: being displayed
+    // - Buffer B: flip pending
+    // Even if GBM says a buffer is "free", we can't schedule a new flip
+    // until the pending one completes. True render-ahead needs 3+ buffers.
+    //
+    // Optimization: processFlipEvents() first (non-blocking), so we don't
+    // block unnecessarily if the flip already completed.
     for (auto& [name, surface] : surfaces_) {
-        // First, process any completed flip events (non-blocking)
+        // Check if flip completed (non-blocking)
         surface->processFlipEvents();
         
-        // Only wait if we don't have a free buffer to render to
-        if (surface->isFlipPending() && !surface->hasFreeBuffers()) {
+        // Must wait for flip to complete before scheduling next one
+        if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
     }
@@ -270,10 +274,10 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately
     
-    // MPV-STYLE RENDER-AHEAD: Only wait when we need a buffer
+    // Wait for previous flip (non-blocking check first, then wait if needed)
     for (auto& [name, surface] : surfaces_) {
         surface->processFlipEvents();
-        if (surface->isFlipPending() && !surface->hasFreeBuffers()) {
+        if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
     }
