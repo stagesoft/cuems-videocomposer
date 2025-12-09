@@ -40,6 +40,30 @@ enum class ResolutionMode {
 };
 
 /**
+ * DRMPlane - Internal representation of a DRM plane
+ * Used for atomic modesetting (FB_ID is a plane property, not CRTC)
+ */
+struct DRMPlane {
+    uint32_t planeId = 0;           // DRM plane ID
+    uint32_t possibleCrtcs = 0;     // Bitmask of CRTCs this plane can work with
+    uint32_t type = 0;              // DRM_PLANE_TYPE_PRIMARY/OVERLAY/CURSOR
+    
+    // Property IDs (cached for atomic commits)
+    uint32_t propFbId = 0;          // FB_ID property
+    uint32_t propCrtcId = 0;        // CRTC_ID property
+    uint32_t propSrcX = 0;          // SRC_X property
+    uint32_t propSrcY = 0;          // SRC_Y property
+    uint32_t propSrcW = 0;          // SRC_W property
+    uint32_t propSrcH = 0;          // SRC_H property
+    uint32_t propCrtcX = 0;         // CRTC_X property
+    uint32_t propCrtcY = 0;         // CRTC_Y property
+    uint32_t propCrtcW = 0;         // CRTC_W property
+    uint32_t propCrtcH = 0;         // CRTC_H property
+    
+    bool propertiesLoaded = false;  // True if property IDs are cached
+};
+
+/**
  * DRMConnector - Internal representation of a DRM connector
  */
 struct DRMConnector {
@@ -227,6 +251,20 @@ public:
      */
     bool commitAtomic(drmModeAtomicReq* request, uint32_t flags);
     
+    // ===== Plane Management =====
+    
+    /**
+     * Get primary plane for a CRTC
+     * @param crtcId CRTC ID
+     * @return Pointer to plane, or nullptr if not found
+     */
+    DRMPlane* getPrimaryPlaneForCrtc(uint32_t crtcId);
+    
+    /**
+     * Get all planes
+     */
+    const std::vector<DRMPlane>& getPlanes() const { return planes_; }
+    
     // ===== CRTC Management =====
     
     /**
@@ -287,6 +325,9 @@ private:
     
     // Connectors (single source of truth for output info)
     std::vector<DRMConnector> connectors_;
+    
+    // Planes (for atomic modesetting)
+    std::vector<DRMPlane> planes_;
     
     // CRTC allocation tracking
     std::map<uint32_t, uint32_t> crtcToConnector_;  // crtcId -> connectorId
@@ -356,6 +397,21 @@ private:
      * Enable atomic modesetting if supported
      */
     void enableAtomic();
+    
+    /**
+     * Discover planes and their properties
+     */
+    void discoverPlanes();
+    
+    /**
+     * Load property IDs for a plane
+     */
+    void loadPlaneProperties(DRMPlane& plane);
+    
+    /**
+     * Get CRTC index in resources array
+     */
+    int getCrtcIndex(uint32_t crtcId) const;
 };
 
 } // namespace videocomposer

@@ -50,6 +50,18 @@ bool DRMSurface::init(EGLContext sharedContext, EGLDisplay sharedDisplay, gbm_de
     width_ = connector->info.width;
     height_ = connector->info.height;
     
+    // Get primary plane for atomic modesetting
+    if (outputManager_->supportsAtomic()) {
+        plane_ = outputManager_->getPrimaryPlaneForCrtc(crtcId_);
+        if (plane_) {
+            LOG_DEBUG << "DRMSurface: Using plane " << plane_->planeId 
+                      << " for CRTC " << crtcId_;
+        } else {
+            LOG_WARNING << "DRMSurface: No primary plane for CRTC " << crtcId_ 
+                        << ", atomic modesetting may not work";
+        }
+    }
+    
     if (width_ == 0 || height_ == 0) {
         LOG_ERROR << "DRMSurface: Invalid output dimensions";
         return false;
@@ -933,8 +945,9 @@ uint32_t DRMSurface::prepareAtomicFlip() {
         }
     }
     
-    // Store the BO for later (will be committed in finalizeAtomicFlip)
+    // Store the BO and FB ID for later (will be committed in finalizeAtomicFlip)
     pendingBo_ = bo;
+    pendingFbId_ = nextFb_.fbId;
     
     return nextFb_.fbId;
 }

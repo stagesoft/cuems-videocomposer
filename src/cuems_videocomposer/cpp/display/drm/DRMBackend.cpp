@@ -227,118 +227,126 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     
     primary->releaseCurrent();
     
-    // Use atomic modesetting for multi-output to flip all on same vsync
+    // Wait for all pending flips to complete first
+    for (auto& [name, surface] : surfaces_) {
+        if (surface->isFlipPending()) {
+            surface->waitForFlip();
+        }
+    }
+    
+    // Check if we can use atomic modesetting with planes
     bool useAtomic = outputManager_->supportsAtomic() && surfaces_.size() > 1;
+    bool allHavePlanes = true;
+    bool allModesSet = true;
+    
+    if (useAtomic) {
+        for (auto& [name, surface] : surfaces_) {
+            if (!surface->getPlane()) {
+                allHavePlanes = false;
+            }
+            if (!surface->isModeSet()) {
+                allModesSet = false;
+            }
+        }
+        useAtomic = allHavePlanes && allModesSet;
+    }
     
     if (useAtomic) {
         // ATOMIC PATH: Submit all page flips in single atomic commit
-        // This allows all outputs to flip on the same vsync = 60fps for dual output
-        
-        // Wait for all pending flips first
-        for (auto& [name, surface] : surfaces_) {
-            if (surface->isFlipPending()) {
-                surface->waitForFlip();
-            }
-        }
-        
-        // Check if all surfaces have mode set (first frame uses SetCrtc)
-        bool allModesSet = true;
-        for (auto& [name, surface] : surfaces_) {
-            if (!surface->isModeSet()) {
-                allModesSet = false;
-                break;
-            }
-        }
-        
-        if (!allModesSet) {
-            // First frame: use legacy path to set modes
-            for (auto& [name, surface] : surfaces_) {
-                surface->schedulePageFlip();
-            }
-        } else {
-            // Prepare atomic request
-            drmModeAtomicReq* request = outputManager_->createAtomicRequest();
-            if (request) {
-                bool prepareSuccess = true;
-                std::vector<DRMSurface*> preparedSurfaces;
-                
-                // Prepare each surface for atomic flip
-                for (auto& [name, surface] : surfaces_) {
-                    uint32_t fbId = surface->prepareAtomicFlip();
-                    if (fbId == 0) {
-                        prepareSuccess = false;
-                        break;
-                    }
-                    preparedSurfaces.push_back(surface.get());
-                    
-                    // Get FB_ID property for CRTC
-                    uint32_t crtcId = surface->getCrtcId();
-                    uint32_t fbPropId = outputManager_->getPropertyId(crtcId, DRM_MODE_OBJECT_CRTC, "FB_ID");
-                    
-                    if (fbPropId == 0) {
-                        LOG_WARNING << "DRMBackend: FB_ID property not found for CRTC " << crtcId;
-                        prepareSuccess = false;
-                        break;
-                    }
-                    
-                    // Add to atomic request
-                    if (drmModeAtomicAddProperty(request, crtcId, fbPropId, fbId) < 0) {
-                        LOG_WARNING << "DRMBackend: Failed to add FB_ID to atomic request";
-                        prepareSuccess = false;
-                        break;
-                    }
-                }
-                
-                if (prepareSuccess) {
-                    // Commit atomically with page flip event
-                    uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
-                    if (outputManager_->commitAtomic(request, flags)) {
-                        // Success - finalize all surfaces
-                        for (auto* surface : preparedSurfaces) {
-                            surface->finalizeAtomicFlip();
-                        }
-                    } else {
-                        LOG_WARNING << "DRMBackend: Atomic commit failed, canceling prepared surfaces";
-                        // Cancel all prepared surfaces (releases locked buffers)
-                        for (auto* surface : preparedSurfaces) {
-                            surface->cancelAtomicFlip();
-                        }
-                        // Fallback to legacy per-surface flips
-                        for (auto& [name, surface] : surfaces_) {
-                            surface->schedulePageFlip();
-                        }
-                    }
-                } else {
-                    // Cancel any successfully prepared surfaces
-                    for (auto* surface : preparedSurfaces) {
-                        surface->cancelAtomicFlip();
-                    }
-                    // Fallback to legacy
-                    for (auto& [name, surface] : surfaces_) {
-                        surface->schedulePageFlip();
-                    }
-                }
-                
-                drmModeAtomicFree(request);
-            } else {
-                // Fallback to legacy
-                for (auto& [name, surface] : surfaces_) {
-                    if (surface->isFlipPending()) {
-                        surface->waitForFlip();
-                    }
-                    surface->schedulePageFlip();
-                }
-            }
-        }
+        // All outputs flip on same vsync = 60fps for any number of outputs
+        atomicPageFlip();
     } else {
-        // LEGACY PATH: Sequential page flips (single output or no atomic support)
+        // LEGACY PATH: Sequential page flips (single output or no atomic/planes)
         for (auto& [name, surface] : surfaces_) {
-            if (surface->isFlipPending()) {
-                surface->waitForFlip();
-            }
             surface->schedulePageFlip();
         }
     }
+}
+
+bool DRMBackend::atomicPageFlip() {
+    drmModeAtomicReq* request = outputManager_->createAtomicRequest();
+    if (!request) {
+        LOG_WARNING << "DRMBackend: Failed to create atomic request";
+        return false;
+    }
+    
+    std::vector<DRMSurface*> preparedSurfaces;
+    bool success = true;
+    
+    // Prepare each surface and add to atomic request
+    for (auto& [name, surface] : surfaces_) {
+        uint32_t fbId = surface->prepareAtomicFlip();
+        if (fbId == 0) {
+            LOG_WARNING << "DRMBackend: Failed to prepare surface " << name;
+            success = false;
+            break;
+        }
+        preparedSurfaces.push_back(surface.get());
+        
+        DRMPlane* plane = surface->getPlane();
+        if (!plane || !plane->propertiesLoaded) {
+            LOG_WARNING << "DRMBackend: No plane for surface " << name;
+            success = false;
+            break;
+        }
+        
+        // Set plane properties for atomic commit
+        // FB_ID - the framebuffer to display
+        if (drmModeAtomicAddProperty(request, plane->planeId, plane->propFbId, fbId) < 0) {
+            LOG_WARNING << "DRMBackend: Failed to set FB_ID for plane " << plane->planeId;
+            success = false;
+            break;
+        }
+        
+        // CRTC_ID - which CRTC this plane is connected to
+        if (drmModeAtomicAddProperty(request, plane->planeId, plane->propCrtcId, surface->getCrtcId()) < 0) {
+            LOG_WARNING << "DRMBackend: Failed to set CRTC_ID for plane " << plane->planeId;
+            success = false;
+            break;
+        }
+        
+        // Source rectangle (in 16.16 fixed point)
+        uint32_t w = surface->getWidth();
+        uint32_t h = surface->getHeight();
+        drmModeAtomicAddProperty(request, plane->planeId, plane->propSrcX, 0);
+        drmModeAtomicAddProperty(request, plane->planeId, plane->propSrcY, 0);
+        drmModeAtomicAddProperty(request, plane->planeId, plane->propSrcW, w << 16);
+        drmModeAtomicAddProperty(request, plane->planeId, plane->propSrcH, h << 16);
+        
+        // Destination rectangle
+        drmModeAtomicAddProperty(request, plane->planeId, plane->propCrtcX, 0);
+        drmModeAtomicAddProperty(request, plane->planeId, plane->propCrtcY, 0);
+        drmModeAtomicAddProperty(request, plane->planeId, plane->propCrtcW, w);
+        drmModeAtomicAddProperty(request, plane->planeId, plane->propCrtcH, h);
+    }
+    
+    if (success) {
+        // Commit atomically with page flip event
+        uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
+        if (outputManager_->commitAtomic(request, flags)) {
+            // Success - finalize all surfaces
+            for (auto* surface : preparedSurfaces) {
+                surface->finalizeAtomicFlip();
+            }
+            LOG_DEBUG << "DRMBackend: Atomic commit succeeded for " << preparedSurfaces.size() << " surfaces";
+        } else {
+            LOG_WARNING << "DRMBackend: Atomic commit failed";
+            success = false;
+        }
+    }
+    
+    if (!success) {
+        // Cancel prepared surfaces and fall back to legacy
+        for (auto* surface : preparedSurfaces) {
+            surface->cancelAtomicFlip();
+        }
+        for (auto& [name, surface] : surfaces_) {
+            surface->schedulePageFlip();
+        }
+    }
+    
+    drmModeAtomicFree(request);
+    return success;
 }
     
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {

@@ -28,6 +28,7 @@
 namespace videocomposer {
 
 class DRMOutputManager;
+struct DRMPlane;  // Forward declaration for atomic modesetting
 
 /**
  * DRMSurface - Rendering surface for a single DRM output
@@ -157,6 +158,18 @@ public:
      */
     bool isModeSet() const { return modeSet_; }
     
+    /**
+     * Get the primary plane for this surface (for atomic modesetting)
+     * @return Pointer to plane, or nullptr if not available
+     */
+    DRMPlane* getPlane() const { return plane_; }
+    
+    /**
+     * Get the framebuffer ID of the pending buffer
+     * (for building atomic requests)
+     */
+    uint32_t getPendingFbId() const { return pendingFbId_; }
+    
     // ===== Output Information (OutputSurface interface) =====
     
     /**
@@ -276,6 +289,10 @@ private:
     // DRM IDs (cached)
     uint32_t connectorId_ = 0;
     uint32_t crtcId_ = 0;
+    
+    // Plane for atomic modesetting
+    DRMPlane* plane_ = nullptr;
+    uint32_t pendingFbId_ = 0;   // FB ID for pending atomic commit
     
     // Presentation timing (frame pacing like mpv)
     PresentationTiming presentationTiming_;

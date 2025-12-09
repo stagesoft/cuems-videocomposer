@@ -247,6 +247,9 @@ private:
     std::vector<OutputRegion> outputRegions_;
     bool useVirtualCanvas_ = true;  // Default to Virtual Canvas mode
     
+    // Atomic modesetting
+    bool atomicPageFlip();  // Returns true if successful
+    
     // Configuration
     std::string devicePath_;
     int primaryOutput_ = 0;

@@ -122,6 +122,11 @@ bool DRMOutputManager::init(const std::string& devicePath) {
              << " has " << resources_->count_connectors << " connectors, "
              << resources_->count_crtcs << " CRTCs";
     
+    // Discover planes (for atomic modesetting)
+    if (atomicSupported_) {
+        discoverPlanes();
+    }
+    
     // Detect outputs
     if (!detectOutputs()) {
         LOG_ERROR << "DRMOutputManager: Failed to detect outputs";
@@ -1198,6 +1203,118 @@ uint64_t DRMOutputManager::getPropertyValue(uint32_t objectId, uint32_t objectTy
 
 void DRMOutputManager::pollHotplug() {
     refreshOutputs();
+}
+
+// ===== Plane Management =====
+
+void DRMOutputManager::discoverPlanes() {
+    if (!atomicSupported_ || drmFd_ < 0) {
+        return;
+    }
+    
+    drmModePlaneRes* planeRes = drmModeGetPlaneResources(drmFd_);
+    if (!planeRes) {
+        LOG_WARNING << "DRMOutputManager: Failed to get plane resources: " << strerror(errno);
+        return;
+    }
+    
+    LOG_INFO << "DRMOutputManager: Found " << planeRes->count_planes << " planes";
+    
+    planes_.clear();
+    planes_.reserve(planeRes->count_planes);
+    
+    for (uint32_t i = 0; i < planeRes->count_planes; ++i) {
+        drmModePlane* drmPlane = drmModeGetPlane(drmFd_, planeRes->planes[i]);
+        if (!drmPlane) {
+            continue;
+        }
+        
+        DRMPlane plane;
+        plane.planeId = drmPlane->plane_id;
+        plane.possibleCrtcs = drmPlane->possible_crtcs;
+        
+        // Get plane type (PRIMARY, OVERLAY, CURSOR)
+        plane.type = static_cast<uint32_t>(getPropertyValue(
+            plane.planeId, DRM_MODE_OBJECT_PLANE, "type"));
+        
+        drmModeFreePlane(drmPlane);
+        
+        // Load property IDs
+        loadPlaneProperties(plane);
+        
+        const char* typeName = "UNKNOWN";
+        switch (plane.type) {
+            case DRM_PLANE_TYPE_PRIMARY: typeName = "PRIMARY"; break;
+            case DRM_PLANE_TYPE_OVERLAY: typeName = "OVERLAY"; break;
+            case DRM_PLANE_TYPE_CURSOR:  typeName = "CURSOR"; break;
+        }
+        
+        LOG_DEBUG << "DRMOutputManager: Plane " << plane.planeId 
+                  << " type=" << typeName 
+                  << " possible_crtcs=0x" << std::hex << plane.possibleCrtcs << std::dec;
+        
+        planes_.push_back(plane);
+    }
+    
+    drmModeFreePlaneResources(planeRes);
+    
+    LOG_INFO << "DRMOutputManager: Discovered " << planes_.size() << " planes for atomic modesetting";
+}
+
+void DRMOutputManager::loadPlaneProperties(DRMPlane& plane) {
+    plane.propFbId = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "FB_ID");
+    plane.propCrtcId = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "CRTC_ID");
+    plane.propSrcX = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "SRC_X");
+    plane.propSrcY = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "SRC_Y");
+    plane.propSrcW = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "SRC_W");
+    plane.propSrcH = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "SRC_H");
+    plane.propCrtcX = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "CRTC_X");
+    plane.propCrtcY = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "CRTC_Y");
+    plane.propCrtcW = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "CRTC_W");
+    plane.propCrtcH = getPropertyId(plane.planeId, DRM_MODE_OBJECT_PLANE, "CRTC_H");
+    
+    plane.propertiesLoaded = (plane.propFbId != 0 && plane.propCrtcId != 0);
+    
+    if (!plane.propertiesLoaded) {
+        LOG_WARNING << "DRMOutputManager: Failed to load properties for plane " << plane.planeId;
+    }
+}
+
+int DRMOutputManager::getCrtcIndex(uint32_t crtcId) const {
+    if (!resources_) {
+        return -1;
+    }
+    
+    for (int i = 0; i < resources_->count_crtcs; ++i) {
+        if (resources_->crtcs[i] == crtcId) {
+            return i;
+        }
+    }
+    
+    return -1;
+}
+
+DRMPlane* DRMOutputManager::getPrimaryPlaneForCrtc(uint32_t crtcId) {
+    int crtcIndex = getCrtcIndex(crtcId);
+    if (crtcIndex < 0) {
+        LOG_WARNING << "DRMOutputManager: CRTC " << crtcId << " not found in resources";
+        return nullptr;
+    }
+    
+    uint32_t crtcMask = 1 << crtcIndex;
+    
+    // Find primary plane that can work with this CRTC
+    for (auto& plane : planes_) {
+        if ((plane.possibleCrtcs & crtcMask) && 
+            plane.type == DRM_PLANE_TYPE_PRIMARY &&
+            plane.propertiesLoaded) {
+            return &plane;
+        }
+    }
+    
+    LOG_WARNING << "DRMOutputManager: No primary plane found for CRTC " << crtcId 
+                << " (index=" << crtcIndex << ", mask=0x" << std::hex << crtcMask << std::dec << ")";
+    return nullptr;
 }
 
 } // namespace videocomposer
