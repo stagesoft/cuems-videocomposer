@@ -242,6 +242,15 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     // 3. Schedule flip
     // This maximizes GPU utilization and reduces latency jitter
     
+    static auto lastFrameTime = std::chrono::steady_clock::now();
+    static int64_t frameCount = 0;
+    static int64_t totalRenderUs = 0;
+    static int64_t totalWaitUs = 0;
+    static int64_t maxRenderUs = 0;
+    static int64_t maxWaitUs = 0;
+    
+    auto frameStart = std::chrono::steady_clock::now();
+    
     // Process any completed flips (non-blocking)
     for (auto& [name, surface] : surfaces_) {
         surface->processFlipEvents();
@@ -249,13 +258,19 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     
     primary->makeCurrent();
     
+    auto renderStart = std::chrono::steady_clock::now();
+    
     // MultiOutputRenderer::render() handles:
     // 1. Rendering all layers to VirtualCanvas
     // 2. Blitting regions to each output surface (with blend/warp)
     // 3. Swapping buffers on each surface
     multiRenderer_->render(layerManager, osdManager);
     
+    auto renderEnd = std::chrono::steady_clock::now();
+    
     primary->releaseCurrent();
+    
+    auto waitStart = std::chrono::steady_clock::now();
     
     // NOW wait for flip completion right before scheduling the next one
     // This is the key difference from before: we render FIRST, then wait
@@ -264,6 +279,31 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
             surface->waitForFlip();
         }
     }
+    
+    auto waitEnd = std::chrono::steady_clock::now();
+    
+    // Timing statistics
+    int64_t renderUs = std::chrono::duration_cast<std::chrono::microseconds>(renderEnd - renderStart).count();
+    int64_t waitUs = std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart).count();
+    int64_t frameIntervalUs = std::chrono::duration_cast<std::chrono::microseconds>(frameStart - lastFrameTime).count();
+    
+    totalRenderUs += renderUs;
+    totalWaitUs += waitUs;
+    if (renderUs > maxRenderUs) maxRenderUs = renderUs;
+    if (waitUs > maxWaitUs) maxWaitUs = waitUs;
+    frameCount++;
+    
+    // Log every 300 frames (~5 seconds at 60Hz)
+    if (frameCount % 300 == 0) {
+        LOG_INFO << "DRM Timing: frame_interval=" << frameIntervalUs/1000.0 << "ms"
+                 << ", render avg=" << (totalRenderUs/frameCount)/1000.0 << "ms max=" << maxRenderUs/1000.0 << "ms"
+                 << ", wait avg=" << (totalWaitUs/frameCount)/1000.0 << "ms max=" << maxWaitUs/1000.0 << "ms";
+        // Reset max values
+        maxRenderUs = 0;
+        maxWaitUs = 0;
+    }
+    
+    lastFrameTime = frameStart;
     
     // Page flips are scheduled in blitToOutput() after swap
     }

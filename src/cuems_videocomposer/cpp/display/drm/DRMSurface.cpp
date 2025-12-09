@@ -641,6 +641,10 @@ void DRMSurface::releaseCurrent() {
 
 void DRMSurface::swapBuffers() {
     if (eglDisplay_ != EGL_NO_DISPLAY && eglSurface_ != EGL_NO_SURFACE) {
+        // Ensure GPU is done rendering before swap
+        // This is critical for smooth playback - without it, we might flip
+        // to a partially-rendered buffer
+        glFlush();
         eglSwapBuffers(eglDisplay_, eglSurface_);
     }
 }
@@ -662,6 +666,9 @@ void DRMSurface::endFrame() {
     if (!initialized_) {
         return;
     }
+    
+    // Ensure GPU is done rendering before swap
+    glFlush();
     
     // Swap buffers (renders to GBM surface)
     eglSwapBuffers(eglDisplay_, eglSurface_);
