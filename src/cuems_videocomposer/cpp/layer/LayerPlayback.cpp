@@ -6,6 +6,7 @@
 #include "../input/VideoFileInput.h"
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 
 namespace videocomposer {
 
@@ -222,6 +223,12 @@ void LayerPlayback::updateFromSyncSource() {
         // However, full SYSEX frames are explicit position commands and must always seek
         // even if the frame number is the same (e.g., 00:00:00:00 to reset position)
         if (adjustedFrame != lastSyncFrame_ || fullFrameReceived) {
+            // Track vsync count when frames change (for micro-jump diagnosis)
+            static int64_t vsyncCount = 0;
+            static int64_t lastFrameChangeVsync = 0;
+            static int64_t lastVideoFrame = -1;
+            vsyncCount++;
+            
             if (fullFrameReceived) {
                 // Full frame received - force a seek first, then load
                 // This ensures we jump to the exact position even if frame number is same
@@ -245,6 +252,19 @@ void LayerPlayback::updateFromSyncSource() {
                 // (no seek for consecutive frames, seeks for backwards/non-consecutive)
                 currentFrame_ = adjustedFrame;
                 lastSyncFrame_ = adjustedFrame;
+                
+                // Log frame display duration (vsyncs since last frame change)
+                // This helps diagnose uneven frame pacing (should be consistent for smooth playback)
+                int64_t vsyncsSinceLast = vsyncCount - lastFrameChangeVsync;
+                if (lastVideoFrame >= 0 && vsyncsSinceLast > 0) {
+                    // Log only if unusual duration (not 2 or 3 for 25fps on 60Hz)
+                    if (vsyncsSinceLast < 2 || vsyncsSinceLast > 3) {
+                        LOG_INFO << "Frame pacing: frame " << lastVideoFrame << " displayed for " 
+                                 << vsyncsSinceLast << " vsyncs (unusual)";
+                    }
+                }
+                lastFrameChangeVsync = vsyncCount;
+                lastVideoFrame = adjustedFrame;
             } else {
                 // If load fails, try seeking first (helps with keyframe-based codecs)
                 LOG_WARNING << "Failed to load frame " << adjustedFrame << ", trying seek first";
@@ -283,6 +303,12 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         return false;
     }
 
+    // Timing instrumentation for decode performance analysis
+    static int64_t decodeCount = 0;
+    static int64_t totalDecodeUs = 0;
+    static int64_t maxDecodeUs = 0;
+    auto decodeStart = std::chrono::steady_clock::now();
+
     // Check if this is a live stream (NDI, V4L2, RTSP, etc.)
     if (inputSource_->isLiveStream()) {
         // Live streams: get latest available frame (ignore frameNumber)
@@ -316,6 +342,8 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
 #endif
     }
     
+    bool success = false;
+    
     // Check if this is VideoFileInput with hardware decoding
     VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(inputSource_.get());
     if (videoInput) {
@@ -325,26 +353,49 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
             // Hardware decoding: decode directly to GPU texture
             if (videoInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
                 frameOnGPU_ = true;
-                return true;
+                success = true;
+            } else {
+                // If hardware decoding fails, fall through to software decoding
+                LOG_WARNING << "Hardware decoding failed for frame " << frameNumber << ", falling back to software";
             }
-            // If hardware decoding fails, fall through to software decoding
-            LOG_WARNING << "Hardware decoding failed for frame " << frameNumber << ", falling back to software";
         }
         
-        // Software decoding: use CPU frame buffer
-        if (videoInput->readFrame(frameNumber, cpuFrameBuffer_)) {
-            frameOnGPU_ = false;
-            return true;
+        if (!success) {
+            // Software decoding: use CPU frame buffer
+            if (videoInput->readFrame(frameNumber, cpuFrameBuffer_)) {
+                frameOnGPU_ = false;
+                success = true;
+            }
         }
-        return false;
+    } else {
+        // Other input sources: use CPU frame buffer (default)
+        if (inputSource_->readFrame(frameNumber, cpuFrameBuffer_)) {
+            frameOnGPU_ = false;
+            success = true;
+        }
     }
     
-    // Other input sources: use CPU frame buffer (default)
-    if (inputSource_->readFrame(frameNumber, cpuFrameBuffer_)) {
-        frameOnGPU_ = false;
-        return true;
+    // Record decode timing
+    auto decodeEnd = std::chrono::steady_clock::now();
+    int64_t decodeUs = std::chrono::duration_cast<std::chrono::microseconds>(decodeEnd - decodeStart).count();
+    totalDecodeUs += decodeUs;
+    decodeCount++;
+    if (decodeUs > maxDecodeUs) maxDecodeUs = decodeUs;
+    
+    // Log slow decodes (>10ms is concerning for 60fps, >5ms for 120fps)
+    if (decodeUs > 10000) {
+        LOG_WARNING << "Slow decode: frame=" << frameNumber << " took " << decodeUs/1000.0 << "ms";
     }
-    return false;
+    
+    // Log decode stats every 100 frames
+    if (decodeCount % 100 == 0) {
+        int64_t avgDecodeUs = totalDecodeUs / decodeCount;
+        LOG_INFO << "Decode stats: avg=" << avgDecodeUs/1000.0 << "ms, max=" << maxDecodeUs/1000.0 << "ms (n=" << decodeCount << ")";
+        // Reset max for next interval
+        maxDecodeUs = 0;
+    }
+    
+    return success;
 }
 
 bool LayerPlayback::getFrameBuffer(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const {

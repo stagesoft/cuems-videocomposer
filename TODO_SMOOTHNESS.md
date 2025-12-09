@@ -1,13 +1,45 @@
 # Playback Smoothness Improvements - TODO
 
 ## Current Status
-- ✅ Single monitor: No dropped frames
+- ✅ Single monitor: No dropped frames (according to PresentationTiming)
 - ✅ Buffer release timing fixed (release after flip, not before)
 - ✅ `eglSwapInterval(0)` to disable EGL internal vsync
 - ✅ **Quick Win #1**: Skip decode for same frame (readFrame/readFrameToTexture)
 - ✅ **Quick Win #2**: Skip same MTC frame in LayerPlayback (already existed)
-- ✅ **xjadeo-style software timer**: Run loop at MTC fps, not display rate
+- ✅ **Loop rate**: Using display-rate (60Hz vsync), correct for multi-layer compositor
 - ❌ Dual monitors: Dropped frames (~30fps instead of 60fps) - needs atomic modesetting
+- 🔍 **INVESTIGATING**: Micro-jumps despite no "dropped frames" - added timing instrumentation
+
+---
+
+## Diagnostic: Micro-jumps Analysis
+
+**Symptom**: Edges appear to "jump" slightly even when PresentationTiming reports no dropped frames.
+
+**Hypothesis**: The issue is not dropped vsyncs but **variable frame display duration**.
+
+With 25fps video on 60Hz display:
+- Each video frame should be shown for ~2.4 vsyncs on average
+- Pattern should be: 2-2-2-3-2-2-2-3-... (alternating to average 2.4)
+- If timing is off, we might get: 2-3-1-3-2-3-1-3-... (same average but jerky)
+
+**Possible causes**:
+1. **MTC-vsync phase drift**: MTC frame changes don't align with vsync
+2. **Framerate conversion rounding**: `floor()` creates discrete jumps
+3. **Variable decode latency**: VAAPI decode time varies per frame
+4. **EGL image creation time**: Zero-copy overhead is not constant
+
+**Timing instrumentation added** (in `VideoComposerApplication.cpp` and `LayerPlayback.cpp`):
+- Loop interval (should be ~16.67ms for 60Hz)
+- Update time (MTC poll + decode)
+- Render time (composite + swap + flip)
+- Decode time per frame
+- Alerts for slow decodes (>10ms)
+
+**Run the application and watch for**:
+- High max decode times (>5ms average, >10ms spikes)
+- Variable loop intervals
+- Correlation between decode spikes and perceived jumps
 
 ---
 
