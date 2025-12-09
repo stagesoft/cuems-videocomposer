@@ -43,6 +43,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     filename_ = filename;
     hwDeviceCtx_ = hwDeviceCtx;
     
+    LOG_INFO << "AsyncDecodeQueue::open() hwDeviceCtx=" << (hwDeviceCtx_ ? "valid" : "null");
+    
     // Open format context
     formatCtx_ = nullptr;
     int ret = avformat_open_input(&formatCtx_, filename.c_str(), nullptr, nullptr);
@@ -80,41 +82,28 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     AVCodecParameters* codecpar = stream->codecpar;
     
     // Find decoder
-    const AVCodec* codec = nullptr;
+    // NOTE: For VAAPI, we use the STANDARD decoder with hw_device_ctx attached
+    // This is the "hwaccel" method - FFmpeg uses VAAPI when hw_device_ctx is set
+    const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
     
-    // Try hardware decoder first if context provided
-    if (hwDeviceCtx_) {
-        // Get hardware decoder name based on codec
-        const char* hwDecoderName = nullptr;
+    // Determine if we'll use hardware acceleration
+    if (hwDeviceCtx_ && codec) {
         switch (codecpar->codec_id) {
             case AV_CODEC_ID_H264:
-                hwDecoderName = "h264_vaapi";
-                break;
             case AV_CODEC_ID_HEVC:
-                hwDecoderName = "hevc_vaapi";
-                break;
             case AV_CODEC_ID_VP9:
-                hwDecoderName = "vp9_vaapi";
-                break;
             case AV_CODEC_ID_AV1:
-                hwDecoderName = "av1_vaapi";
+            case AV_CODEC_ID_MPEG2VIDEO:
+            case AV_CODEC_ID_VC1:
+                useHardware_ = true;
+                LOG_INFO << "AsyncDecodeQueue: Using VAAPI hwaccel for " 
+                         << avcodec_get_name(codecpar->codec_id);
                 break;
             default:
+                useHardware_ = false;
                 break;
         }
-        
-        if (hwDecoderName) {
-            codec = avcodec_find_decoder_by_name(hwDecoderName);
-            if (codec) {
-                LOG_INFO << "AsyncDecodeQueue: Found hardware decoder " << hwDecoderName;
-                useHardware_ = true;
-            }
-        }
-    }
-    
-    // Fallback to software decoder
-    if (!codec) {
-        codec = avcodec_find_decoder(codecpar->codec_id);
+    } else {
         useHardware_ = false;
     }
     
