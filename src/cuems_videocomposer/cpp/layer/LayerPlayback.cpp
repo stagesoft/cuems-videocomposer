@@ -254,14 +254,14 @@ void LayerPlayback::updateFromSyncSource() {
                 lastSyncFrame_ = adjustedFrame;
                 
                 // Log frame display duration (vsyncs since last frame change)
-                // This helps diagnose uneven frame pacing (should be consistent for smooth playback)
+                // With MTC interpolation at 60Hz, we get a new frame number every vsync,
+                // so 1 vsync per frame is normal and expected for smooth playback.
+                // Only log if something truly unusual happens (like stuck on same frame for many vsyncs)
                 int64_t vsyncsSinceLast = vsyncCount - lastFrameChangeVsync;
-                if (lastVideoFrame >= 0 && vsyncsSinceLast > 0) {
-                    // Log only if unusual duration (not 2 or 3 for 25fps on 60Hz)
-                    if (vsyncsSinceLast < 2 || vsyncsSinceLast > 3) {
-                        LOG_INFO << "Frame pacing: frame " << lastVideoFrame << " displayed for " 
-                                 << vsyncsSinceLast << " vsyncs (unusual)";
-                    }
+                if (lastVideoFrame >= 0 && vsyncsSinceLast > 4) {
+                    // Only warn if frame was held for more than 4 vsyncs (>66ms - likely stall)
+                    LOG_WARNING << "Frame pacing: frame " << lastVideoFrame << " held for " 
+                                << vsyncsSinceLast << " vsyncs (possible stall)";
                 }
                 lastFrameChangeVsync = vsyncCount;
                 lastVideoFrame = adjustedFrame;

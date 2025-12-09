@@ -368,7 +368,6 @@ void AsyncDecodeQueue::decodeThreadFunc() {
         
         // Check if we should decode more
         int64_t target = targetFrame_.load();
-        int64_t lastDecoded = lastDecodedFrame_.load();
         
         // Get queue state
         size_t queueSize;
