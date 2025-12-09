@@ -170,12 +170,11 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
         default: fps = framerate_; break;
     }
     
-    // Calculate frame number directly from timecode components (like xjadeo)
-    // This matches xjadeo's smpte_to_frame() calculation for non-dropframe:
-    // frame = f + fps * (s + 60*m + 3600*h)
-    // xjadeo only updates when complete timecode is received, so no backwards jumps
-    int64_t totalSeconds = curFrame.hours * 3600 + curFrame.minutes * 60 + curFrame.seconds;
-    int64_t frame = curFrame.frames + static_cast<int64_t>(fps * totalSeconds);
+    // Use mtcHead (milliseconds) for smooth interpolation instead of discrete SMPTE
+    // This gives us sub-frame precision which is essential for smooth 60Hz playback
+    // mtcHead is updated by libmtcmaster based on MTC quarter-frames + elapsed time
+    double mtcSeconds = static_cast<double>(mtcHeadMs) / 1000.0;
+    int64_t frame = static_cast<int64_t>(std::floor(mtcSeconds * fps));
     
     // Detect if full frame is a RESYNC (periodic, position matches) vs SEEK (position jump)
     // Resync full frames are sent periodically for network reliability (rtpmidid)

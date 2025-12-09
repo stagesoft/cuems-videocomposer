@@ -641,10 +641,9 @@ void DRMSurface::releaseCurrent() {
 
 void DRMSurface::swapBuffers() {
     if (eglDisplay_ != EGL_NO_DISPLAY && eglSurface_ != EGL_NO_SURFACE) {
-        // Ensure GPU is done rendering before swap
-        // This is critical for smooth playback - without it, we might flip
-        // to a partially-rendered buffer
-        glFlush();
+        // Use glFinish to ensure GPU completely finishes before swap
+        // This provides maximum synchronization at cost of some latency
+        glFinish();
         eglSwapBuffers(eglDisplay_, eglSurface_);
     }
 }
