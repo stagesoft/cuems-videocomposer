@@ -321,14 +321,15 @@ bool DRMBackend::atomicPageFlip() {
     }
     
     if (success) {
-        // Commit atomically with page flip event
-        uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
+        // Commit atomically
+        // Use ALLOW_MODESET to permit mode changes if needed
+        // Don't use PAGE_FLIP_EVENT since we handle buffer release in finalizeAtomicFlip
+        uint32_t flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
         if (outputManager_->commitAtomic(request, flags)) {
-            // Success - finalize all surfaces
+            // Success - finalize all surfaces (releases buffers immediately)
             for (auto* surface : preparedSurfaces) {
                 surface->finalizeAtomicFlip();
             }
-            LOG_DEBUG << "DRMBackend: Atomic commit succeeded for " << preparedSurfaces.size() << " surfaces";
         } else {
             LOG_WARNING << "DRMBackend: Atomic commit failed";
             success = false;

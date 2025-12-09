@@ -965,15 +965,26 @@ void DRMSurface::finalizeAtomicFlip() {
         return;
     }
     
-    flipPending_ = true;
+    // For atomic commits, we don't use page flip events (user_data is NULL)
+    // Instead, we release the previous buffer immediately since atomic commit
+    // guarantees all planes flip together on the same vsync
+    
+    // Release the OLD buffer (it was being displayed, now new one is)
+    if (previousBo_ && gbmSurface_) {
+        gbm_surface_release_buffer(gbmSurface_, previousBo_);
+    }
     
     // Update buffer tracking
-    previousBo_ = currentBo_;
+    previousBo_ = currentBo_;  // Current becomes previous (still being displayed until next flip)
     currentBo_ = pendingBo_;
     pendingBo_ = nullptr;
+    pendingFbId_ = 0;
     
     // Swap framebuffers
     std::swap(currentFb_, nextFb_);
+    
+    // Don't set flipPending_ for atomic - we handle buffer release ourselves
+    // This allows the next frame to proceed immediately
 }
 
 void DRMSurface::waitForFlip() {
