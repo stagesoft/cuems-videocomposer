@@ -107,12 +107,12 @@ public:
      * Wait for pending page flip to complete
      * Blocks until flip is done (vsync)
      */
-    void waitForFlip();
+    void waitForFlip() override;
     
     /**
      * Check if a flip is pending
      */
-    bool isFlipPending() const { return flipPending_; }
+    bool isFlipPending() const override { return flipPending_; }
     
     /**
      * Check if GBM surface has free buffers available

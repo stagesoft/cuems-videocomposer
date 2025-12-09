@@ -236,25 +236,15 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     // For now, single-output works at 60fps. Dual-output at 30fps is acceptable
     // for many use cases but should be improved for professional multi-projector setups.
     
-    // Traditional double-buffering: wait for previous flip before rendering
-    // Wait for previous flip to complete before rendering
-    // 
-    // Why we can't do full render-ahead with 2 buffers:
-    // - Buffer A: being displayed
-    // - Buffer B: flip pending
-    // Even if GBM says a buffer is "free", we can't schedule a new flip
-    // until the pending one completes. True render-ahead needs 3+ buffers.
-    //
-    // Optimization: processFlipEvents() first (non-blocking), so we don't
-    // block unnecessarily if the flip already completed.
+    // MPV-STYLE RENDER-AHEAD:
+    // 1. Render first (while previous frame is still being displayed)
+    // 2. Wait for flip only right before scheduling the next one
+    // 3. Schedule flip
+    // This maximizes GPU utilization and reduces latency jitter
+    
+    // Process any completed flips (non-blocking)
     for (auto& [name, surface] : surfaces_) {
-        // Check if flip completed (non-blocking)
         surface->processFlipEvents();
-        
-        // Must wait for flip to complete before scheduling next one
-        if (surface->isFlipPending()) {
-            surface->waitForFlip();
-        }
     }
     
     primary->makeCurrent();
@@ -267,20 +257,24 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     
     primary->releaseCurrent();
     
-    // Page flips are now scheduled immediately after swap in blitToOutput()
-    // This matches mpv's approach: swap then immediately lock_front_buffer
+    // NOW wait for flip completion right before scheduling the next one
+    // This is the key difference from before: we render FIRST, then wait
+    for (auto& [name, surface] : surfaces_) {
+        if (surface->isFlipPending()) {
+            surface->waitForFlip();
+        }
+    }
+    
+    // Page flips are scheduled in blitToOutput() after swap
     }
     
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately
     
-    // Wait for previous flip (non-blocking check first, then wait if needed)
+    // MPV-STYLE: Process flip events first (non-blocking), render, THEN wait
     for (auto& [name, surface] : surfaces_) {
         surface->processFlipEvents();
-        if (surface->isFlipPending()) {
-            surface->waitForFlip();
     }
-}
     
     // Render to each output
     for (auto& [name, surface] : surfaces_) {
@@ -322,11 +316,15 @@ void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager
         // End frame
         surface->endFrame();
         
+        // Wait for pending flip before scheduling a new one
+        // (can only have one flip pending at a time)
+        if (surface->isFlipPending()) {
+            surface->waitForFlip();
+        }
+        
         // Schedule page flip (non-blocking)
         surface->schedulePageFlip();
     }
-    
-    // Don't wait here - let next frame's check handle it (render ahead like mpv)
 }
 
 void DRMBackend::handleEvents() {

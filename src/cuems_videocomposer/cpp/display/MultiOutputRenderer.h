@@ -94,6 +94,10 @@ public:
     // Called immediately after swapBuffers to minimize latency
     virtual bool schedulePageFlip() { return true; }
     
+    // Page flip synchronization (DRM-specific)
+    virtual bool isFlipPending() const { return false; }
+    virtual void waitForFlip() {}
+    
     virtual uint32_t getWidth() const = 0;
     virtual uint32_t getHeight() const = 0;
     virtual const OutputInfo& getOutputInfo() const = 0;

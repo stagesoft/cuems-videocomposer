@@ -226,6 +226,12 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
     // Swap buffers
     output.surface->swapBuffers();
     
+    // Wait for pending flip before scheduling new one
+    // (DRM can only have one flip pending at a time)
+    if (output.surface->isFlipPending()) {
+        output.surface->waitForFlip();
+    }
+    
     // Schedule page flip immediately after swap
     output.surface->schedulePageFlip();
     
