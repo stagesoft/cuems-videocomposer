@@ -142,6 +142,12 @@ public:
     void finalizeAtomicFlip();
     
     /**
+     * Cancel atomic flip if prepare succeeded but commit failed
+     * Releases the locked buffer
+     */
+    void cancelAtomicFlip();
+    
+    /**
      * Get CRTC ID for atomic property
      */
     uint32_t getCrtcId() const { return crtcId_; }

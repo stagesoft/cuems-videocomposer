@@ -910,13 +910,17 @@ bool DRMSurface::schedulePageFlip() {
 
 uint32_t DRMSurface::prepareAtomicFlip() {
     if (!initialized_ || !outputManager_ || flipPending_) {
+        LOG_DEBUG << "DRMSurface: Cannot prepare atomic flip (init=" << initialized_ 
+                  << ", flipPending=" << flipPending_ << ")";
         return 0;
     }
     
     // Lock front buffer from GBM surface
+    // Note: After eglSwapBuffers(), front buffer should always be available
     gbm_bo* bo = gbm_surface_lock_front_buffer(gbmSurface_);
     if (!bo) {
-        LOG_ERROR << "DRMSurface: Failed to lock front buffer for atomic";
+        LOG_ERROR << "DRMSurface: Failed to lock front buffer for atomic"
+                  << " (hasFree=" << hasFreeBuffers() << ")";
         return 0;
     }
     
@@ -933,6 +937,14 @@ uint32_t DRMSurface::prepareAtomicFlip() {
     pendingBo_ = bo;
     
     return nextFb_.fbId;
+}
+
+void DRMSurface::cancelAtomicFlip() {
+    // Release buffer if atomic prepare succeeded but commit failed
+    if (pendingBo_ && gbmSurface_) {
+        gbm_surface_release_buffer(gbmSurface_, pendingBo_);
+        pendingBo_ = nullptr;
+    }
 }
 
 void DRMSurface::finalizeAtomicFlip() {

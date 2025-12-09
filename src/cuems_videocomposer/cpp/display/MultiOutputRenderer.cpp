@@ -194,8 +194,18 @@ void MultiOutputRenderer::blitToOutputs() {
     }
     
     for (auto& output : outputs_) {
-        if (output.surface && output.region.enabled) {
-            blitToOutput(output);
+        if (output.surface) {
+            if (output.region.enabled) {
+                blitToOutput(output);
+            } else {
+                // Still need to swap buffers for atomic modesetting to work
+                // (all surfaces must have front buffers available)
+                output.surface->makeCurrent();
+                glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                output.surface->swapBuffers();
+                output.surface->releaseCurrent();
+            }
         }
     }
 }

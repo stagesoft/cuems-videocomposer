@@ -260,6 +260,7 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
             drmModeAtomicReq* request = outputManager_->createAtomicRequest();
             if (request) {
                 bool prepareSuccess = true;
+                std::vector<DRMSurface*> preparedSurfaces;
                 
                 // Prepare each surface for atomic flip
                 for (auto& [name, surface] : surfaces_) {
@@ -268,6 +269,7 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
                         prepareSuccess = false;
                         break;
                     }
+                    preparedSurfaces.push_back(surface.get());
                     
                     // Get FB_ID property for CRTC
                     uint32_t crtcId = surface->getCrtcId();
@@ -292,17 +294,25 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
                     uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
                     if (outputManager_->commitAtomic(request, flags)) {
                         // Success - finalize all surfaces
-                        for (auto& [name, surface] : surfaces_) {
+                        for (auto* surface : preparedSurfaces) {
                             surface->finalizeAtomicFlip();
                         }
                     } else {
-                        LOG_WARNING << "DRMBackend: Atomic commit failed, falling back to legacy";
+                        LOG_WARNING << "DRMBackend: Atomic commit failed, canceling prepared surfaces";
+                        // Cancel all prepared surfaces (releases locked buffers)
+                        for (auto* surface : preparedSurfaces) {
+                            surface->cancelAtomicFlip();
+                        }
                         // Fallback to legacy per-surface flips
                         for (auto& [name, surface] : surfaces_) {
                             surface->schedulePageFlip();
                         }
                     }
                 } else {
+                    // Cancel any successfully prepared surfaces
+                    for (auto* surface : preparedSurfaces) {
+                        surface->cancelAtomicFlip();
+                    }
                     // Fallback to legacy
                     for (auto& [name, surface] : surfaces_) {
                         surface->schedulePageFlip();
