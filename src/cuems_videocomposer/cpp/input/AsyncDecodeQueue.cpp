@@ -45,7 +45,6 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     filename_ = filename;
     hwDeviceCtx_ = hwDeviceCtx;
     
-    LOG_INFO << "AsyncDecodeQueue::open() hwDeviceCtx=" << (hwDeviceCtx_ ? "valid" : "null");
     
     // Open format context
     formatCtx_ = nullptr;

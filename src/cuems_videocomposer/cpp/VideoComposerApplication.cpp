@@ -357,16 +357,7 @@ int VideoComposerApplication::run() {
     LOG_INFO << "Entering video update loop @ display refresh rate (vsync-driven)";
     
     // Timing instrumentation for diagnosing micro-jumps
-    auto lastLoopStart = std::chrono::steady_clock::now();
-    int64_t loopCount = 0;
-    int64_t totalUpdateUs = 0;
-    int64_t totalRenderUs = 0;
-    int64_t maxUpdateUs = 0;
-    int64_t maxRenderUs = 0;
-    
     while (running_ && shouldContinue()) {
-        auto loopStart = std::chrono::steady_clock::now();
-        
         processEvents();
         
         // Make OpenGL context current before updating layers
@@ -375,44 +366,10 @@ int VideoComposerApplication::run() {
             displayBackend_->makeCurrent();
         }
         
-        auto updateStart = std::chrono::steady_clock::now();
         updateLayers();
-        auto updateEnd = std::chrono::steady_clock::now();
         
-        // Keep context current for render() - avoid extra context switch
-        // DRMBackend::render() will use the already-current context
-        // The vsync/page-flip wait provides timing (60Hz)
-        auto renderStart = std::chrono::steady_clock::now();
+        // Render - vsync/page-flip wait provides timing (60Hz)
         render();
-        auto renderEnd = std::chrono::steady_clock::now();
-        
-        // Track timing statistics
-        int64_t updateUs = std::chrono::duration_cast<std::chrono::microseconds>(updateEnd - updateStart).count();
-        int64_t renderUs = std::chrono::duration_cast<std::chrono::microseconds>(renderEnd - renderStart).count();
-        int64_t loopIntervalUs = std::chrono::duration_cast<std::chrono::microseconds>(loopStart - lastLoopStart).count();
-        
-        totalUpdateUs += updateUs;
-        totalRenderUs += renderUs;
-        if (updateUs > maxUpdateUs) maxUpdateUs = updateUs;
-        if (renderUs > maxRenderUs) maxRenderUs = renderUs;
-        loopCount++;
-        
-        // Log timing every 300 frames (~5 seconds at 60fps)
-        if (loopCount % 300 == 0) {
-            int64_t avgUpdateUs = totalUpdateUs / loopCount;
-            int64_t avgRenderUs = totalRenderUs / loopCount;
-            LOG_INFO << "Timing: loop=" << loopIntervalUs/1000.0 << "ms, "
-                     << "update avg=" << avgUpdateUs/1000.0 << "ms max=" << maxUpdateUs/1000.0 << "ms, "
-                     << "render avg=" << avgRenderUs/1000.0 << "ms max=" << maxRenderUs/1000.0 << "ms";
-            // Reset max stats for next interval
-            maxUpdateUs = 0;
-            maxRenderUs = 0;
-        }
-        
-        lastLoopStart = loopStart;
-        
-        // No software timer - vsync provides timing
-        // This ensures we run at display rate and can show all video framerates smoothly
     }
 
     return 0;

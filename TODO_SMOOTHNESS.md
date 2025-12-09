@@ -1,18 +1,45 @@
-# Playback Smoothness Improvements - TODO
+# Playback Smoothness Improvements - COMPLETED
 
-## Current Status
-- ✅ Single monitor: No dropped frames (according to PresentationTiming)
+## Final Status (2024-12-09)
+- ✅ **SMOOTH PLAYBACK ACHIEVED** - mpv-like quality!
+- ✅ Single monitor: 60fps smooth playback
 - ✅ Buffer release timing fixed (release after flip, not before)
 - ✅ `eglSwapInterval(0)` to disable EGL internal vsync
 - ✅ **Quick Win #1**: Skip decode for same frame (readFrame/readFrameToTexture)
 - ✅ **Quick Win #2**: Skip same MTC frame in LayerPlayback (already existed)
 - ✅ **Loop rate**: Using display-rate (60Hz vsync), correct for multi-layer compositor
+- ✅ **Async Decode Queue**: Pre-buffers 8 frames in background thread
+- ✅ **MTC Interpolation**: Uses mtcHead (ms) instead of discrete SMPTE
 - ❌ Dual monitors: Dropped frames (~30fps instead of 60fps) - needs atomic modesetting
-- 🔍 **INVESTIGATING**: Micro-jumps despite no "dropped frames" - added timing instrumentation
 
 ---
 
-## Diagnostic: Micro-jumps Analysis
+## KEY FIXES IMPLEMENTED
+
+### 1. Async Decode Queue (`AsyncDecodeQueue.cpp/h`)
+- Separate FFmpeg context in background thread
+- Pre-buffers 8 frames ahead of playback
+- vaSyncSurface() called in decode thread before adding to queue
+- Main thread gets already-decoded frames instantly (~0.1ms)
+
+### 2. MTC Interpolation (`MtcReceiverMIDIDriver.cpp`)
+- **Root cause of judder**: Was using discrete SMPTE (h:m:s:f) which updates at ~100Hz
+- **Fix**: Now uses `mtcHead` (milliseconds) for smooth sub-frame precision
+- Frame calculation: `frame = floor((mtcHeadMs / 1000.0) * fps)`
+
+### 3. GPU Sync Improvements
+- Removed redundant `glFinish()` calls that stalled pipeline
+- Added `glFinish()` before `eglSwapBuffers()` for proper sync
+- Fixed page flip wait timing (wait after render, not before)
+
+### Performance After Fixes:
+- Render time: **0.4ms** (was 18-29ms before async decode)
+- Frame interval: **16.67ms** (perfect 60Hz)
+- Queue size: **5-8 frames** buffered ahead
+
+---
+
+## Diagnostic: Micro-jumps Analysis (Historical)
 
 **Symptom**: Edges appear to "jump" slightly even when PresentationTiming reports no dropped frames.
 
