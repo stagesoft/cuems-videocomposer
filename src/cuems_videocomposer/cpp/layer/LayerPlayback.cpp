@@ -343,12 +343,24 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
     }
     
     bool success = false;
+    static bool loggedBackend = false;  // Log decode backend once
     
     // Check if this is VideoFileInput with hardware decoding
     VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(inputSource_.get());
     if (videoInput) {
         // Check if hardware decoding is available and should be used
         InputSource::DecodeBackend backend = videoInput->getOptimalBackend();
+        
+        // Log the decode backend once at startup
+        if (!loggedBackend) {
+            if (backend == InputSource::DecodeBackend::GPU_HARDWARE) {
+                LOG_INFO << "Decode path: GPU_HARDWARE (VAAPI zero-copy)";
+            } else {
+                LOG_INFO << "Decode path: CPU_SOFTWARE";
+            }
+            loggedBackend = true;
+        }
+        
         if (backend == InputSource::DecodeBackend::GPU_HARDWARE) {
             // Hardware decoding: decode directly to GPU texture
             if (videoInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {

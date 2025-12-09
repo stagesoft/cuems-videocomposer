@@ -43,6 +43,41 @@ With 25fps video on 60Hz display:
 
 ---
 
+## DIAGNOSTIC RESULTS (2024-12-09)
+
+**Findings**:
+```
+Loop: 16.8ms (OK - 60Hz)
+Update max: 23.2ms (PROBLEM!)
+Decode times: 10-23ms per frame (VERY SLOW)
+Frame pacing: Almost every frame shows "1 vsync" (RUSHING)
+```
+
+**Root Cause Identified**: **Decode latency is the bottleneck**
+- Decode takes 10-23ms, which is longer than a vsync period (16.67ms)
+- By the time frame N is decoded, MTC has moved to frame N+2 or N+3
+- Frames only display for 1 vsync before we need the next one
+- This creates the perceived "micro-jumps"
+
+**Expected for smooth 25fps on 60Hz**: 2-2-3-2-2-3... vsync pattern
+**Actual**: 1-1-1-1-1... (constantly catching up)
+
+**Questions to verify**:
+1. Is VAAPI hardware decode enabled? Check logs for:
+   - `Using HARDWARE decoding` (good)
+   - `falling back to software` (bad)
+   - `VAAPI zero-copy failed` (bad)
+2. What codec is the video? (H.264, HEVC, HAP, ProRes?)
+3. What resolution/bitrate?
+
+**Potential fixes**:
+1. **Verify VAAPI is working** - Could be falling back to software
+2. **Use HAP or ProRes** - Intra-frame codecs decode faster
+3. **Pre-decode (frame queue)** - Decode ahead of time in background thread
+4. **Reduce resolution** - Lower res = faster decode
+
+---
+
 ## Analysis Summary
 
 ### Comparison: xjadeo vs cuems-videocomposer vs mpv
