@@ -1808,7 +1808,17 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
                 frameFinished = true;
                 break;
             } else if (framePTS < targetPTS) {
-                // This frame is BEFORE the target - discard it and continue decoding
+                // This frame is BEFORE the target
+                // OPTIMIZATION: Keep frames that are close (within 3 frames) instead of discarding
+                // This reduces decode work when MTC jumps by small amounts
+                // Accept frame if it's within 3 frame durations of target
+                int64_t framesBehind = (targetPTS - framePTS) / ptsPerFrame;
+                if (framesBehind <= 2) {
+                    // Close enough - use this frame rather than decode more
+                    // This trades ~66ms accuracy for much faster response
+                    frameFinished = true;
+                    break;
+                }
                 av_frame_unref(hwFrame_);
                 // Continue to next frame
             } else {

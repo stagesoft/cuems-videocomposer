@@ -280,11 +280,8 @@ bool VaapiInterop::importFrame(AVFrame* vaapiFrame,
         return false;
     }
     
-    // Sync AFTER export to ensure GPU operations complete (like mpv dmabuf_interop_gl.c)
-    vaStatus = vaSyncSurface(vaDisplay, surface);
-    if (vaStatus != VA_STATUS_SUCCESS) {
-        LOG_WARNING << "VaapiInterop: vaSyncSurface (post-export) failed: " << vaStatus;
-    }
+    // NOTE: Post-export sync removed - pre-export sync is sufficient
+    // EGL image import provides implicit synchronization
     
     width = desc.width;
     height = desc.height;
@@ -487,11 +484,9 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         return false;
     }
     
-    // Sync again after export (like mpv)
-    syncStatus = vaSyncSurface(vaDisplay, surface);
-    if (syncStatus != VA_STATUS_SUCCESS) {
-        LOG_WARNING << "VaapiInterop: vaSyncSurface (post-export) failed: " << syncStatus;
-    }
+    // NOTE: Post-export sync removed - pre-export sync is sufficient
+    // mpv only syncs once before export, not after
+    // The EGL image import provides implicit synchronization
     
     width = desc.width;
     height = desc.height;
