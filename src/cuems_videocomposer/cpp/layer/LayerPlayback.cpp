@@ -403,6 +403,21 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
     if (decodeCount % 100 == 0) {
         int64_t avgDecodeUs = totalDecodeUs / decodeCount;
         LOG_INFO << "Decode stats: avg=" << avgDecodeUs/1000.0 << "ms, max=" << maxDecodeUs/1000.0 << "ms (n=" << decodeCount << ")";
+        
+        // Warn user if decode is too slow for smooth playback
+        if (avgDecodeUs > 10000) {  // >10ms average
+            static bool warnedOnce = false;
+            if (!warnedOnce) {
+                LOG_WARNING << "=== DECODE TOO SLOW FOR SMOOTH PLAYBACK ===";
+                LOG_WARNING << "Average decode time: " << avgDecodeUs/1000.0 << "ms (need <5ms for 60Hz)";
+                LOG_WARNING << "For smooth playback with this content, consider:";
+                LOG_WARNING << "  1. Transcode to HAP: ffmpeg -i input.mp4 -c:v hap output.mov";
+                LOG_WARNING << "  2. Use 1080p: ffmpeg -i input.mp4 -vf scale=1920:1080 output.mp4";
+                LOG_WARNING << "  3. Use ProRes: ffmpeg -i input.mp4 -c:v prores_ks output.mov";
+                warnedOnce = true;
+            }
+        }
+        
         // Reset max for next interval
         maxDecodeUs = 0;
     }

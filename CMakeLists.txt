@@ -580,6 +580,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/VideoComposerApplication.cpp
     src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
     src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
+    src/cuems_videocomposer/cpp/input/AsyncDecodeQueue.cpp
     src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
     src/cuems_videocomposer/cpp/input/LiveInputSource.cpp
     src/cuems_videocomposer/cpp/input/FFmpegLiveInput.cpp
@@ -824,6 +825,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/display/GPUImageProcessor.cpp
         src/cuems_videocomposer/cpp/display/CPUImageProcessor.cpp
         src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
+        src/cuems_videocomposer/cpp/input/AsyncDecodeQueue.cpp
         src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
         src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
         src/cuems_videocomposer/cpp/utils/TimeUtils.cpp

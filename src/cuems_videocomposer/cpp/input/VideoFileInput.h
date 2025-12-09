@@ -3,6 +3,7 @@
 
 #include "InputSource.h"
 #include "HardwareDecoder.h"
+#include "AsyncDecodeQueue.h"
 #include "../video/GPUTextureFrameBuffer.h"
 #include <cuems_mediadecoder/MediaFileReader.h>
 #include <cuems_mediadecoder/VideoDecoder.h>
@@ -187,6 +188,11 @@ private:
     void startAsyncDecode(int64_t startFrame);
     void stopAsyncDecode();
     CachedFrame* findCachedFrame(int64_t frameNumber);
+    
+    // NEW: Async decode queue for smooth hardware decoding
+    // This provides mpv-style pre-buffering to decouple decode latency from display timing
+    std::unique_ptr<AsyncDecodeQueue> asyncDecodeQueue_;
+    bool useAsyncDecode_;  // Whether to use async decode (enabled for hardware decode)
 };
 
 } // namespace videocomposer

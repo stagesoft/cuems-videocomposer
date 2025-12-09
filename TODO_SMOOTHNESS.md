@@ -94,6 +94,39 @@ Frame pacing: Almost every frame shows "1 vsync" (RUSHING)
    - Decode ahead in background thread
    - Frame queue holds ~5-10 frames ready
    - Display thread picks best frame at vsync time
+   - **This is what mpv does** - explains why mpv is smooth with same file
+
+---
+
+## Why mpv Is Smooth But We're Not
+
+mpv architecture:
+1. **Demuxer thread** → reads packets from file
+2. **Decoder thread** → decodes packets → frames go into queue
+3. **VO (video output) thread** → picks frames from queue at vsync
+
+Our architecture:
+1. **Single main thread** → poll MTC → decode (BLOCKING 10-20ms) → render → vsync
+
+**The key difference**: mpv's display thread NEVER waits for decode. It picks from a pre-filled queue.
+We BLOCK on vaSyncSurface() waiting for the GPU to finish decoding.
+
+**To match mpv**, we need to implement async decode with a frame queue.
+This was attempted before but disabled due to race conditions with shared FFmpeg objects.
+
+**Proper fix requires**:
+1. Separate AVCodecContext for decode thread
+2. Thread-safe frame queue (producer-consumer)
+3. Careful VAAPI surface lifetime management
+4. Pre-buffer 4-10 frames ahead
+
+**IMPLEMENTED (2024-12-09)**: AsyncDecodeQueue class provides mpv-style threaded decoding:
+- `AsyncDecodeQueue.h/cpp` - New class with separate FFmpeg context for decode thread
+- Thread-safe frame queue with up to 8 pre-buffered frames
+- Automatic seek handling with queue flush
+- Integrated into `VideoFileInput::readFrameToTexture()` for hardware decode path
+
+**Test with your 4K video to verify improvement!**
 
 ---
 

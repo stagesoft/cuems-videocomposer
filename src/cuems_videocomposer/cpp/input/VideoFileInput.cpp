@@ -61,6 +61,7 @@ VideoFileInput::VideoFileInput()
     , vaapiInterop_(nullptr)
     , displayBackend_(nullptr)
 #endif
+    , useAsyncDecode_(false)
 {
     frameRateQ_ = {1, 1};
     frameInfo_ = {};
@@ -190,10 +191,32 @@ bool VideoFileInput::open(const std::string& source) {
 
     ready_ = true;
     currentFrame_ = -1;
+    
+    // Initialize async decode queue for hardware decoding
+    // This provides mpv-style pre-buffering for smooth playback
+    if (useHardwareDecoding_ && hwDeviceCtx_) {
+        asyncDecodeQueue_ = std::make_unique<AsyncDecodeQueue>();
+        if (asyncDecodeQueue_->open(currentFile_, hwDeviceCtx_)) {
+            useAsyncDecode_ = true;
+            LOG_INFO << "Async decode queue enabled for smooth hardware decoding";
+        } else {
+            LOG_WARNING << "Failed to initialize async decode queue, using synchronous decode";
+            asyncDecodeQueue_.reset();
+            useAsyncDecode_ = false;
+        }
+    }
+    
     return true;
 }
 
 void VideoFileInput::close() {
+    // Stop async decode queue first
+    if (asyncDecodeQueue_) {
+        asyncDecodeQueue_->close();
+        asyncDecodeQueue_.reset();
+    }
+    useAsyncDecode_ = false;
+    
     // Stop async decode thread first
     stopAsyncDecode();
     
@@ -1710,6 +1733,50 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         return false;
     }
 
+    // =========================================================================
+    // ASYNC DECODE PATH (mpv-style)
+    // Use async queue if available - provides pre-buffered frames for smooth playback
+    // =========================================================================
+    if (useAsyncDecode_ && asyncDecodeQueue_) {
+        // Set target frame so decode thread knows where we are
+        asyncDecodeQueue_->setTargetFrame(frameNumber);
+        
+        // Try to get frame from queue (wait up to 5ms if not ready)
+        AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, 5);
+        
+        if (queuedFrame) {
+            // Got frame from queue - transfer to GPU texture
+            // Note: vaSyncSurface happens here, but the actual decode already completed in background
+            bool success = transferHardwareFrameToGPU(queuedFrame, textureBuffer);
+            if (success) {
+                // Update current frame tracking
+                static int64_t lastAsyncFrame = -1;
+                if (lastAsyncFrame != frameNumber) {
+                    LOG_VERBOSE << "Async decode: frame " << frameNumber << " from queue (size=" 
+                               << asyncDecodeQueue_->getQueueSize() << ")";
+                    lastAsyncFrame = frameNumber;
+                }
+                return true;
+            } else {
+                LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;
+            }
+        } else {
+            // Frame not ready - this shouldn't happen often if queue is working
+            static int missCount = 0;
+            if (++missCount % 30 == 1) {  // Log every 30 misses
+                LOG_WARNING << "Async decode: frame " << frameNumber << " not in queue (oldest=" 
+                           << asyncDecodeQueue_->getOldestFrame() << ", newest=" 
+                           << asyncDecodeQueue_->getNewestFrame() << ")";
+            }
+            // Fall through to synchronous path as backup
+        }
+    }
+    
+    // =========================================================================
+    // SYNCHRONOUS DECODE PATH (fallback)
+    // Used when async queue is not available or frame was missed
+    // =========================================================================
+
     // Seek to frame if needed
     // Only seek if this frame is far from the last decoded position
     // For consecutive frames, just decode forward
@@ -1808,17 +1875,7 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
                 frameFinished = true;
                 break;
             } else if (framePTS < targetPTS) {
-                // This frame is BEFORE the target
-                // OPTIMIZATION: Keep frames that are close (within 3 frames) instead of discarding
-                // This reduces decode work when MTC jumps by small amounts
-                // Accept frame if it's within 3 frame durations of target
-                int64_t framesBehind = (targetPTS - framePTS) / ptsPerFrame;
-                if (framesBehind <= 2) {
-                    // Close enough - use this frame rather than decode more
-                    // This trades ~66ms accuracy for much faster response
-                    frameFinished = true;
-                    break;
-                }
+                // This frame is BEFORE the target - discard it and continue decoding
                 av_frame_unref(hwFrame_);
                 // Continue to next frame
             } else {
