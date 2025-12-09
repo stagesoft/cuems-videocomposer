@@ -1061,11 +1061,11 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
         glBindVertexArray(0);
         
-        // CRITICAL: Force GPU to finish drawing before we unbind
-        // This ensures DMA-BUF data has been fully sampled
-        if (planeType == TexturePlaneType::YUV_NV12) {
-            glFinish();
-        }
+        // NOTE: Removed glFinish() here - it was causing GPU pipeline stalls
+        // The DMA-BUF data is read by the GPU during glDrawArrays, and we keep
+        // the EGL images/DMA-BUFs alive until the next frame anyway.
+        // The page flip (vsync wait) provides the necessary synchronization.
+        // This matches mpv's approach for smooth playback.
         
         shader->unbind();
         

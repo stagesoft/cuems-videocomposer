@@ -11,6 +11,8 @@
 extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vaapi.h>
 }
 
 namespace videocomposer {
@@ -494,6 +496,23 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     } else {
         // No PTS - use sequential numbering
         frameNum = lastDecodedFrame_ + 1;
+    }
+    
+    // For VAAPI hardware frames, sync the GPU before marking frame as ready
+    // This ensures the decode is complete before we put it in the queue
+    if (useHardware_ && decodeFrame_->format == AV_PIX_FMT_VAAPI) {
+        VASurfaceID surface = (VASurfaceID)(uintptr_t)decodeFrame_->data[3];
+        if (surface != VA_INVALID_SURFACE && hwDeviceCtx_) {
+            AVHWDeviceContext* hwctx = (AVHWDeviceContext*)hwDeviceCtx_->data;
+            AVVAAPIDeviceContext* vactx = (AVVAAPIDeviceContext*)hwctx->hwctx;
+            VADisplay vaDisplay = vactx->display;
+            
+            // Sync the surface - blocks until GPU decode is complete
+            VAStatus vaStatus = vaSyncSurface(vaDisplay, surface);
+            if (vaStatus != VA_STATUS_SUCCESS) {
+                LOG_WARNING << "AsyncDecodeQueue: vaSyncSurface failed: " << vaStatus;
+            }
+        }
     }
     
     // Create queue entry

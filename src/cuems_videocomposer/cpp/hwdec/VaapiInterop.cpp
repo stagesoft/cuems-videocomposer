@@ -624,10 +624,11 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
         currentDisplay = eglDisplay_;
     }
     
-    // Ensure GPU is done with old textures before we delete them
-    if (textureY_ != 0 || textureUV_ != 0) {
-        glFinish();  // Wait for all GL commands to complete
-    }
+    // NOTE: Removed glFinish() here - it was causing GPU pipeline stalls
+    // glDeleteTextures is safe without glFinish() because:
+    // 1. OpenGL defers deletion until the texture is no longer in use
+    // 2. The texture won't actually be freed until pending draw calls complete
+    // This is the same approach mpv uses for smooth playback
     
     // Step 1: Delete old textures (they were bound to old EGL images)
     if (textureY_ != 0) {
