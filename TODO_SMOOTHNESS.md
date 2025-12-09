@@ -28,6 +28,93 @@ Our loop runs at 60Hz (vsync-driven), but MTC updates at 25fps. This creates:
 
 ---
 
+## xjadeo's PTS Features (Reference)
+
+xjadeo has sophisticated PTS handling that contributes to its smoothness. Key features:
+
+### 1. Frame Index with PTS Mapping
+Pre-builds a complete index mapping frame numbers to PTS:
+
+```c
+struct FrameIndex {
+    int64_t pkt_pts;    // PTS from packet
+    int64_t pkt_pos;    // Byte position in file
+    int64_t frame_pts;  // PTS from decoded frame
+    int64_t frame_pos;  // Byte position of frame
+    int64_t timestamp;  // Expected PTS for frame[i]
+    int64_t seekpts;    // PTS of keyframe to seek to
+    int64_t seekpos;    // Byte position to seek to
+    uint8_t key;        // Is this a keyframe?
+};
+```
+
+**Benefit**: O(1) lookup from MTC frame → seek target. No seeking through file to find keyframes at runtime.
+
+### 2. Best-Effort PTS Parsing
+Tries multiple PTS sources in priority order:
+
+```c
+// In parse_pts_from_frame():
+pts = f->best_effort_timestamp;  // First choice (FFmpeg's best guess)
+if (pts == AV_NOPTS_VALUE)
+    pts = f->pts;                // Frame's presentation timestamp
+if (pts == AV_NOPTS_VALUE)
+    pts = f->pkt_dts;            // Decode timestamp from packet
+```
+
+**Benefit**: Works with poorly-muxed files where PTS may be missing.
+
+### 3. Smart Seek vs. Decode Decision
+Tracks last decoded position to minimize seeks:
+
+```c
+static int64_t last_decoded_pts = -1;
+static int64_t last_decoded_frameno = -1;
+
+// In seek_frame():
+if (last_decoded_pts == timestamp) return 0;  // Already have it!
+
+int need_seek = 0;
+if (last_decoded_pts < 0)                      need_seek = 1;  // First frame
+else if (last_decoded_pts > timestamp)         need_seek = 1;  // Going backwards
+else if ((framenumber - last_decoded_frameno) == 1) ;          // Next frame - no seek!
+else if (fidx[framenumber].seekpts != fidx[last_decoded_frameno].seekpts)
+    need_seek = 1;  // Different GOP
+```
+
+**Benefit**: For sequential playback, decodes without seeking. Only seeks on jumps or reverse.
+
+### 4. Fuzzy PTS Matching
+Accepts frames within one frame duration:
+
+```c
+const int64_t prefuzz = one_frame > 10 ? 1 : 0;
+if (pts + prefuzz >= timestamp) {
+    if (pts - timestamp < one_frame) {
+        last_decoded_pts = timestamp;
+        return 0;  // OK - close enough!
+    }
+}
+```
+
+**Benefit**: Tolerates PTS rounding errors, VFR content, or timestamp discontinuities.
+
+### 5. Skip Redundant Display
+```c
+if (!force_update && dispFrame == timestamp) return;  // Already showing this frame
+```
+
+**Benefit**: Running at video fps, this rarely triggers. But if MTC stalls, avoids redundant work.
+
+### What We Can Learn
+
+1. **Frame index with seek targets** - We already have indexing, but could add `seekpts` to directly map frame → seek target
+2. **Track last decoded frame** - Avoid seeking for sequential frames
+3. **Fuzzy PTS matching** - Be tolerant of off-by-one PTS mismatches
+4. **Run at video fps** - The main lesson: don't poll MTC faster than video framerate
+
+---
+
 ## Pending Changes (Priority Order)
 
 ### 1. HIGH: xjadeo-style Software Timer Loop
@@ -206,6 +293,29 @@ For each change:
 4. Compare visually with mpv and xjadeo
 5. Check `PresentationTiming` dropped frame count
 6. Test single and dual monitor configurations
+
+---
+
+## Current vs. xjadeo Comparison
+
+| Feature | xjadeo | cuems-videocomposer | Action |
+|---------|--------|---------------------|--------|
+| Frame index | ✅ Full (pkt_pts, seekpts, etc.) | ✅ Basic (frame → byte offset) | Could add seekpts |
+| Best-effort PTS | ✅ Multiple fallbacks | ✅ Uses `best_effort_timestamp` | OK |
+| Track last decoded | ✅ `last_decoded_pts/frameno` | ❌ Seeks every frame | **Add this** |
+| Skip same frame | ✅ `if (dispFrame == timestamp)` | ❌ Renders every vsync | **Add this** |
+| Fuzzy PTS match | ✅ Within one_frame tolerance | ❌ Exact match only | Consider |
+| Loop rate | ✅ Video fps (25fps) | ❌ Display fps (60Hz) | **Priority #1** |
+| Vsync usage | ✅ Tear prevention only | ❌ Timing driver | **Priority #1** |
+
+### Quick Wins (Low Effort, Medium Impact)
+
+1. **Track last decoded frame** - Skip seeking if next frame is sequential
+2. **Skip render if same MTC frame** - Don't re-render if MTC hasn't changed
+
+### Major Change (High Effort, High Impact)
+
+1. **Software timer loop** - Run at video fps instead of display fps
 
 ---
 

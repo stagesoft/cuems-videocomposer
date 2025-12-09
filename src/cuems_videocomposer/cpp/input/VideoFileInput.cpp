@@ -1290,6 +1290,34 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         return false;
     }
 
+    // QUICK WIN #1: Early return for same frame (xjadeo: if (!force_update && dispFrame == timestamp) return;)
+    // If same frame is requested and we have valid decoded data, just re-run color conversion
+    // This skips the expensive decode loop but still handles different output buffers
+    if (currentFrame_ == frameNumber && frame_ && frame_->data[0]) {
+        // Same frame requested - frame_ still has decoded YUV data
+        // Just re-run color conversion to output buffer (much faster than re-decoding)
+        if (!swsCtx_) {
+            // No color conversion context - can't reuse
+        } else {
+            // Ensure output buffer is allocated
+            if (!buffer.isValid() || buffer.info().width != frameInfo_.width ||
+                buffer.info().height != frameInfo_.height) {
+                FrameInfo outputInfo;
+                outputInfo.width = frameInfo_.width;
+                outputInfo.height = frameInfo_.height;
+                outputInfo.format = PixelFormat::BGRA32;
+                buffer.allocate(outputInfo);
+            }
+            
+            // Re-run color conversion (frame_ → buffer)
+            uint8_t* dstData[1] = { buffer.data() };
+            int dstLinesize[1] = { static_cast<int>(frameInfo_.width * 4) };
+            sws_scale(swsCtx_, frame_->data, frame_->linesize, 0, 
+                      codecCtx_->height, dstData, dstLinesize);
+            return true;
+        }
+    }
+
     // Check frame cache first (async pre-buffered frames)
     if (!useHardwareDecoding_) {
         std::lock_guard<std::mutex> lock(cacheMutex_);
@@ -1686,6 +1714,15 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     // Only seek if this frame is far from the last decoded position
     // For consecutive frames, just decode forward
     static int64_t lastDecodedFrame = -1;
+    
+    // QUICK WIN #2: Early return for same frame (xjadeo-style)
+    // If same frame is requested, GPU texture already has correct data
+    // This avoids re-decoding when the caller requests the same frame multiple times
+    if (lastDecodedFrame == frameNumber && textureBuffer.isValid()) {
+        // Same frame already decoded and texture is valid - nothing to do
+        return true;
+    }
+    
     bool needSeek = (lastDecodedFrame < 0 ||  // Initial state - must seek
                      frameNumber < lastDecodedFrame ||  // Backward seek
                      frameNumber > lastDecodedFrame + 30);  // Large forward jump

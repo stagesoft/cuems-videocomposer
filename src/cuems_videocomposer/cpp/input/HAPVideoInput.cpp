@@ -355,6 +355,32 @@ bool HAPVideoInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         return false;
     }
 
+    // QUICK WIN: Early return for same frame (xjadeo-style)
+    // If same frame is requested and we have valid decoded data, just copy from frame_
+    if (currentFrame_ == frameNumber && frame_ && frame_->data[0]) {
+        // Same frame requested - just copy existing data
+        if (!buffer.isValid() || buffer.info().width != frameInfo_.width ||
+            buffer.info().height != frameInfo_.height) {
+            FrameInfo outputInfo = frameInfo_;
+            outputInfo.format = PixelFormat::RGBA32;
+            buffer.allocate(outputInfo);
+        }
+        
+        // Copy from decoded frame (HAP decodes to RGBA, linesize may have padding)
+        int srcLinesize = frame_->linesize[0];
+        int dstLinesize = frameInfo_.width * 4;
+        if (srcLinesize == dstLinesize) {
+            memcpy(buffer.data(), frame_->data[0], dstLinesize * frameInfo_.height);
+        } else {
+            for (int y = 0; y < frameInfo_.height; y++) {
+                memcpy(buffer.data() + y * dstLinesize,
+                       frame_->data[0] + y * srcLinesize,
+                       dstLinesize);
+            }
+        }
+        return true;
+    }
+
     // Seek to target frame
     if (currentFrame_ < 0 || currentFrame_ != frameNumber) {
         if (!seek(frameNumber)) {
@@ -466,6 +492,12 @@ bool HAPVideoInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
 bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffer& textureBuffer) {
     if (!isReady()) {
         return false;
+    }
+
+    // QUICK WIN: Early return for same frame (xjadeo-style)
+    // If same frame is requested and texture is valid, nothing to do
+    if (currentFrame_ == frameNumber && textureBuffer.isValid()) {
+        return true;
     }
 
 #ifdef ENABLE_HAP_DIRECT
