@@ -55,6 +55,14 @@ public:
     void init(double refreshHz);
     
     /**
+     * Set expected video framerate (for xjadeo-style timing)
+     * When video fps < display fps, some vsync skips are expected and normal.
+     * This suppresses warnings for expected skips.
+     * @param videoFps Video framerate (e.g., 25.0), or 0 to expect every vsync
+     */
+    void setVideoFramerate(double videoFps);
+    
+    /**
      * Record a page flip event (called from DRM page flip handler)
      * @param sec Seconds from DRM event
      * @param usec Microseconds from DRM event
@@ -104,6 +112,10 @@ private:
     
     int64_t expectedVsyncNs_ = 0;      // Expected vsync duration based on refresh rate
     int64_t totalDroppedFrames_ = 0;   // Total dropped frames since init
+    int64_t totalUnexpectedDrops_ = 0; // Drops beyond expected (actual problems)
+    double displayHz_ = 0.0;           // Display refresh rate
+    double videoFps_ = 0.0;            // Expected video framerate (0 = match display)
+    int expectedVsyncsPerFrame_ = 1;   // Expected vsyncs between flips (display_hz / video_fps)
     bool initialized_ = false;
     
     // Convert DRM timestamp to nanoseconds

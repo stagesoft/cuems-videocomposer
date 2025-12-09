@@ -159,6 +159,14 @@ public:
     DisplayConfigurationManager* getConfigManager() { return configManager_.get(); }
     
     /**
+     * Set expected video framerate for presentation timing
+     * With xjadeo-style timing, video fps < display fps is normal.
+     * This tells PresentationTiming to expect some vsync skips.
+     * @param fps Video framerate (e.g., 25.0 for PAL)
+     */
+    void setVideoFramerate(double fps);
+    
+    /**
      * Get surface for a specific output
      */
     DRMSurface* getSurface(const std::string& name);

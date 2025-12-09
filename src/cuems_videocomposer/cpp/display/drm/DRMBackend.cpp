@@ -1050,5 +1050,15 @@ int64_t DRMBackend::getTotalDroppedFrames() const {
     return total;
 }
 
+void DRMBackend::setVideoFramerate(double fps) {
+    // Set video framerate on all surfaces' presentation timing
+    // This tells them to expect vsync skips (e.g., 25fps on 60Hz display)
+    for (auto& [name, surface] : surfaces_) {
+        if (surface) {
+            surface->getPresentationTiming().setVideoFramerate(fps);
+        }
+    }
+}
+
 } // namespace videocomposer
 

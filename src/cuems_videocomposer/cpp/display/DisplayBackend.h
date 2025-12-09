@@ -182,6 +182,14 @@ public:
         return false;
     }
     
+    /**
+     * Set expected video framerate for presentation timing
+     * With xjadeo-style timing (video fps < display fps), some vsync skips are expected.
+     * This tells the presentation timing logic to only warn about unexpected drops.
+     * @param fps Video/MTC framerate (e.g., 25.0 for PAL)
+     */
+    virtual void setVideoFramerate(double fps) { (void)fps; }
+    
     // ===== Virtual Output / Capture Support =====
     
     /**

@@ -334,46 +334,29 @@ int VideoComposerApplication::run() {
     
     LOG_INFO << "Starting cuems-videocomposer application";
 
-    // xjadeo-style main event loop:
-    // - Run at MTC framerate (e.g., 25fps = 40ms per frame), NOT display refresh rate
-    // - Use software timer for consistent frame timing (like xjadeo's event_loop)
-    // - VSync/page-flip is for tear prevention and buffer management, NOT timing
+    // Multi-layer compositor main loop:
+    // - Run at DISPLAY refresh rate, driven by vsync/page-flip
+    // - Each layer updates independently based on MTC + its video framerate
+    // - This ensures smooth compositing of multiple videos at different framerates
     //
-    // This ensures:
-    // - Consistent MTC-synchronized playback (frames change at MTC rate)
-    // - Works with multiple monitors at different refresh rates
-    // - Same behavior as xjadeo which is proven smooth with MTC
+    // Unlike xjadeo (single video, runs at video fps), we're a compositor that
+    // can have layers at 24fps, 25fps, 29.97fps, 30fps, etc. all playing together.
+    // The display rate is the common output rate that accommodates all.
+    //
+    // Multi-monitor handling:
+    // - With multiple monitors at different refresh rates (e.g., 60Hz + 50Hz),
+    //   we wait for ALL page flips to complete before the next frame
+    // - Effective rate is limited by the slowest monitor in sequential mode
+    // - TODO: Atomic modesetting would allow independent flip timing per monitor
+    //
+    // Frame updates are optimized:
+    // - Each layer only decodes when its frame changes (based on MTC timing)
+    // - Same-frame requests skip decoding (cached in frame_ buffer)
+    // - Rendering happens every vsync for tear-free smooth output
     
-    // Get MTC framerate for timing (default 25fps if not available)
-    double mtcFps = 25.0;  // Default
-    if (globalSyncSource_ && globalSyncSource_->isConnected()) {
-        double syncFps = globalSyncSource_->getFramerate();
-        if (syncFps > 0.0) {
-            mtcFps = syncFps;
-        }
-    }
-    
-    // Calculate nominal frame duration (like xjadeo: nominal_delay = 1.0/framerate)
-    double nominalDelaySec = 1.0 / mtcFps;
-    auto nominalDelayUs = std::chrono::microseconds(static_cast<int64_t>(nominalDelaySec * 1000000.0));
-    
-    LOG_INFO << "Entering video update loop @ " << mtcFps << " fps (frame period: " 
-             << (nominalDelaySec * 1000.0) << "ms)";
-    
-    auto clock1 = std::chrono::steady_clock::now();
+    LOG_INFO << "Entering video update loop @ display refresh rate (vsync-driven)";
     
     while (running_ && shouldContinue()) {
-        // Update MTC framerate dynamically if it changes (rare, but possible)
-        if (globalSyncSource_ && globalSyncSource_->isConnected()) {
-            double newFps = globalSyncSource_->getFramerate();
-            if (newFps > 0.0 && std::abs(newFps - mtcFps) > 0.01) {
-                mtcFps = newFps;
-                nominalDelaySec = 1.0 / mtcFps;
-                nominalDelayUs = std::chrono::microseconds(static_cast<int64_t>(nominalDelaySec * 1000000.0));
-                LOG_INFO << "MTC framerate changed to " << mtcFps << " fps";
-            }
-        }
-        
         processEvents();
         
         // Make OpenGL context current before updating layers
@@ -386,26 +369,11 @@ int VideoComposerApplication::run() {
         
         // Keep context current for render() - avoid extra context switch
         // DRMBackend::render() will use the already-current context
-        // Note: render() still waits for page flip for buffer management,
-        // but we add software timing on top for MTC rate consistency
+        // The vsync/page-flip wait provides timing (60Hz)
         render();
         
-        // xjadeo-style timing: sleep for remaining frame period
-        // This ensures we run at MTC framerate, not display refresh rate
-        auto clock2 = std::chrono::steady_clock::now();
-        auto elapsedTime = std::chrono::duration_cast<std::chrono::microseconds>(clock2 - clock1);
-        
-        if (elapsedTime < nominalDelayUs) {
-            // We have time left in this frame period - sleep the difference
-            // xjadeo polls multiple times per frame for faster MTC response
-            // For simplicity, we do a single sleep (can add polling later if needed)
-            auto sleepTime = nominalDelayUs - elapsedTime;
-            std::this_thread::sleep_for(sleepTime);
-        }
-        // If we took longer than nominal delay, just continue immediately
-        // (xjadeo does: clock1 = clock2; to reset timing)
-        
-        clock1 = std::chrono::steady_clock::now();
+        // No software timer - vsync provides timing
+        // This ensures we run at display rate and can show all video framerates smoothly
     }
 
     return 0;

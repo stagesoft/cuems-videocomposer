@@ -119,36 +119,32 @@ if (!force_update && dispFrame == timestamp) return;  // Already showing this fr
 
 ## Pending Changes (Priority Order)
 
-### 1. ✅ IMPLEMENTED: xjadeo-style Software Timer Loop
-**Impact**: Should significantly improve single-monitor smoothness
+### 1. ✅ REVISED: Display-Rate Loop (NOT MTC-rate)
+**Status**: Reverted to vsync-driven loop
 
-**Concept**: Decouple update loop from vsync. Run at MTC framerate, use vsync only for tear prevention.
+**Why xjadeo-style didn't work for us**:
+- xjadeo: Single video file → run at VIDEO framerate
+- cuems-videocomposer: Multiple layers with DIFFERENT framerates → need common output rate
 
-**Implementation** (`VideoComposerApplication.cpp`):
-```cpp
-// Get MTC framerate for timing (default 25fps if not available)
-double mtcFps = globalSyncSource_->getFramerate();  // e.g., 25.0
-double nominalDelaySec = 1.0 / mtcFps;  // 40ms for 25fps
-
-while (running) {
-    auto clock1 = std::chrono::steady_clock::now();
-    
-    updateLayers();      // Poll MTC
-    render();            // Render + vsync for tear prevention
-    
-    auto clock2 = std::chrono::steady_clock::now();
-    auto elapsed = clock2 - clock1;
-    if (elapsed < nominalDelay) {
-        std::this_thread::sleep_for(nominalDelay - elapsed);
-    }
-    clock1 = std::chrono::steady_clock::now();
-}                        // Loop runs at MTC fps (25fps)
+**The difference**:
+```
+xjadeo:              Single 29.97fps video → loop at 29.97fps
+cuems-videocomposer: Layer1@25fps + Layer2@29.97fps + Layer3@24fps → loop at 60Hz (display)
 ```
 
-**Key features**:
-- Uses MTC framerate dynamically (adapts if MTC fps changes)
-- Vsync still provides tear prevention and buffer management
-- Software timer ensures consistent MTC rate regardless of display refresh
+**Current implementation** (`VideoComposerApplication.cpp`):
+```cpp
+while (running) {
+    updateLayers();  // Each layer updates based on MTC + its own framerate
+    render();        // Render all layers, vsync provides timing (60Hz)
+    // No software timer - display rate is the compositor output rate
+}
+```
+
+**Multi-monitor handling**:
+- Multiple monitors at different rates (60Hz + 50Hz) → wait for all flips
+- Effective rate limited by slowest monitor (sequential flip waiting)
+- TODO: Atomic modesetting for independent per-monitor timing
 
 ---
 
