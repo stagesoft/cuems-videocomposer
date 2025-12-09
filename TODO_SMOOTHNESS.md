@@ -10,7 +10,7 @@
 - ✅ **Loop rate**: Using display-rate (60Hz vsync), correct for multi-layer compositor
 - ✅ **Async Decode Queue**: Pre-buffers 8 frames in background thread
 - ✅ **MTC Interpolation**: Uses mtcHead (ms) instead of discrete SMPTE
-- ❌ Dual monitors: Dropped frames (~30fps instead of 60fps) - needs atomic modesetting
+- ✅ **Atomic Modesetting**: Dual monitors now flip on same vsync (60fps)
 
 ---
 

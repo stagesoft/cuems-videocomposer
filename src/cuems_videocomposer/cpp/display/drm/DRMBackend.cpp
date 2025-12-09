@@ -13,6 +13,7 @@
 #include <cstdlib>  // for getenv
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <xf86drmMode.h>  // for atomic modesetting
 
 #ifdef HAVE_VAAPI_INTEROP
 #include <va/va.h>
@@ -211,31 +212,6 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
         return;
     }
     
-    // TODO: DUAL OUTPUT PERFORMANCE
-    // Current approach: Traditional double-buffering (wait for each flip sequentially)
-    // Problem: With 2 outputs at 60Hz and shared GL context, we get ~30fps because:
-    //   - Render to output 1, swap, wait for flip (~16ms)
-    //   - Render to output 2, swap, wait for flip (~16ms)
-    //   - Total: ~32ms per frame = 30fps
-    //
-    // Solutions (in order of effectiveness):
-    // 1. ATOMIC MODESETTING: Use drmModeAtomicCommit() to submit both page flips
-    //    in a single atomic request. This would allow both outputs to flip on the
-    //    same vsync, achieving 60fps. Requires building an atomic request with
-    //    FB_ID properties for both CRTCs and committing once.
-    //
-    // 2. MPV-STYLE BUFFER QUEUE: Implement explicit buffer queue tracking like mpv:
-    //    - Maintain a queue of GBM buffer objects per surface
-    //    - Only wait when queue exceeds swapchain_depth
-    //    - Release buffers after flip completes (not immediately)
-    //    This enables render-ahead but still has shared context serialization.
-    //
-    // 3. SEPARATE GL CONTEXTS: Create independent GL contexts per output for
-    //    truly parallel rendering. Requires careful resource sharing setup.
-    //
-    // For now, single-output works at 60fps. Dual-output at 30fps is acceptable
-    // for many use cases but should be improved for professional multi-projector setups.
-    
     // Process any completed flips (non-blocking)
     for (auto& [name, surface] : surfaces_) {
         surface->processFlipEvents();
@@ -251,13 +227,109 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     
     primary->releaseCurrent();
     
-    // Wait for flip completion right before scheduling the next one
-    for (auto& [name, surface] : surfaces_) {
-        if (surface->isFlipPending()) {
-            surface->waitForFlip();
+    // Use atomic modesetting for multi-output to flip all on same vsync
+    bool useAtomic = outputManager_->supportsAtomic() && surfaces_.size() > 1;
+    
+    if (useAtomic) {
+        // ATOMIC PATH: Submit all page flips in single atomic commit
+        // This allows all outputs to flip on the same vsync = 60fps for dual output
+        
+        // Wait for all pending flips first
+        for (auto& [name, surface] : surfaces_) {
+            if (surface->isFlipPending()) {
+                surface->waitForFlip();
+            }
+        }
+        
+        // Check if all surfaces have mode set (first frame uses SetCrtc)
+        bool allModesSet = true;
+        for (auto& [name, surface] : surfaces_) {
+            if (!surface->isModeSet()) {
+                allModesSet = false;
+                break;
+            }
+        }
+        
+        if (!allModesSet) {
+            // First frame: use legacy path to set modes
+            for (auto& [name, surface] : surfaces_) {
+                surface->schedulePageFlip();
+            }
+        } else {
+            // Prepare atomic request
+            drmModeAtomicReq* request = outputManager_->createAtomicRequest();
+            if (request) {
+                bool prepareSuccess = true;
+                
+                // Prepare each surface for atomic flip
+                for (auto& [name, surface] : surfaces_) {
+                    uint32_t fbId = surface->prepareAtomicFlip();
+                    if (fbId == 0) {
+                        prepareSuccess = false;
+                        break;
+                    }
+                    
+                    // Get FB_ID property for CRTC
+                    uint32_t crtcId = surface->getCrtcId();
+                    uint32_t fbPropId = outputManager_->getPropertyId(crtcId, DRM_MODE_OBJECT_CRTC, "FB_ID");
+                    
+                    if (fbPropId == 0) {
+                        LOG_WARNING << "DRMBackend: FB_ID property not found for CRTC " << crtcId;
+                        prepareSuccess = false;
+                        break;
+                    }
+                    
+                    // Add to atomic request
+                    if (drmModeAtomicAddProperty(request, crtcId, fbPropId, fbId) < 0) {
+                        LOG_WARNING << "DRMBackend: Failed to add FB_ID to atomic request";
+                        prepareSuccess = false;
+                        break;
+                    }
+                }
+                
+                if (prepareSuccess) {
+                    // Commit atomically with page flip event
+                    uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
+                    if (outputManager_->commitAtomic(request, flags)) {
+                        // Success - finalize all surfaces
+                        for (auto& [name, surface] : surfaces_) {
+                            surface->finalizeAtomicFlip();
+                        }
+                    } else {
+                        LOG_WARNING << "DRMBackend: Atomic commit failed, falling back to legacy";
+                        // Fallback to legacy per-surface flips
+                        for (auto& [name, surface] : surfaces_) {
+                            surface->schedulePageFlip();
+                        }
+                    }
+                } else {
+                    // Fallback to legacy
+                    for (auto& [name, surface] : surfaces_) {
+                        surface->schedulePageFlip();
+                    }
+                }
+                
+                drmModeAtomicFree(request);
+            } else {
+                // Fallback to legacy
+                for (auto& [name, surface] : surfaces_) {
+                    if (surface->isFlipPending()) {
+                        surface->waitForFlip();
+                    }
+                    surface->schedulePageFlip();
+                }
+            }
+        }
+    } else {
+        // LEGACY PATH: Sequential page flips (single output or no atomic support)
+        for (auto& [name, surface] : surfaces_) {
+            if (surface->isFlipPending()) {
+                surface->waitForFlip();
+            }
+            surface->schedulePageFlip();
         }
     }
-    }
+}
     
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately

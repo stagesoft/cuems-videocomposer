@@ -1749,13 +1749,6 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
             bool success = transferHardwareFrameToGPU(queuedFrame, textureBuffer);
             if (success) {
-                // Update current frame tracking
-                static int64_t lastAsyncFrame = -1;
-                if (lastAsyncFrame != frameNumber) {
-                    LOG_VERBOSE << "Async decode: frame " << frameNumber << " from queue (size=" 
-                               << asyncDecodeQueue_->getQueueSize() << ")";
-                    lastAsyncFrame = frameNumber;
-                }
                 return true;
             } else {
                 LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;

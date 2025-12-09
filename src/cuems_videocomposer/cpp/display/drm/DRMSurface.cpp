@@ -908,6 +908,49 @@ bool DRMSurface::schedulePageFlip() {
     return true;
 }
 
+uint32_t DRMSurface::prepareAtomicFlip() {
+    if (!initialized_ || !outputManager_ || flipPending_) {
+        return 0;
+    }
+    
+    // Lock front buffer from GBM surface
+    gbm_bo* bo = gbm_surface_lock_front_buffer(gbmSurface_);
+    if (!bo) {
+        LOG_ERROR << "DRMSurface: Failed to lock front buffer for atomic";
+        return 0;
+    }
+    
+    // Check if we need to create a new framebuffer
+    if (nextFb_.bo != bo) {
+        destroyFramebuffer(nextFb_);
+        if (!createFramebuffer(bo, nextFb_)) {
+            gbm_surface_release_buffer(gbmSurface_, bo);
+            return 0;
+        }
+    }
+    
+    // Store the BO for later (will be committed in finalizeAtomicFlip)
+    pendingBo_ = bo;
+    
+    return nextFb_.fbId;
+}
+
+void DRMSurface::finalizeAtomicFlip() {
+    if (!pendingBo_) {
+        return;
+    }
+    
+    flipPending_ = true;
+    
+    // Update buffer tracking
+    previousBo_ = currentBo_;
+    currentBo_ = pendingBo_;
+    pendingBo_ = nullptr;
+    
+    // Swap framebuffers
+    std::swap(currentFb_, nextFb_);
+}
+
 void DRMSurface::waitForFlip() {
     if (!flipPending_ || !outputManager_) {
         return;

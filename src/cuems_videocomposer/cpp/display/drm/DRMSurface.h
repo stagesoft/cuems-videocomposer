@@ -126,6 +126,31 @@ public:
      */
     bool processFlipEvents();
     
+    // ===== Atomic Modesetting Support =====
+    
+    /**
+     * Prepare for atomic page flip (lock buffer, create FB)
+     * Call this instead of schedulePageFlip() when using atomic commits
+     * @return Framebuffer ID on success, 0 on failure
+     */
+    uint32_t prepareAtomicFlip();
+    
+    /**
+     * Finalize atomic flip after successful drmModeAtomicCommit
+     * Updates internal state (currentBo_, previousBo_, etc.)
+     */
+    void finalizeAtomicFlip();
+    
+    /**
+     * Get CRTC ID for atomic property
+     */
+    uint32_t getCrtcId() const { return crtcId_; }
+    
+    /**
+     * Check if mode has been set (first frame uses SetCrtc)
+     */
+    bool isModeSet() const { return modeSet_; }
+    
     // ===== Output Information (OutputSurface interface) =====
     
     /**
@@ -230,6 +255,7 @@ private:
     Framebuffer nextFb_;
     gbm_bo* currentBo_ = nullptr;    // Buffer currently being displayed
     gbm_bo* previousBo_ = nullptr;   // Buffer to release after flip completes
+    gbm_bo* pendingBo_ = nullptr;    // Buffer pending atomic commit
     
     // Flip state
     bool flipPending_ = false;

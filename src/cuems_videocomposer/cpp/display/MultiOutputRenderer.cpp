@@ -226,14 +226,8 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
     // Swap buffers
     output.surface->swapBuffers();
     
-    // Wait for pending flip before scheduling new one
-    // (DRM can only have one flip pending at a time)
-    if (output.surface->isFlipPending()) {
-        output.surface->waitForFlip();
-    }
-    
-    // Schedule page flip immediately after swap
-    output.surface->schedulePageFlip();
+    // NOTE: Page flips are now handled by DRMBackend for atomic modesetting support
+    // This allows all outputs to flip on the same vsync for 60fps dual-output
     
     output.surface->releaseCurrent();
 }
