@@ -62,19 +62,38 @@ Frame pacing: Almost every frame shows "1 vsync" (RUSHING)
 **Expected for smooth 25fps on 60Hz**: 2-2-3-2-2-3... vsync pattern
 **Actual**: 1-1-1-1-1... (constantly catching up)
 
-**Questions to verify**:
-1. Is VAAPI hardware decode enabled? Check logs for:
-   - `Using HARDWARE decoding` (good)
-   - `falling back to software` (bad)
-   - `VAAPI zero-copy failed` (bad)
-2. What codec is the video? (H.264, HEVC, HAP, ProRes?)
-3. What resolution/bitrate?
+**Verified**:
+1. ✅ VAAPI hardware decode IS enabled and working
+2. ❌ Codec: H.264 High (inter-frame - requires reference frames)
+3. ❌ Resolution: **3840×2160 (4K)** - VERY HIGH decode load
+4. ❌ Bitrate: **93 Mbps** - Very high
 
-**Potential fixes**:
-1. **Verify VAAPI is working** - Could be falling back to software
-2. **Use HAP or ProRes** - Intra-frame codecs decode faster
-3. **Pre-decode (frame queue)** - Decode ahead of time in background thread
-4. **Reduce resolution** - Lower res = faster decode
+**Why VAAPI is still slow at 10-23ms**:
+- 4K H.264 pushes VAAPI to its limits
+- Each frame decode needs reference frames in GPU memory
+- `vaSyncSurface()` + EGL image creation + texture binding overhead
+- 93 Mbps = ~400KB compressed data per frame
+
+**Recommended solutions** (in order of effectiveness):
+
+1. **Transcode to HAP** (Best for professional use):
+   ```bash
+   ffmpeg -i DJI_0150.MP4 -c:v hap -format hap_q DJI_0150_hap.mov
+   ```
+   - HAP decodes in ~1-2ms (10x faster!)
+   - Intra-frame codec (no reference frame overhead)
+   - Used by professional VJ software (Resolume, VDMX, etc.)
+
+2. **Use 1080p version**:
+   ```bash
+   ffmpeg -i DJI_0150.MP4 -vf scale=1920:1080 -c:v libx264 -preset fast -crf 18 DJI_0150_1080p.mp4
+   ```
+   - 1080p H.264 decodes ~4x faster than 4K
+   
+3. **Implement async decode queue** (keeps original files, complex):
+   - Decode ahead in background thread
+   - Frame queue holds ~5-10 frames ready
+   - Display thread picks best frame at vsync time
 
 ---
 
