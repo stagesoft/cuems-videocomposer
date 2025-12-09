@@ -635,8 +635,8 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 cachePtr->pboIndex = nextPBO;
             } else {
                 // Fallback: direct upload (no PBO)
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
-                                GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
+                            GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
             }
             
             // Apply blend mode

@@ -279,8 +279,8 @@ void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager
         surface->processFlipEvents();
         if (surface->isFlipPending()) {
             surface->waitForFlip();
-        }
     }
+}
     
     // Render to each output
     for (auto& [name, surface] : surfaces_) {

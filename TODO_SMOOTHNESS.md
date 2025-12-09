@@ -4,8 +4,10 @@
 - ✅ Single monitor: No dropped frames
 - ✅ Buffer release timing fixed (release after flip, not before)
 - ✅ `eglSwapInterval(0)` to disable EGL internal vsync
-- ❌ Still not mpv-level smoothness (micro-jumps persist)
-- ❌ Dual monitors: Dropped frames (~30fps instead of 60fps)
+- ✅ **Quick Win #1**: Skip decode for same frame (readFrame/readFrameToTexture)
+- ✅ **Quick Win #2**: Skip same MTC frame in LayerPlayback (already existed)
+- ✅ **xjadeo-style software timer**: Run loop at MTC fps, not display rate
+- ❌ Dual monitors: Dropped frames (~30fps instead of 60fps) - needs atomic modesetting
 
 ---
 
@@ -117,38 +119,36 @@ if (!force_update && dispFrame == timestamp) return;  // Already showing this fr
 
 ## Pending Changes (Priority Order)
 
-### 1. HIGH: xjadeo-style Software Timer Loop
+### 1. ✅ IMPLEMENTED: xjadeo-style Software Timer Loop
 **Impact**: Should significantly improve single-monitor smoothness
 
-**Concept**: Decouple update loop from vsync. Run at video framerate, use vsync only for tear prevention.
+**Concept**: Decouple update loop from vsync. Run at MTC framerate, use vsync only for tear prevention.
 
+**Implementation** (`VideoComposerApplication.cpp`):
 ```cpp
-// Current (vsync-driven):
-while (running) {
-    updateLayers();      // Poll MTC
-    render();            // Render + wait for vsync (~16ms)
-}                        // Loop runs at 60Hz
+// Get MTC framerate for timing (default 25fps if not available)
+double mtcFps = globalSyncSource_->getFramerate();  // e.g., 25.0
+double nominalDelaySec = 1.0 / mtcFps;  // 40ms for 25fps
 
-// Proposed (software timer like xjadeo):
 while (running) {
-    clock1 = getMonotonicTime();
+    auto clock1 = std::chrono::steady_clock::now();
     
     updateLayers();      // Poll MTC
-    render();            // Render (vsync prevents tearing, but don't wait)
+    render();            // Render + vsync for tear prevention
     
-    elapsed = getMonotonicTime() - clock1;
-    nominal_delay = 1.0 / videoFramerate;  // e.g., 40ms for 25fps
-    if (elapsed < nominal_delay) {
-        sleep(nominal_delay - elapsed);
+    auto clock2 = std::chrono::steady_clock::now();
+    auto elapsed = clock2 - clock1;
+    if (elapsed < nominalDelay) {
+        std::this_thread::sleep_for(nominalDelay - elapsed);
     }
-}                        // Loop runs at video fps (25fps)
+    clock1 = std::chrono::steady_clock::now();
+}                        // Loop runs at MTC fps (25fps)
 ```
 
-**Files to modify**:
-- `VideoComposerApplication.cpp`: Main loop timing
-- `DRMBackend.cpp`: May need to adjust vsync waiting
-
-**Risk**: Low - xjadeo proves this works for MTC sync
+**Key features**:
+- Uses MTC framerate dynamically (adapts if MTC fps changes)
+- Vsync still provides tear prevention and buffer management
+- Software timer ensures consistent MTC rate regardless of display refresh
 
 ---
 
