@@ -228,8 +228,8 @@ class CodecFormatTest:
                 actual_duration = 600
                 print(f"  Playing to end: using 10 minute timeout (video duration unknown)")
         
-        # Run videocomposer with OSD enabled
-        result = self._run_videocomposer(video_path, actual_duration, enable_osd=True)
+        # Run videocomposer with OSD disabled
+        result = self._run_videocomposer(video_path, actual_duration, enable_osd=False)
         
         # Analyze output
         analysis = self._analyze_output(result, info, expected_path)

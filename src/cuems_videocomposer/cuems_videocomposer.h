@@ -126,7 +126,7 @@ enum {
 #define ST_PADDING  (10)
 
 
-/* X11 only - but defined here since needed in remote.c and display.c
+/* X11 only - but defined here since needed in display.c
  * EWMH state actions, see
 	 http://freedesktop.org/Standards/wm-spec/index.html#id2768769 */
 #define _NET_WM_STATE_REMOVE        0    /* remove/unset property */
@@ -166,32 +166,16 @@ void XCresize_aspect (int relscale);
 void XCresize_scale (int relscale);
 void XCtimeoffset (int mode, unsigned int charcode);
 
-/* remote.c */
-void exec_remote_cmd (char *cmd);
-void close_remote_ctrl (void) ;
-void open_remote_ctrl (void);
-void close_mq_ctrl (void) ;
-void open_mq_ctrl (void);
-void close_ipcmsg_ctrl (void) ;
-int  open_ipcmsg_ctrl (const char *);
-int  remote_read_mq(void);
-int  remote_read_ipc(void);
-int  remote_read_io(void);
-#ifdef PLATFORM_WINDOWS
-int remote_read_h(void);
-#endif
+/* Remote control functions (stubbed in common.c, replaced by C++ OSCRemoteControl) */
 void remote_printf(int val, const char *format, ...);
 void remote_notify(int mode, int rv, const char *format, ...);
-int remote_fd_set(fd_set *fd);
 
-/* xjadeo.c */
-void display_frame(int64_t timestamp, int force_update);
+/* Video file functions (stubbed in common.c, replaced by C++ VideoFileInput) */
 int open_movie(char* file_name);
 int have_open_file ();
 int close_movie();
 void avinit (void);
 void init_moviebuffer(void);
-void event_loop(void);
 size_t video_buffer_size();
 
 
@@ -236,7 +220,7 @@ void ui_osd_geo();
 void ui_osd_outofrange ();
 
 enum SyncSource {
-	SYNC_JACK = 0, // used in display_x_dialog.c
+	SYNC_JACK = 0,
 	SYNC_LTC,
 	SYNC_MTC_JACK,
 	SYNC_MTC_PORTMIDI,
@@ -278,23 +262,12 @@ void midi_close(void);
 int midi_choose_driver(const char *);
 #endif
 
-/* xjosc.c */
-int xjosc_initialize(int osc_port);
-void xjosc_shutdown(void);
-int xjosc_process(void);
-void xjosc_documentation (void);
-
-/* configfile.c */
-void videocomposerrc (void);
-int testfile (char *filename);
-int saveconfig (const char *filename);
-int readconfig (char *fn);
 
 /* freetype - On screen display */
 int render_font (char *fontfile, char *text, int px, int dx);
 void free_freetype ();
 
-/* xvesifib.c - shared */
+/* x_fib functions (from libsofd.c - conditionally compiled with XFIB, file browser removed) */
 void x_fib_free_recent ();
 int x_fib_add_recent (const char *path, time_t atime);
 int x_fib_save_recent (const char *fn);
