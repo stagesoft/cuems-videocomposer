@@ -1,31 +1,92 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: cuems-videocomposer
-Upstream-Contact: CUEMS Team <team@cuems.org>
+Upstream-Contact: Ion Reguera <ion@stagelab.coop>
 Source: https://github.com/cuems/cuems-videocomposer
 
 Files: *
-Copyright: 2024 CUEMS Team
+Copyright: 2024 Stagelab coop <info@stagelab.coop>
+           2024 Ion Reguera <ion@stagelab.coop>
+           2005-2014 Robin Gareus <robin@gareus.org>
+           2006-2011 Luis Garrido <luisgarrido@users.sourceforge.net>
+           2010-2012 Fons Adriaensen <fons@linuxaudio.org>
+           2009-2010 Tim Mayberry <mojofunk@gmail.com>
+           2005-2008 Jörn Nettingsmeier
 License: LGPL-3.0+
 
 Files: src/cuems_videocomposer/*
-Copyright: 2024 CUEMS Team
+Copyright: 2024 Stagelab coop <info@stagelab.coop>
+           2024 Ion Reguera <ion@stagelab.coop>
+           2005-2014 Robin Gareus <robin@gareus.org>
+           2006-2011 Luis Garrido <luisgarrido@users.sourceforge.net>
+           2010-2012 Fons Adriaensen <fons@linuxaudio.org>
+           2009-2010 Tim Mayberry <mojofunk@gmail.com>
+           2005-2008 Jörn Nettingsmeier
 License: LGPL-3.0+
 
+Files: src/cuems_videocomposer/ffcompat.h
+Copyright: 2012-2014 Robin Gareus <robin@gareus.org>
+License: MIT
+
+Files: src/cuems_videocomposer/libsofd.c
+Copyright: 2014 Robin Gareus <robin@gareus.org>
+License: MIT
+
+Files: src/cuems_videocomposer/gtime.c
+Copyright: 1995-1997 Peter Mattis, Spencer Kimball and Josh MacDonald
+           1998 Owen Taylor
+License: LGPL-3.0+
+
+Files: src/cuems_videocomposer/xjadeo.c
+Copyright: 2006-2014 Robin Gareus <robin@gareus.org>
+           2006-2011 Luis Garrido <luisgarrido@users.sourceforge.net>
+License: GPL-2.0+
+
+Files: src/cuems_videocomposer/xjosc.c
+Copyright: 2007,2009 Robin Gareus
+License: GPL-2.0+
+
+Files: src/cuems_videocomposer/mqueue.c
+Copyright: 2006,2014 Robin Gareus
+License: GPL-2.0+
+
+Files: src/cuems_videocomposer/xjremote.c
+Copyright: 2006,2014 Robin Gareus
+License: GPL-2.0+
+
+Files: src/cuems_videocomposer/display_x_dialog.c
+Copyright: 2014 Robin Gareus <robin@gareus.org>
+License: GPL-2.0+
+
+Files: src/cuems_videocomposer/display_x_dnd.c
+Copyright: 2014 Robin Gareus <robin@gareus.org>
+License: GPL-2.0+
+
 Files: src/cuems-mediadecoder/*
-Copyright: 2024 CUEMS Team
+Copyright: 2024 Stagelab coop <info@stagelab.coop>
+           2024 Ion Reguera <ion@stagelab.coop>
 License: LGPL-3.0+
 
 Files: src/cuemslogger/*
-Copyright: 2024 CUEMS Team
-License: LGPL-3.0+
+Copyright: 2020 Stage Lab & bTactic
+License: GPL-3.0+
 
 Files: src/mtcreceiver/*
-Copyright: 2024 CUEMS Team
-License: LGPL-3.0+
+Copyright: 2020 Stage Lab & bTactic
+License: GPL-3.0+
 
 Files: external/hap/*
 Copyright: Vidvox LLC
 License: MIT
+
+Files: usr/lib/cuems-videocomposer/libndi.so*
+Copyright: 2024 NewTek, Inc. (now Vizrt NDI AB)
+License: NDI-SDK-PROPRIETARY
+
+Comment: NDI SDK libraries are bundled in compliance with the NDI SDK License
+ Agreement. These libraries are proprietary software owned by NewTek, Inc.
+ (now Vizrt NDI AB). Distribution is permitted under the terms of the NDI SDK
+ License Agreement. See /usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE/EULA
+ for the full license terms.
 
 License: LGPL-3.0+
  This package is free software; you can redistribute it and/or modify
@@ -34,6 +95,35 @@ License: LGPL-3.0+
  (at your option) any later version.
  .
  This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU Lesser General Public License for more details.
+ .
+ You should have received a copy of the GNU Lesser General Public License
+ along with this program. If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
+License: GPL-2.0+
+ This program is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this program; if not, write to the Free Software Foundation,
+ Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+
+License: LGPL-3.0+
+ This library is free software; you can redistribute it and/or modify
+ it under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 3 of the License, or
+ (at your option) any later version.
+ .
+ This library is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  GNU Lesser General Public License for more details.
@@ -60,19 +150,8 @@ License: MIT
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  SOFTWARE.
 
-Files: usr/lib/cuems-videocomposer/libndi.so*
-Copyright: 2024 NewTek, Inc.
-License: NDI-SDK-PROPRIETARY
-
-Comment: NDI SDK libraries are bundled in compliance with the NDI SDK License
- Agreement. These libraries are proprietary software owned by NewTek, Inc.
- (now Vizrt NDI AB). Distribution is permitted under the terms of the NDI SDK
- License Agreement. See /usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE/EULA
- for the full license terms.
-
 License: NDI-SDK-PROPRIETARY
  This is proprietary software. See the NDI SDK License Agreement in
  /usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE/EULA for full terms.
  .
  NDI® is a registered trademark of Vizrt NDI AB.
-

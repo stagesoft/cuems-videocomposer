@@ -4,8 +4,12 @@ cuems-videocomposer (0.1.0-1) unstable; urgency=medium
   * NDI input support with bundled NDI SDK libraries
   * Hardware-accelerated video decoding (VAAPI, CUDA, QSV)
   * Multi-layer video composition
-  * MTC/LTC timecode synchronization
+  * MTC timecode synchronization
   * HAP codec support
+  * OSC remote control support
+  * Wayland and X11 display backends
+  * DRM/KMS direct rendering support
+  * Based on xjadeo codebase
 
- -- CUEMS Team <team@cuems.org>  Mon, 01 Jan 2024 12:00:00 +0000
+ -- Ion Reguera <ion@stagelab.coop>  Wed, 10 Dec 2025 18:45:42 +0100
 

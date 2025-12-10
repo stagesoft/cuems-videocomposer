@@ -12,6 +12,7 @@ Build-Depends: debhelper (>= 13),
                libx11-dev,
                libxext-dev,
                libxfixes-dev,
+               libxpm-dev,
                libgl1-mesa-dev,
                libglew-dev,
                libfreetype6-dev,
@@ -27,7 +28,8 @@ Build-Depends: debhelper (>= 13),
                libva-drm2-dev,
                libva-x11-2-dev,
                libegl1-mesa-dev,
-               libgbm-dev
+               libgbm-dev,
+               liblo-dev
 Standards-Version: 4.6.0
 Homepage: https://github.com/cuems/cuems-videocomposer
 Vcs-Browser: https://github.com/cuems/cuems-videocomposer
@@ -43,6 +45,7 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
          libx11-6,
          libxext6,
          libxfixes3,
+         libxpm4,
          libgl1,
          libglew2.2,
          libfreetype6,
@@ -56,7 +59,8 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
          libva-drm2,
          libva-x11-2,
          libegl1,
-         libgbm1
+         libgbm1,
+         liblo7
 Description: Professional video compositor with multi-layer support
  CUEMS Video Composer is a high-performance video compositor designed
  for live video production and playback. It supports multiple video layers,
