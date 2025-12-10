@@ -1267,13 +1267,13 @@ bool VideoFileInput::seekToFrame(int64_t frameNumber) {
             seekResult = mediaReader_.seek(idx.seekpts, videoStream_, AVSEEK_FLAG_BACKWARD);
         }
 
-        // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
-        if (codecCtx_) {
-            avcodec_flush_buffers(codecCtx_);
-        }
-
         if (!seekResult) {
             return false;
+        }
+
+        // Flush codec buffers after seek
+        if (codecCtx_) {
+            avcodec_flush_buffers(codecCtx_);
         }
     }
 
@@ -1296,7 +1296,7 @@ bool VideoFileInput::seekByTimestamp(int64_t frameNumber) {
         return false;
     }
 
-    // Flush codec buffers (codec->flush was removed in FFmpeg 4.0+, but avcodec_flush_buffers() is always available)
+    // Just flush for all codecs
     if (codecCtx_) {
         avcodec_flush_buffers(codecCtx_);
     }
@@ -1440,24 +1440,57 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     }
     const int64_t prefuzz = oneFrame > 10 ? 1 : 0;
     
-    // Increase bailout for formats that need more decoding iterations (like xjadeo uses 2 * seek_threshold)
-    // Some formats (especially keyframe-based codecs) may need to decode many frames to reach target
-    int bailout = 2 * 8; // 16 (xjadeo default), but increase for problematic formats
-    if (targetTimestamp >= 0 && frameIndex_) {
-        // For indexed files, we can be more generous with bailout
-        // Keyframe-based codecs may need to decode many frames from a keyframe to reach target
-        bailout = 64; // Increased from 32 to handle keyframe-based codecs better
-    }
+    // Bailout counts frames we've PASSED the target - prevents infinite loops
+    int bailout = 64;
+    int maxPackets = 500;
     bool frameFinished = false;
-
-    while (bailout > 0) {
+    
+    // Track best frame seen (for B-frame reordering)
+    int64_t bestPTS = AV_NOPTS_VALUE;
+    AVFrame* bestFrame = av_frame_alloc();
+    
+    while (bailout > 0 && maxPackets > 0) {
         av_packet_unref(packet);
         int err = mediaReader_.readPacket(packet);
         if (err < 0) {
             if (err == AVERROR_EOF) {
+                // Drain remaining frames
+                videoDecoder_.sendPacket(nullptr);
+                while ((err = videoDecoder_.receiveFrame(frame_)) == 0) {
+                    int64_t pts = parsePTSFromFrame(frame_);
+                    if (pts == AV_NOPTS_VALUE) continue;
+                    lastDecodedPTS_ = pts;
+                    
+                    if (targetTimestamp < 0) {
+                        frameFinished = true;
+                        break;
+                    }
+                    
+                    // Accept frame if it's at or after target
+                    if (pts >= targetTimestamp - prefuzz) {
+                        if (bestPTS == AV_NOPTS_VALUE || pts < bestPTS) {
+                            bestPTS = pts;
+                            av_frame_unref(bestFrame);
+                            av_frame_ref(bestFrame, frame_);
+                        }
+                        // If we got exact match or close enough, done
+                        if (pts < targetTimestamp + oneFrame) {
+                            frameFinished = true;
+                            break;
+                        }
+                    }
+                }
+                if (frameFinished) break;
+                if (bestPTS != AV_NOPTS_VALUE) {
+                    av_frame_unref(frame_);
+                    av_frame_move_ref(frame_, bestFrame);
+                    frameFinished = true;
+                    break;
+                }
                 --bailout;
                 continue;
             } else {
+                av_frame_free(&bestFrame);
                 av_packet_free(&packet);
                 return false;
             }
@@ -1466,64 +1499,74 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         if (packet->stream_index != videoStream_) {
             continue;
         }
+        
+        --maxPackets;
 
-    // Decode video frame using VideoDecoder
-    // Send packet to decoder
-    err = videoDecoder_.sendPacket(packet);
-    if (err < 0 && err != AVERROR(EAGAIN)) {
-        --bailout;
-        continue;
-    }
-
-    // Receive frame from decoder
-    err = videoDecoder_.receiveFrame(frame_);
-    bool gotFrame = (err == 0);
-    if (err == AVERROR(EAGAIN)) {
-        // Need more packets
-        --bailout;
-        continue;
-    } else if (err < 0) {
+        err = videoDecoder_.sendPacket(packet);
+        if (err < 0 && err != AVERROR(EAGAIN)) {
             --bailout;
             continue;
         }
 
-        if (!gotFrame) {
-            --bailout;
-            continue;
-        }
+        // Drain ALL available frames
+        while ((err = videoDecoder_.receiveFrame(frame_)) == 0) {
+            int64_t pts = parsePTSFromFrame(frame_);
+            if (pts == AV_NOPTS_VALUE) continue;
+            
+            lastDecodedPTS_ = pts;
 
-        // Check if we got the target frame (like xjadeo's PTS matching)
-        int64_t pts = parsePTSFromFrame(frame_);
-        if (pts == AV_NOPTS_VALUE) {
-            --bailout;
-            continue;
-        }
+            if (targetTimestamp < 0) {
+                frameFinished = true;
+                break;
+            }
 
-        // Update last decoded PTS for error reporting
-        lastDecodedPTS_ = pts;
-
-        // Match xjadeo's fuzzy PTS matching logic
-        if (targetTimestamp >= 0) {
-            if (pts + prefuzz >= targetTimestamp) {
-                // Fuzzy match: check if PTS is close enough to target (like xjadeo line 674)
-                if (pts - targetTimestamp < oneFrame) {
-                    // Found target frame!
-            frameFinished = true;
+            // Track the closest frame to target (for B-frame reordering)
+            if (pts >= targetTimestamp - prefuzz && pts < targetTimestamp + oneFrame * 2) {
+                // This frame is in acceptable range - track the closest to target
+                int64_t ptsDiff = (pts >= targetTimestamp) ? (pts - targetTimestamp) : (targetTimestamp - pts);
+                int64_t bestDiff = (bestPTS != AV_NOPTS_VALUE) ? 
+                    ((bestPTS >= targetTimestamp) ? (bestPTS - targetTimestamp) : (targetTimestamp - bestPTS)) : INT64_MAX;
+                if (bestPTS == AV_NOPTS_VALUE || ptsDiff < bestDiff) {
+                    bestPTS = pts;
+                    av_frame_unref(bestFrame);
+                    av_frame_ref(bestFrame, frame_);
+                }
+                
+                // Exact match - done immediately
+                if (pts >= targetTimestamp && pts < targetTimestamp + oneFrame) {
+                    frameFinished = true;
                     break;
                 }
-                // PTS is beyond target but not close enough - continue decoding
-                // This can happen with keyframe-based codecs where we need to decode more frames
-                // xjadeo continues in this case and may eventually return an error if bailout expires
             }
-            // PTS is before target - continue decoding
-        } else {
-            // No target timestamp - just use first decoded frame
-            frameFinished = true;
-            break;
+            
+            // Only count as bailout if we've gone past target
+            if (pts > targetTimestamp + oneFrame) {
+                --bailout;
+                // If we have an acceptable match, use it
+                if (bestPTS != AV_NOPTS_VALUE) {
+                    av_frame_unref(frame_);
+                    av_frame_move_ref(frame_, bestFrame);
+                    frameFinished = true;
+                    break;
+                }
+            }
         }
-
+        
+        if (frameFinished) break;
+        
+        if (err != AVERROR(EAGAIN) && err < 0) {
             --bailout;
+        }
     }
+    
+    // If we have a best match but didn't finish, use it
+    if (!frameFinished && bestPTS != AV_NOPTS_VALUE) {
+        av_frame_unref(frame_);
+        av_frame_move_ref(frame_, bestFrame);
+        frameFinished = true;
+    }
+    
+    av_frame_free(&bestFrame);
 
     if (!frameFinished) {
         // Log detailed error information for debugging format-specific issues
@@ -2465,16 +2508,52 @@ bool VideoFileInput::decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffe
     const int64_t prefuzz = oneFrame > 10 ? 1 : 0;
     
     int bailout = 64;
+    int maxPackets = 500;
     bool frameFinished = false;
+    int64_t bestPTS = AV_NOPTS_VALUE;
+    AVFrame* bestFrame = av_frame_alloc();
 
-    while (bailout > 0 && !decodeThreadStop_) {
+    while (bailout > 0 && maxPackets > 0 && !decodeThreadStop_) {
         av_packet_unref(packet);
         int err = mediaReader_.readPacket(packet);
         if (err < 0) {
             if (err == AVERROR_EOF) {
+                videoDecoder_.sendPacket(nullptr);
+                while ((err = videoDecoder_.receiveFrame(frame_)) == 0) {
+                    int64_t pts = parsePTSFromFrame(frame_);
+                    if (pts == AV_NOPTS_VALUE) continue;
+                    lastDecodedPTS_ = pts;
+                    
+                    if (targetTimestamp < 0) {
+                        frameFinished = true;
+                        break;
+                    }
+                    if (pts >= targetTimestamp - prefuzz && pts < targetTimestamp + oneFrame * 2) {
+                        int64_t ptsDiff = (pts >= targetTimestamp) ? (pts - targetTimestamp) : (targetTimestamp - pts);
+                        int64_t bestDiff = (bestPTS != AV_NOPTS_VALUE) ? 
+                            ((bestPTS >= targetTimestamp) ? (bestPTS - targetTimestamp) : (targetTimestamp - bestPTS)) : INT64_MAX;
+                        if (bestPTS == AV_NOPTS_VALUE || ptsDiff < bestDiff) {
+                            bestPTS = pts;
+                            av_frame_unref(bestFrame);
+                            av_frame_ref(bestFrame, frame_);
+                        }
+                        if (pts < targetTimestamp + oneFrame) {
+                            frameFinished = true;
+                            break;
+                        }
+                    }
+                }
+                if (frameFinished) break;
+                if (bestPTS != AV_NOPTS_VALUE) {
+                    av_frame_unref(frame_);
+                    av_frame_move_ref(frame_, bestFrame);
+                    frameFinished = true;
+                    break;
+                }
                 --bailout;
                 continue;
             } else {
+                av_frame_free(&bestFrame);
                 av_packet_free(&packet);
                 return false;
             }
@@ -2483,6 +2562,8 @@ bool VideoFileInput::decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffe
         if (packet->stream_index != videoStream_) {
             continue;
         }
+        
+        --maxPackets;
 
         err = videoDecoder_.sendPacket(packet);
         if (err < 0 && err != AVERROR(EAGAIN)) {
@@ -2490,44 +2571,61 @@ bool VideoFileInput::decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffe
             continue;
         }
 
-        err = videoDecoder_.receiveFrame(frame_);
-        bool gotFrame = (err == 0);
-        if (err == AVERROR(EAGAIN)) {
-            --bailout;
-            continue;
-        } else if (err < 0) {
-            --bailout;
-            continue;
-        }
+        while ((err = videoDecoder_.receiveFrame(frame_)) == 0) {
+            int64_t pts = parsePTSFromFrame(frame_);
+            if (pts == AV_NOPTS_VALUE) continue;
+            
+            lastDecodedPTS_ = pts;
 
-        if (!gotFrame) {
-            --bailout;
-            continue;
-        }
+            if (targetTimestamp < 0) {
+                frameFinished = true;
+                break;
+            }
 
-        int64_t pts = parsePTSFromFrame(frame_);
-        if (pts == AV_NOPTS_VALUE) {
-            --bailout;
-            continue;
-        }
-
-        lastDecodedPTS_ = pts;
-
-        if (targetTimestamp >= 0) {
-            if (pts + prefuzz >= targetTimestamp) {
-                if (pts - targetTimestamp < oneFrame) {
+            // Track the closest frame to target (for B-frame reordering)
+            if (pts >= targetTimestamp - prefuzz && pts < targetTimestamp + oneFrame * 2) {
+                int64_t ptsDiff = (pts >= targetTimestamp) ? (pts - targetTimestamp) : (targetTimestamp - pts);
+                int64_t bestDiff = (bestPTS != AV_NOPTS_VALUE) ? 
+                    ((bestPTS >= targetTimestamp) ? (bestPTS - targetTimestamp) : (targetTimestamp - bestPTS)) : INT64_MAX;
+                if (bestPTS == AV_NOPTS_VALUE || ptsDiff < bestDiff) {
+                    bestPTS = pts;
+                    av_frame_unref(bestFrame);
+                    av_frame_ref(bestFrame, frame_);
+                }
+                
+                // Exact match
+                if (pts >= targetTimestamp && pts < targetTimestamp + oneFrame) {
                     frameFinished = true;
                     break;
                 }
             }
-        } else {
-            frameFinished = true;
-            break;
+            
+            // Only count as bailout if we've gone past target
+            if (pts > targetTimestamp + oneFrame) {
+                --bailout;
+                if (bestPTS != AV_NOPTS_VALUE) {
+                    av_frame_unref(frame_);
+                    av_frame_move_ref(frame_, bestFrame);
+                    frameFinished = true;
+                    break;
+                }
+            }
         }
-
-        --bailout;
+        
+        if (frameFinished) break;
+        
+        if (err != AVERROR(EAGAIN) && err < 0) {
+            --bailout;
+        }
     }
 
+    if (!frameFinished && bestPTS != AV_NOPTS_VALUE) {
+        av_frame_unref(frame_);
+        av_frame_move_ref(frame_, bestFrame);
+        frameFinished = true;
+    }
+    
+    av_frame_free(&bestFrame);
     av_packet_free(&packet);
 
     if (!frameFinished) {
