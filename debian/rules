@@ -21,22 +21,44 @@ override_dh_auto_install:
 	# Install NDI SDK libraries to private directory
 	# This complies with NDI SDK license requirement to not install to system paths
 	mkdir -p debian/cuems-videocomposer/usr/lib/cuems-videocomposer
-	# Try multiple possible locations for NDI SDK
-	NDI_LIB=""; \
-	if [ -f "/opt/NDI SDK for Linux/lib/x86_64-linux-gnu/libndi.so.6.2.1" ]; then \
-		NDI_LIB="/opt/NDI SDK for Linux/lib/x86_64-linux-gnu/libndi.so.6.2.1"; \
-	elif [ -n "$$NDI_SDK_DIR" ] && [ -f "$$NDI_SDK_DIR/lib/x86_64-linux-gnu/libndi.so.6.2.1" ]; then \
-		NDI_LIB="$$NDI_SDK_DIR/lib/x86_64-linux-gnu/libndi.so.6.2.1"; \
-	elif [ -n "$$NDI_SDK_DIR" ] && [ -f "$$NDI_SDK_DIR/lib/libndi.so.6.2.1" ]; then \
-		NDI_LIB="$$NDI_SDK_DIR/lib/libndi.so.6.2.1"; \
+	# Try multiple possible locations for NDI SDK (find any version of libndi.so.6.x.x)
+	@NDI_FOUND=0; \
+	for ver in 6.2.1 6.1.1 6.1.0 6.0.0; do \
+		if [ -f "/opt/NDI SDK for Linux/lib/x86_64-linux-gnu/libndi.so.$$ver" ]; then \
+			cp "/opt/NDI SDK for Linux/lib/x86_64-linux-gnu/libndi.so.$$ver" \
+			   debian/cuems-videocomposer/usr/lib/cuems-videocomposer/; \
+			cd debian/cuems-videocomposer/usr/lib/cuems-videocomposer && \
+			ln -sf libndi.so.$$ver libndi.so.6 && \
+			ln -sf libndi.so.6 libndi.so; \
+			echo "NDI SDK libraries installed to private directory (libndi.so.$$ver)"; \
+			NDI_FOUND=1; \
+			break; \
+		fi; \
+	done; \
+	if [ -z "$$NDI_SDK_DIR" ] && [ $$NDI_FOUND -eq 0 ]; then \
+		for ver in 6.2.1 6.1.1 6.1.0 6.0.0; do \
+			if [ -f "$$NDI_SDK_DIR/lib/x86_64-linux-gnu/libndi.so.$$ver" ]; then \
+				cp "$$NDI_SDK_DIR/lib/x86_64-linux-gnu/libndi.so.$$ver" \
+				   debian/cuems-videocomposer/usr/lib/cuems-videocomposer/; \
+				cd debian/cuems-videocomposer/usr/lib/cuems-videocomposer && \
+				ln -sf libndi.so.$$ver libndi.so.6 && \
+				ln -sf libndi.so.6 libndi.so; \
+				echo "NDI SDK libraries installed to private directory (libndi.so.$$ver)"; \
+				NDI_FOUND=1; \
+				break; \
+			elif [ -f "$$NDI_SDK_DIR/lib/libndi.so.$$ver" ]; then \
+				cp "$$NDI_SDK_DIR/lib/libndi.so.$$ver" \
+				   debian/cuems-videocomposer/usr/lib/cuems-videocomposer/; \
+				cd debian/cuems-videocomposer/usr/lib/cuems-videocomposer && \
+				ln -sf libndi.so.$$ver libndi.so.6 && \
+				ln -sf libndi.so.6 libndi.so; \
+				echo "NDI SDK libraries installed to private directory (libndi.so.$$ver)"; \
+				NDI_FOUND=1; \
+				break; \
+			fi; \
+		done; \
 	fi; \
-	if [ -n "$$NDI_LIB" ]; then \
-		cp "$$NDI_LIB" debian/cuems-videocomposer/usr/lib/cuems-videocomposer/; \
-		cd debian/cuems-videocomposer/usr/lib/cuems-videocomposer && \
-		ln -s libndi.so.6.2.1 libndi.so.6 && \
-		ln -s libndi.so.6 libndi.so; \
-		echo "NDI SDK libraries installed to private directory"; \
-	else \
+	if [ $$NDI_FOUND -eq 0 ]; then \
 		echo "WARNING: NDI SDK libraries not found. Package will be built without NDI support."; \
 		echo "Set NDI_SDK_DIR environment variable or install NDI SDK to /opt/NDI SDK for Linux/"; \
 	fi
@@ -53,7 +75,16 @@ override_dh_auto_install:
 
 override_dh_shlibdeps:
 	# Skip shlibdeps for NDI libraries (they're in private directory)
-	dh_shlibdeps --dpkg-shlibdeps-params=--ignore-missing-info
+	# NDI is a proprietary library bundled in private directory, not in system paths
+	install -m0755 -d debian/cuems-videocomposer/DEBIAN
+	@bash -c 'set +e; \
+		dpkg-shlibdeps -Tdebian/cuems-videocomposer.substvars \
+			--ignore-missing-info \
+			debian/cuems-videocomposer/usr/bin/cuems-videocomposer 2>&1 | \
+			grep -v "libndi.so" || true; \
+		if [ ! -f debian/cuems-videocomposer.substvars ]; then \
+			echo "shlibs:Depends=" > debian/cuems-videocomposer.substvars; \
+		fi'
 
 override_dh_strip:
 	dh_strip --exclude=libndi.so*
