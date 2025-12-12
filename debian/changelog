@@ -1,3 +1,12 @@
+cuems-videocomposer (0.1.1-1) unstable; urgency=medium
+
+  * Implement async video loading to prevent playback interruption
+    - Video files are now loaded in a background thread
+    - Main render loop continues smoothly during file loading
+    - Eliminates momentary playback stutter when loading new videos into layers
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 12 Dec 2025 18:32:17 +0100
+
 cuems-videocomposer (0.1.0-1) unstable; urgency=medium
 
   * Initial Debian package release
