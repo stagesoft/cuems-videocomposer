@@ -258,7 +258,7 @@ static float calc_slider(int x, int y) {
 }
 
 
-static void vc_set_eq (char *prop, int value) {
+__attribute__((unused)) static void vc_set_eq (char *prop, int value) {
 #ifdef COLOREQ
 # ifdef HAVE_LIBXV
 	if (getvidmode() == VO_XV) xv_set_eq(prop,value);
@@ -271,7 +271,6 @@ static void vc_set_eq (char *prop, int value) {
 
 static void xj_handle_X_events (void) {
 	XEvent event;
-	int value = 0; // used for color-eq
 	while(XPending(xj_dpy)) {
 		XNextEvent(xj_dpy, &event);
 // Menu removed
@@ -361,7 +360,7 @@ static void xj_handle_X_events (void) {
 					KeySym key;
 					char buf[100];
 					static XComposeStatus stat;
-					int n = XLookupString(&event.xkey, buf, sizeof(buf), &key, &stat);
+					XLookupString(&event.xkey, buf, sizeof(buf), &key, &stat);
 					remote_notify(NTY_KEYBOARD, 310, "keypress=%d", (unsigned int) key);
 				}
 				break;

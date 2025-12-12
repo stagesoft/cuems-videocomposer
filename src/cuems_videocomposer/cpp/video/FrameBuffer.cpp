@@ -105,7 +105,6 @@ bool FrameBuffer::allocate(const FrameInfo& info) {
     }
     
     // Calculate buffer size using modern FFmpeg API
-    int linesize[4];
     int ret = av_image_get_buffer_size(avFormat, info.width, info.height, 1);
     if (ret < 0) {
         return false;

@@ -209,7 +209,6 @@ bool CPUImageProcessor::applyScale(const FrameBuffer& input, FrameBuffer& output
     // TODO: Implement bilinear/bicubic interpolation for better quality
     int bytesPerPixel = getBytesPerPixel(frameInfo.format);
     int inputStride = frameInfo.width * bytesPerPixel;
-    int outputStride = outputWidth * bytesPerPixel;
 
     const uint8_t* src = input.data();
     uint8_t* dst = output.data();
