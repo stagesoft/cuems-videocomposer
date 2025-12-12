@@ -4,6 +4,7 @@ cuems-videocomposer (0.1.1-1) unstable; urgency=medium
     - Video files are now loaded in a background thread
     - Main render loop continues smoothly during file loading
     - Eliminates momentary playback stutter when loading new videos into layers
+    - Clean unused variabes
 
  -- Ion Reguera <ion@stagelab.coop>  Fri, 12 Dec 2025 18:32:17 +0100
 
