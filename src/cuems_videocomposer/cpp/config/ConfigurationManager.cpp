@@ -266,7 +266,7 @@ void ConfigurationManager::printUsage() const {
 }
 
 void ConfigurationManager::printVersion() const {
-    printf("cuems-videocomposer version 0.1.0 (alpha)\n");
+    printf("cuems-videocomposer version 0.1.1 (beta)\n");
     printf("\n");
     printf("Copyright (C) 2024 stagelab.coop\n");
     printf("Ion Reguera <ion@stagelab.coop>\n");
