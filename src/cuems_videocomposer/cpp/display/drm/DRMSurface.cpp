@@ -15,6 +15,7 @@
 
 // DRM fourcc and modifiers
 #include <drm_fourcc.h>
+#include <xf86drm.h>
 
 // OpenGL headers
 #include <GL/gl.h>
@@ -858,6 +859,15 @@ bool DRMSurface::schedulePageFlip() {
         
         modeSet_ = true;
         LOG_DEBUG << "DRMSurface: Modeset successful, framebuffer displayed";
+        
+        // Wait for vblank after modeset - Intel drivers need this before accepting page flips
+        // Without this, page flips fail with ENOSPC on some Intel iGPUs (N100, etc.)
+        drmVBlank vbl = {};
+        vbl.request.type = DRM_VBLANK_RELATIVE;
+        vbl.request.sequence = 1;  // Wait for next vblank
+        if (drmWaitVBlank(outputManager_->getFd(), &vbl) != 0) {
+            LOG_DEBUG << "DRMSurface: drmWaitVBlank failed (non-critical): " << strerror(errno);
+        }
         
         // Release previous buffer if any
         if (currentBo_) {
