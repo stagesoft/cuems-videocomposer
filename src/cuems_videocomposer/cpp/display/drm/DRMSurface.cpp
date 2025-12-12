@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <string>
+#include <cerrno>
 #include <unistd.h>
 #include <poll.h>
 #include <iomanip>
@@ -876,9 +877,19 @@ bool DRMSurface::schedulePageFlip() {
                               nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
     
     if (ret != 0) {
+        // EBUSY (16) = flip already pending, ENOSPC (28) = no buffer slots
+        // Both indicate we're trying to flip too fast
+        if (-ret == EBUSY || -ret == ENOSPC) {
+            LOG_WARNING << "DRMSurface: Page flip busy/full (errno=" << -ret 
+                        << "), waiting for vsync";
+            // Release the buffer we just locked - we'll try again next frame
+            gbm_surface_release_buffer(gbmSurface_, bo);
+            return false;
+        }
+        
         LOG_ERROR << "DRMSurface: Page flip failed: " << strerror(-ret) << " (errno=" << -ret << ")";
         
-        // Fallback: try drmModeSetCrtc instead
+        // Fallback: try drmModeSetCrtc instead (synchronous, no vsync)
         const DRMConnector* conn = outputManager_->getConnectorByName(outputName_);
         if (conn) {
             drmModeModeInfo* mode = nullptr;
@@ -896,6 +907,15 @@ bool DRMSurface::schedulePageFlip() {
                     gbm_surface_release_buffer(gbmSurface_, bo);
                     return false;
                 }
+                
+                // SetCrtc succeeded - update buffer tracking properly
+                // (SetCrtc is synchronous so buffer swap is immediate)
+                if (currentBo_) {
+                    gbm_surface_release_buffer(gbmSurface_, currentBo_);
+                }
+                currentBo_ = bo;
+                std::swap(currentFb_, nextFb_);
+                
                 // No flip pending in fallback mode
                 return true;
             }
