@@ -543,11 +543,11 @@ void HAPVideoInput::refineHAPVariantFromFrame(AVFrame* frame) {
     // HAP_ALPHA and HAP_Q use DXT5 (16 bytes per 4x4 block = 1 byte per pixel)
     // Standard HAP uses DXT1 (8 bytes per 4x4 block = 0.5 bytes per pixel)
     
-    // Calculate expected sizes for both variants
-    int blockWidth = (frameInfo_.width + 3) / 4;
-    int blockHeight = (frameInfo_.height + 3) / 4;
-    size_t expectedDXT1Size = blockWidth * blockHeight * 8;   // DXT1
-    size_t expectedDXT5Size = blockWidth * blockHeight * 16;  // DXT5
+    // Calculate expected sizes for both variants (commented out - not currently used)
+    // int blockWidth = (frameInfo_.width + 3) / 4;
+    // int blockHeight = (frameInfo_.height + 3) / 4;
+    // size_t expectedDXT1Size = blockWidth * blockHeight * 8;   // DXT1
+    // size_t expectedDXT5Size = blockWidth * blockHeight * 16;  // DXT5
     
     // Get actual compressed data size from frame
     // For HAP, FFmpeg decodes to compressed DXT data in frame->data[0]

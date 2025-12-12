@@ -53,8 +53,8 @@ static GLXContext _gl_ctx;
 
 extern double framerate;  // used for screensaver
 
-static void gl_sync_lock() { }
-static void gl_sync_unlock() { }
+__attribute__((unused)) static void gl_sync_lock() { }
+__attribute__((unused)) static void gl_sync_unlock() { }
 
 static void gl_make_current() {
 	glXMakeCurrent(_gl_display, _gl_win, _gl_ctx);
@@ -310,21 +310,20 @@ int gl_open_window () {
 		(int (*)(Display*, GLXDrawable, int))
 		glXGetProcAddress((const GLubyte *)"glXSwapIntervalEXT");
 
-	int vblank = -1;
 	if (glXSwapIntervalSGI && check_glx_extention("GLX_SGI_swap_control")) {
-		vblank = glXSwapIntervalSGI(1);
+		glXSwapIntervalSGI(1);
 		if (want_verbose)
 			printf("GLX: use SGI Vblank\n");
 	}
 	else if (glXSwapIntervalMESA && check_glx_extention("GLX_MESA_swap_control")) {
-		vblank = glXSwapIntervalMESA(1);
+		glXSwapIntervalMESA(1);
 		if (want_verbose)
 			printf("GLX: use MESA Vblank\n");
 	}
 	else if (glXSwapIntervalEXT && check_glx_extention("GLX_EXT_swap_control")) {
 		GLXDrawable drawable = glXGetCurrentDrawable();
 		if (drawable) {
-			vblank = glXSwapIntervalEXT(_gl_display, drawable, 1);
+			glXSwapIntervalEXT(_gl_display, drawable, 1);
 			if (want_verbose)
 				printf("GLX: use EXT Vblank\n");
 		}
@@ -429,7 +428,7 @@ void gl_handle_events () {
 					KeySym  sym;
 					char    buf[6] = {0,0,0,0,0,0};
 					static XComposeStatus stat;
-					int n = XLookupString(&event.xkey, buf, sizeof(buf), &sym, &stat);
+					XLookupString(&event.xkey, buf, sizeof(buf), &sym, &stat);
 					remote_notify(NTY_KEYBOARD, 310, "keypress=%d", (unsigned int) sym);
 				}
 				break;

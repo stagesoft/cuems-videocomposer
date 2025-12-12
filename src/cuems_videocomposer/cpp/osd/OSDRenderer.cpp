@@ -156,8 +156,8 @@ void OSDRenderer::measureText(const std::string& text, int& width, int& height) 
         if (error) continue;
 
         currentWidth += slot->advance.x >> 6;
-        if (slot->bitmap.rows > maxHeight) {
-            maxHeight = slot->bitmap.rows;
+        if (static_cast<int>(slot->bitmap.rows) > maxHeight) {
+            maxHeight = static_cast<int>(slot->bitmap.rows);
         }
     }
 
