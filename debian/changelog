@@ -1,3 +1,17 @@
+cuems-videocomposer (0.1.1-2) unstable; urgency=medium
+
+  * Fix DRM page flip buffer management on Intel integrated graphics
+    - Handle EBUSY/ENOSPC errors gracefully when page flips are too fast
+    - Fix buffer leak in SetCrtc fallback path
+    - Properly release GBM buffers to prevent "No space left on device" errors
+    - Improves stability on Intel N100 and similar low-power GPUs
+  * Update build dependencies in debian/control
+    - Add missing libxpm-dev, libxv-dev, libimlib2-dev dependencies
+    - Add libopenmp-dev for parallel HAP decompression
+    - Add libva-drm2-dev and libva-x11-2-dev for VAAPI support
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 12 Dec 2025 19:00:00 +0100
+
 cuems-videocomposer (0.1.1-1) unstable; urgency=medium
 
   * Implement async video loading to prevent playback interruption
