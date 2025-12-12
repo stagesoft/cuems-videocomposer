@@ -28,6 +28,7 @@
 #include "VideoComposerApplication.h"
 #include "config/ConfigurationManager.h"
 #include "input/VideoFileInput.h"
+#include "input/AsyncVideoLoader.h"
 #include "display/X11Display.h"
 #ifdef HAVE_WAYLAND
 #include "display/WaylandDisplay.h"
@@ -121,6 +122,10 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
     if (!initializeLayerManager()) {
         return false;
     }
+
+    // Initialize async video loader (for non-blocking video file loading)
+    asyncVideoLoader_ = std::make_unique<AsyncVideoLoader>();
+    asyncVideoLoader_->initialize(config_.get(), displayBackend_.get());
 
     // Initialize OSD manager
     osdManager_ = std::make_unique<OSDManager>();
@@ -385,6 +390,9 @@ void VideoComposerApplication::processEvents() {
     if (remoteControl_) {
         remoteControl_->process();
     }
+    
+    // Process completed async video loads
+    processAsyncLoads();
 }
 
 void VideoComposerApplication::updateLayers() {
@@ -531,6 +539,12 @@ OpenGLRenderer& VideoComposerApplication::renderer() {
 
 void VideoComposerApplication::shutdown() {
     running_ = false;
+    
+    // Shutdown async video loader first (before layer manager)
+    if (asyncVideoLoader_) {
+        asyncVideoLoader_->shutdown();
+        asyncVideoLoader_.reset();
+    }
     
     // Shutdown layers (they will clean up their input/sync sources)
     if (layerManager_) {
@@ -785,27 +799,40 @@ void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std:
 }
 
 bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, const std::string& filepath) {
-    // Create input source
-    auto inputSource = createInputSource(filepath);
-    if (!inputSource) {
-        LOG_ERROR << "Failed to create input source from file: " << filepath;
-        return false;
-    }
-    
-    // Create empty layer
+    // Create empty layer first (fast, non-blocking)
     auto layer = createEmptyLayer(cueId);
     if (!layer) {
         LOG_ERROR << "Failed to create empty layer";
         return false;
     }
     
-    // Setup layer with input source (sets input, sync source, and properties)
-    setupLayerWithInputSource(layer.get(), std::move(inputSource));
-    
     // Add layer to manager with cue ID
     if (!layerManager_->addLayerWithId(cueId, std::move(layer))) {
         LOG_ERROR << "Failed to add layer with cue ID: " << cueId;
         return false;
+    }
+    
+    // Queue async load of video file
+    if (asyncVideoLoader_) {
+        asyncVideoLoader_->requestLoad(cueId, filepath, 
+            [this](const std::string& cid, const std::string& fp, 
+                   std::unique_ptr<InputSource> input, bool success) {
+                onAsyncLoadComplete(cid, fp, std::move(input), success);
+            });
+        LOG_INFO << "Queued async load for layer: " << filepath << " (cue ID: " << cueId << ")";
+        return true;
+    }
+    
+    // Fallback: synchronous loading if async loader not available
+    auto inputSource = createInputSource(filepath);
+    if (!inputSource) {
+        LOG_ERROR << "Failed to create input source from file: " << filepath;
+        return false;
+    }
+    
+    VideoLayer* layerPtr = layerManager_->getLayerByCueId(cueId);
+    if (layerPtr) {
+        setupLayerWithInputSource(layerPtr, std::move(inputSource));
     }
     
     LOG_INFO << "Created layer with file: " << filepath << " (cue ID: " << cueId << ")";
@@ -817,18 +844,31 @@ bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const
     VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
     
     if (!layer) {
-        // Layer doesn't exist - create it
+        // Layer doesn't exist - create it (handles async load internally)
         return createLayerWithFile(cueId, filepath);
     }
     
-    // Layer exists - load file into it
+    // Layer exists - cancel any pending load and queue new async load
+    if (asyncVideoLoader_) {
+        // Cancel any previous pending load for this cue
+        asyncVideoLoader_->cancelLoad(cueId);
+        
+        asyncVideoLoader_->requestLoad(cueId, filepath, 
+            [this](const std::string& cid, const std::string& fp, 
+                   std::unique_ptr<InputSource> input, bool success) {
+                onAsyncLoadComplete(cid, fp, std::move(input), success);
+            });
+        LOG_INFO << "Queued async load into existing layer: " << filepath << " (cue ID: " << cueId << ")";
+        return true;
+    }
+    
+    // Fallback: synchronous loading if async loader not available
     auto inputSource = createInputSource(filepath);
     if (!inputSource) {
         LOG_ERROR << "Failed to create input source from file: " << filepath;
         return false;
     }
     
-    // Setup layer with input source (sets input, sync source, and properties)
     setupLayerWithInputSource(layer, std::move(inputSource));
     
     LOG_INFO << "Loaded file into layer: " << filepath << " (cue ID: " << cueId << ")";
@@ -850,6 +890,39 @@ bool VideoComposerApplication::unloadFileFromLayer(const std::string& cueId) {
     
     LOG_INFO << "Unloaded file from layer (cue ID: " << cueId << ")";
     return true;
+}
+
+bool VideoComposerApplication::isLoadPending(const std::string& cueId) const {
+    if (asyncVideoLoader_) {
+        return asyncVideoLoader_->isLoadPending(cueId);
+    }
+    return false;
+}
+
+void VideoComposerApplication::processAsyncLoads() {
+    if (asyncVideoLoader_) {
+        asyncVideoLoader_->pollCompleted();
+    }
+}
+
+void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, const std::string& filepath,
+                                                   std::unique_ptr<InputSource> inputSource, bool success) {
+    if (!success || !inputSource) {
+        LOG_ERROR << "Async load failed for: " << filepath << " (cue ID: " << cueId << ")";
+        return;
+    }
+    
+    // Get the layer for this cue ID
+    VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
+    if (!layer) {
+        LOG_WARNING << "Layer no longer exists for cue ID: " << cueId;
+        return;
+    }
+    
+    // Setup layer with the loaded input source
+    setupLayerWithInputSource(layer, std::move(inputSource));
+    
+    LOG_INFO << "Async load complete: " << filepath << " (cue ID: " << cueId << ")";
 }
 
 } // namespace videocomposer

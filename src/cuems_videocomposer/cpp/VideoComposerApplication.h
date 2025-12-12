@@ -18,6 +18,7 @@ class VideoLayer;
 class DisplayManager;
 class OSDManager;
 class OpenGLRenderer;
+class AsyncVideoLoader;
 
 #ifdef HAVE_VAAPI_INTEROP
 class VaapiInterop;
@@ -66,6 +67,9 @@ public:
     bool createLayerWithFile(const std::string& cueId, const std::string& filepath);
     bool loadFileIntoLayer(const std::string& cueId, const std::string& filepath);
     bool unloadFileFromLayer(const std::string& cueId);
+    
+    // Check if a video load is in progress for a cue ID
+    bool isLoadPending(const std::string& cueId) const;
 
 private:
     // Component initialization
@@ -93,6 +97,11 @@ private:
     void processEvents();
     void updateLayers();
     void render();
+    void processAsyncLoads();
+    
+    // Async load callback (called when a video finishes loading)
+    void onAsyncLoadComplete(const std::string& cueId, const std::string& filepath,
+                            std::unique_ptr<InputSource> inputSource, bool success);
 
     // Component pointers
     std::unique_ptr<ConfigurationManager> config_;
@@ -104,6 +113,9 @@ private:
     
     // Global sync source (shared across all layers)
     std::unique_ptr<SyncSource> globalSyncSource_;
+    
+    // Async video loader
+    std::unique_ptr<AsyncVideoLoader> asyncVideoLoader_;
 
     // Application state
     bool running_;
