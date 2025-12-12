@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(cuems-videocomposer VERSION 0.1.0 LANGUAGES C CXX)
+project(cuems-videocomposer VERSION 0.1.1 LANGUAGES C CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
