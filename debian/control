@@ -36,6 +36,7 @@ Vcs-Git: https://github.com/cuems/cuems-videocomposer.git
 Package: cuems-videocomposer
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends},
+         ffmpeg,
          libavformat60,
          libavcodec60,
          libavutil58,
@@ -77,4 +78,3 @@ Description: Professional video compositor with multi-layer support
  This package includes NDI SDK libraries bundled in compliance with
  the NDI SDK license agreement. See /usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE
  for details.
-
