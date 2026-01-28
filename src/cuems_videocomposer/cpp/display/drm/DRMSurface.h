@@ -280,6 +280,8 @@ private:
     bool flipPending_ = false;
     bool initialized_ = false;
     bool modeSet_ = false;           // True if CRTC mode has been set (initial modeset done)
+    int warmupFrames_ = 0;           // Frames remaining before trying page flip (Intel quirk)
+    bool useSetCrtcOnly_ = false;    // Fall back to SetCrtc if page flip consistently fails
     
     // Ownership flags (for cleanup)
     bool ownGbmDevice_ = false;      // True if we created the GBM device

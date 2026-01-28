@@ -858,16 +858,8 @@ bool DRMSurface::schedulePageFlip() {
         }
         
         modeSet_ = true;
+        warmupFrames_ = 5;  // Use SetCrtc for next 5 frames (Intel driver quirk)
         LOG_DEBUG << "DRMSurface: Modeset successful, framebuffer displayed";
-        
-        // Wait for vblank after modeset - Intel drivers need this before accepting page flips
-        // Without this, page flips fail with ENOSPC on some Intel iGPUs (N100, etc.)
-        drmVBlank vbl = {};
-        vbl.request.type = DRM_VBLANK_RELATIVE;
-        vbl.request.sequence = 1;  // Wait for next vblank
-        if (drmWaitVBlank(outputManager_->getFd(), &vbl) != 0) {
-            LOG_DEBUG << "DRMSurface: drmWaitVBlank failed (non-critical): " << strerror(errno);
-        }
         
         // Release previous buffer if any
         if (currentBo_) {
@@ -882,53 +874,83 @@ bool DRMSurface::schedulePageFlip() {
         return true;
     }
     
-    // Subsequent frames: use page flip for vsync
+    // Helper lambda for SetCrtc path (used during warmup and as fallback)
+    auto doSetCrtc = [&]() -> bool {
+        const DRMConnector* conn = outputManager_->getConnectorByName(outputName_);
+        if (!conn) return false;
+        
+        drmModeModeInfo* mode = nullptr;
+        if (conn->hasCurrentMode) {
+            mode = const_cast<drmModeModeInfo*>(&conn->currentMode);
+        } else if (conn->savedCrtc) {
+            mode = &conn->savedCrtc->mode;
+        }
+        
+        if (!mode) return false;
+        
+        int r = drmModeSetCrtc(outputManager_->getFd(), crtcId_,
+                               nextFb_.fbId, 0, 0, &connectorId_, 1, mode);
+        if (r != 0) {
+            LOG_ERROR << "DRMSurface: SetCrtc failed: " << strerror(-r);
+            return false;
+        }
+        
+        // SetCrtc succeeded - update buffer tracking
+        if (currentBo_) {
+            gbm_surface_release_buffer(gbmSurface_, currentBo_);
+        }
+        currentBo_ = bo;
+        std::swap(currentFb_, nextFb_);
+        return true;
+    };
+    
+    // During warmup period or if page flip is broken, use SetCrtc
+    // This is needed for Intel iGPUs (N100, etc.) that need time after modeset
+    if (warmupFrames_ > 0 || useSetCrtcOnly_) {
+        if (warmupFrames_ > 0) {
+            warmupFrames_--;
+            if (warmupFrames_ == 0) {
+                LOG_DEBUG << "DRMSurface: Warmup complete, switching to page flip";
+            }
+        }
+        
+        if (doSetCrtc()) {
+            return true;
+        }
+        gbm_surface_release_buffer(gbmSurface_, bo);
+        return false;
+    }
+    
+    // Normal path: use page flip for vsync
     ret = drmModePageFlip(outputManager_->getFd(), crtcId_,
                               nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
     
     if (ret != 0) {
         // EBUSY (16) = flip already pending, ENOSPC (28) = no buffer slots
-        // Both indicate we're trying to flip too fast
         if (-ret == EBUSY || -ret == ENOSPC) {
-            LOG_WARNING << "DRMSurface: Page flip busy/full (errno=" << -ret 
-                        << "), waiting for vsync";
-            // Release the buffer we just locked - we'll try again next frame
+            static int failCount = 0;
+            failCount++;
+            
+            // If page flip consistently fails, switch to SetCrtc-only mode
+            if (failCount >= 10 && !useSetCrtcOnly_) {
+                LOG_WARNING << "DRMSurface: Page flip consistently failing, switching to SetCrtc mode";
+                useSetCrtcOnly_ = true;
+            }
+            
+            // Try SetCrtc as fallback for this frame
+            if (doSetCrtc()) {
+                return true;
+            }
+            
             gbm_surface_release_buffer(gbmSurface_, bo);
             return false;
         }
         
         LOG_ERROR << "DRMSurface: Page flip failed: " << strerror(-ret) << " (errno=" << -ret << ")";
         
-        // Fallback: try drmModeSetCrtc instead (synchronous, no vsync)
-        const DRMConnector* conn = outputManager_->getConnectorByName(outputName_);
-        if (conn) {
-            drmModeModeInfo* mode = nullptr;
-            if (conn->hasCurrentMode) {
-                mode = const_cast<drmModeModeInfo*>(&conn->currentMode);
-            } else if (conn->savedCrtc) {
-                mode = &conn->savedCrtc->mode;
-            }
-            
-            if (mode) {
-                ret = drmModeSetCrtc(outputManager_->getFd(), crtcId_,
-                                    nextFb_.fbId, 0, 0, &connectorId_, 1, mode);
-                if (ret != 0) {
-                    LOG_ERROR << "DRMSurface: SetCrtc fallback failed: " << strerror(-ret);
-                    gbm_surface_release_buffer(gbmSurface_, bo);
-                    return false;
-                }
-                
-                // SetCrtc succeeded - update buffer tracking properly
-                // (SetCrtc is synchronous so buffer swap is immediate)
-                if (currentBo_) {
-                    gbm_surface_release_buffer(gbmSurface_, currentBo_);
-                }
-                currentBo_ = bo;
-                std::swap(currentFb_, nextFb_);
-                
-                // No flip pending in fallback mode
-                return true;
-            }
+        // Fallback to SetCrtc
+        if (doSetCrtc()) {
+            return true;
         }
         
         gbm_surface_release_buffer(gbmSurface_, bo);
