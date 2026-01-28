@@ -1,10 +1,10 @@
 cuems-videocomposer (0.1.1-2) unstable; urgency=medium
 
   * Fix DRM page flip buffer management on Intel integrated graphics
-    - Handle EBUSY/ENOSPC errors gracefully when page flips are too fast
+    - Use SetCrtc warmup period after modeset before attempting page flips
+    - Auto-fallback to SetCrtc-only mode if page flips consistently fail
     - Fix buffer leak in SetCrtc fallback path
     - Properly release GBM buffers to prevent "No space left on device" errors
-    - Add vblank wait after initial modeset for Intel driver compatibility
     - Improves stability on Intel N100 and similar low-power GPUs
   * Update build dependencies in debian/control
     - Add missing libxpm-dev, libxv-dev, libimlib2-dev dependencies
@@ -27,6 +27,7 @@ cuems-videocomposer (0.1.0-1) unstable; urgency=medium
   * NDI input support with bundled NDI SDK libraries
   * Hardware-accelerated video decoding (VAAPI, CUDA, QSV)
   * Multi-layer video composition
+  * MTC/LTC timecode synchronization
   * MTC timecode synchronization
   * HAP codec support
   * OSC remote control support
