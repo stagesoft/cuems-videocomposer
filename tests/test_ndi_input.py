@@ -58,7 +58,7 @@ class NDITest:
     def _find_videocomposer(self) -> Path:
         """Find videocomposer wrapper script."""
         possible_paths = [
-            Path(__file__).parent.parent / "scripts" / "cuems-videocomposer-wrapper.sh",
+            Path(__file__).parent / "scripts" / "cuems-videocomposer-wrapper.sh",
             Path("/usr/bin/cuems-videocomposer"),
             Path("/usr/local/bin/cuems-videocomposer"),
         ]
@@ -389,4 +389,3 @@ Examples:
 
 if __name__ == "__main__":
     sys.exit(main())
-

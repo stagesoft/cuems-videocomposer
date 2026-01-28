@@ -143,7 +143,7 @@ if __name__ == "__main__":
     script_dir = Path(__file__).parent
     project_root = script_dir.parent
     
-    videocomposer_bin = project_root / "scripts" / "cuems-videocomposer-wrapper.sh"
+    videocomposer_bin = script_dir / "scripts" / "cuems-videocomposer-wrapper.sh"
     
     video_path = project_root / "video_test_files" / "test_playback_patterns.mov"
     
@@ -156,4 +156,3 @@ if __name__ == "__main__":
         sys.exit(1)
     
     test_osd_options(video_path, videocomposer_bin)
-

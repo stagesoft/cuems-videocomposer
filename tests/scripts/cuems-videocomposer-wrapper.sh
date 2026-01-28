@@ -12,9 +12,10 @@ else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     if [ -f "$SCRIPT_DIR/cuems-videocomposer.sh" ]; then
         exec "$SCRIPT_DIR/cuems-videocomposer.sh" "$@"
+    elif [ -f "$(which cuems-videocomposer)" ]; then
+        exec cuems-videocomposer "$@"
     else
         echo "ERROR: cuems-videocomposer.sh not found" >&2
         exit 1
     fi
 fi
-
