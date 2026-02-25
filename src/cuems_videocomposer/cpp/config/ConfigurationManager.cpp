@@ -33,6 +33,7 @@ void ConfigurationManager::loadDefaults() {
     setBool("want_noindex", false); // Index frames by default for frame-accurate seeking
     setString("hardware_decoder", "auto");
     setString("resolution_mode", "1080p"); // Default resolution mode
+    setBool("no_splash", false); // Show startup splash by default
 }
 
 bool ConfigurationManager::loadFromFile(const std::string& filename) {
@@ -152,6 +153,8 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
                               [](unsigned char c) { return std::tolower(c); });
                 setString("resolution_mode", value);
             }
+        } else if (arg == "--no-splash" || arg == "--nosplash") {
+            setBool("no_splash", true);
         } else if (arg[0] != '-') {
             // Assume it's a movie file
             if (movieFile_.empty()) {
@@ -250,6 +253,7 @@ void ConfigurationManager::printUsage() const {
 #ifdef HAVE_NDI_SDK
     printf("  --discover-ndi [SEC]  discover and list available NDI sources (optional timeout in seconds)\n");
 #endif
+    printf("  --no-splash            disable startup logo splash\n");
     printf("\n");
     printf("MIDI Sync:\n");
     printf("  The application uses ALSA Sequencer for MIDI Time Code (MTC) synchronization.\n");

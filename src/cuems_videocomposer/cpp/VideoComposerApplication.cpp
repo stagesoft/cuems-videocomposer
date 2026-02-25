@@ -49,6 +49,7 @@
 #include "video/FrameFormat.h"
 #include "display/DisplayManager.h"
 #include "display/OpenGLRenderer.h"
+#include "display/StartupSplash.h"
 #include "remote/OSCRemoteControl.h"
 
 #ifdef HAVE_VAAPI_INTEROP
@@ -117,6 +118,8 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
         LOG_ERROR << "Failed to initialize display";
         return false;
     }
+
+    showStartupSplash();
 
     // Initialize layer manager
     if (!initializeLayerManager()) {
@@ -274,6 +277,20 @@ bool VideoComposerApplication::initializeDisplay() {
 #endif
 
     return true;
+}
+
+void VideoComposerApplication::showStartupSplash() {
+    if (config_->getBool("no_splash", false)) {
+        return;
+    }
+    if (!displayBackend_ || !displayBackend_->isWindowOpen()) {
+        return;
+    }
+    StartupSplash splash;
+    if (!splash.loadFromEmbedded()) {
+        return;
+    }
+    splash.show(displayBackend_.get(), displayManager_.get(), StartupSplash::SPLASH_DURATION_SECONDS);
 }
 
 bool VideoComposerApplication::initializeRemoteControl() {

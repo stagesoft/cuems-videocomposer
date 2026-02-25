@@ -175,7 +175,12 @@ public:
      * Get primary surface (first output)
      */
     DRMSurface* getPrimarySurface();
-    
+
+    /**
+     * Get all surfaces (for startup splash: render logo on each output)
+     */
+    const std::map<std::string, std::unique_ptr<DRMSurface>>& getSurfaces() const { return surfaces_; }
+
     /**
      * Get DRM output manager
      */

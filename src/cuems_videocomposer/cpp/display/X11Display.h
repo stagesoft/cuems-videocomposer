@@ -54,6 +54,7 @@ public:
     bool isWindowOpen() const override;
     void render(LayerManager* layerManager, OSDManager* osdManager = nullptr) override;
     void handleEvents() override;
+    void swapBuffers() override;
     void resize(unsigned int width, unsigned int height) override;
     void getWindowSize(unsigned int* width, unsigned int* height) const override;
     void setPosition(int x, int y) override;
@@ -112,8 +113,7 @@ private:
     void handleEventsCGL();
 #endif
 
-    // OpenGL context management (implementation details)
-    void swapBuffers();
+    // OpenGL context management (implementation details; swapBuffers is public override)
 
     // Window management
     void setupWindowHints();

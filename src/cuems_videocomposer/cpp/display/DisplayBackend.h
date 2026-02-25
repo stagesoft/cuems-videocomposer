@@ -72,6 +72,12 @@ public:
     virtual void handleEvents() = 0;
 
     /**
+     * Swap/present buffers (for startup splash on X11/Wayland).
+     * Default no-op; DRM uses per-surface page flips.
+     */
+    virtual void swapBuffers() {}
+
+    /**
      * Resize window
      * @param width New width
      * @param height New height

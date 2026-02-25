@@ -19,6 +19,7 @@ class DisplayManager;
 class OSDManager;
 class OpenGLRenderer;
 class AsyncVideoLoader;
+class StartupSplash;
 
 #ifdef HAVE_VAAPI_INTEROP
 class VaapiInterop;
@@ -75,6 +76,7 @@ private:
     // Component initialization
     bool initializeConfiguration(int argc, char** argv);
     bool initializeDisplay();
+    void showStartupSplash();
     bool initializeRemoteControl();
     bool initializeLayerManager();
     bool createInitialLayer();
