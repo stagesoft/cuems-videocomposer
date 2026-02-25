@@ -5,6 +5,7 @@ Maintainer: CUEMS Team <team@cuems.org>
 Build-Depends: debhelper (>= 13),
                cmake (>= 3.10),
                pkg-config,
+               python3,
                libavformat-dev,
                libavcodec-dev,
                libavutil-dev,

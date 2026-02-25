@@ -1,3 +1,13 @@
+cuems-videocomposer (0.1.1-3) unstable; urgency=medium
+
+  * Add startup logo splash display
+    - Embedded PNG (resources/splash.png) shown centered on every monitor for 5s
+    - Configurable duration in code; disable with --no-splash
+    - DRM/KMS and X11 backends supported
+    - Image embedded at build time; replace splash.png and rebuild to change
+
+ -- Ion Reguera <ion@stagelab.coop>  Wed, 25 Feb 2026 20:00:00 +0100
+
 cuems-videocomposer (0.1.1-2) unstable; urgency=medium
 
   * Fix DRM page flip buffer management on Intel integrated graphics
