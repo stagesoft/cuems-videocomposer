@@ -1435,9 +1435,13 @@ void OpenGLRenderer::computeMVPMatrix(float* mvp, float x, float y, float width,
     float scaleX = width * props.scaleX;
     float scaleY = height * props.scaleY;
     
-    // Position: center the quad at (x, y)
+    // Position: center the quad at (x, y) then apply layer position from props
     float posX = x;
     float posY = y;
+    if (viewportWidth_ > 0 && viewportHeight_ > 0) {
+        posX += (2.0f * props.x) / viewportWidth_;
+        posY -= (2.0f * props.y) / viewportHeight_;
+    }
     
     // Build MVP as: Translation * Rotation * Scale
     // For simplicity, we'll build a combined matrix
