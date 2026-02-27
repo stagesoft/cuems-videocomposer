@@ -1,28 +1,33 @@
 /*
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
  * cuems-videocomposer - Video composer for CUEMS
  *
- * Copyright (C) 2024 stagelab.coop
- * Ion Reguera <ion@stagelab.coop>
+ * Copyright (C) 2020-2026 Stage Lab Coop.
+ * Author: Ion Reguera <ion@stagelab.coop>
  *
- * This program is partially based on xjadeo code:
+ * This program contains code derived from xjadeo:
  * Copyright (C) 2005-2014 Robin Gareus <robin@gareus.org>
  * Copyright (C) 2010-2012 Fons Adriaensen <fons@linuxaudio.org>
  * Copyright (C) 2009-2010 Tim Mayberry <mojofunk@gmail.com>
  * Copyright (C) 2005-2008 Jörn Nettingsmeier
+ * https://xjadeo.sourceforge.net/
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 3, or (at your option)
- * any later version.
+ * Development has also been inspired by mpv:
+ * https://mpv.io/
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "VideoComposerApplication.h"
