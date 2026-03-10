@@ -1,0 +1,29 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        # Stop service if running
+        if [ -d /run/systemd/system ]; then
+            if systemctl is-active --quiet cuems-videocomposer 2>/dev/null; then
+                systemctl stop cuems-videocomposer || true
+            fi
+        fi
+        ;;
+
+    upgrade)
+        # Don't stop service on upgrade (postinst will restart it)
+        ;;
+
+    failed-upgrade)
+        ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

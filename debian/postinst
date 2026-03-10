@@ -1,0 +1,40 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure)
+        # Reload systemd to pick up any service file changes
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+
+        echo "cuems-videocomposer installed successfully."
+
+        # Enable and (re)start the service
+        if [ -d /run/systemd/system ]; then
+            if ! systemctl is-enabled cuems-videocomposer >/dev/null 2>&1; then
+                systemctl enable cuems-videocomposer || echo "WARNING: Failed to enable cuems-videocomposer service" >&2
+            fi
+
+            # $2 is the previously-configured version (set on upgrade, empty on fresh install)
+            if [ -n "$2" ]; then
+                echo "Upgrade from $2 detected, restarting cuems-videocomposer service..."
+                systemctl restart cuems-videocomposer || echo "WARNING: Failed to restart cuems-videocomposer service" >&2
+            else
+                systemctl start cuems-videocomposer || echo "WARNING: Failed to start cuems-videocomposer service" >&2
+            fi
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
