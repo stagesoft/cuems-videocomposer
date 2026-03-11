@@ -211,6 +211,9 @@ private:
     void stopAsyncDecode();
     CachedFrame* findCachedFrame(int64_t frameNumber);
     
+    // Hardware decode frame tracking (per-instance, NOT static)
+    int64_t lastDecodedHWFrame_;
+    
     // NEW: Async decode queue for smooth hardware decoding
     // This provides mpv-style pre-buffering to decouple decode latency from display timing
     std::unique_ptr<AsyncDecodeQueue> asyncDecodeQueue_;
