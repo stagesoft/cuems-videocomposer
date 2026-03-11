@@ -39,7 +39,7 @@ LayerPlayback::LayerPlayback()
     , timeOffset_(0)
     , timeScale_(1.0)
     , wraparound_(false)
-    , mtcFollow_(true)  // Default: follow MTC
+    , mtcFollow_(false)  // Default: don't follow MTC until engine sends /mtcfollow
     , wasRolling_(false)
     , lastLoggedFrame_(-1)
     , debugCounter_(0)

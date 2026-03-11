@@ -1174,8 +1174,11 @@ bool RemoteCommandRouter::handleLayerMtcFollow(VideoLayer* layer, const std::vec
         return false;
     }
     
-    int enabled = std::atoi(args[0].c_str());
-    layer->setMtcFollow(enabled != 0);
+    // Engine sends the MIDI port name (e.g. "Midi Through Port-0") to enable,
+    // or "0" / empty string to disable.
+    const std::string& val = args[0];
+    bool enabled = !val.empty() && val != "0";
+    layer->setMtcFollow(enabled);
     return true;
 }
 

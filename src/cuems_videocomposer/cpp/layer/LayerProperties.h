@@ -37,7 +37,7 @@ struct LayerProperties {
     int height = 0;         // Height
     float opacity = 1.0f;   // Opacity (0.0 - 1.0)
     int zOrder = 0;         // Layer stacking order
-    bool visible = true;    // Show/hide layer
+    bool visible = false;   // Show/hide layer (hidden until engine sends visible=1)
     
     // Transform (simplified for now, can be extended)
     float scaleX = 1.0f;

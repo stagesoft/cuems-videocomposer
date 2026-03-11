@@ -774,9 +774,10 @@ std::unique_ptr<InputSource> VideoComposerApplication::createInputSourceFromFile
 std::unique_ptr<VideoLayer> VideoComposerApplication::createEmptyLayer(const std::string& cueId) {
     auto layer = std::make_unique<VideoLayer>();
     
-    // Set basic properties
+    // Set basic properties — layers start hidden and without MTC follow.
+    // The engine will explicitly set visible=1 and mtcfollow when running a cue.
     auto& props = layer->properties();
-    props.visible = true;
+    props.visible = false;
     props.opacity = 1.0f;
     props.zOrder = 0;
     
