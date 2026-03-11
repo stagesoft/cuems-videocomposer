@@ -44,6 +44,9 @@ LayerPlayback::LayerPlayback()
     , lastLoggedFrame_(-1)
     , debugCounter_(0)
     , loggedExceededDuration_(false)
+    , vsyncCount_(0)
+    , lastFrameChangeVsync_(0)
+    , lastVideoFrame_(-1)
     , frameOnGPU_(false)
 {
 }
@@ -245,11 +248,7 @@ void LayerPlayback::updateFromSyncSource() {
         // However, full SYSEX frames are explicit position commands and must always seek
         // even if the frame number is the same (e.g., 00:00:00:00 to reset position)
         if (adjustedFrame != lastSyncFrame_ || fullFrameReceived) {
-            // Track vsync count when frames change (for micro-jump diagnosis)
-            static int64_t vsyncCount = 0;
-            static int64_t lastFrameChangeVsync = 0;
-            static int64_t lastVideoFrame = -1;
-            vsyncCount++;
+            vsyncCount_++;
             
             if (fullFrameReceived) {
                 // Full frame received - force a seek first, then load
@@ -276,17 +275,13 @@ void LayerPlayback::updateFromSyncSource() {
                 lastSyncFrame_ = adjustedFrame;
                 
                 // Log frame display duration (vsyncs since last frame change)
-                // With MTC interpolation at 60Hz, we get a new frame number every vsync,
-                // so 1 vsync per frame is normal and expected for smooth playback.
-                // Only log if something truly unusual happens (like stuck on same frame for many vsyncs)
-                int64_t vsyncsSinceLast = vsyncCount - lastFrameChangeVsync;
-                if (lastVideoFrame >= 0 && vsyncsSinceLast > 4) {
-                    // Only warn if frame was held for more than 4 vsyncs (>66ms - likely stall)
-                    LOG_WARNING << "Frame pacing: frame " << lastVideoFrame << " held for " 
+                int64_t vsyncsSinceLast = vsyncCount_ - lastFrameChangeVsync_;
+                if (lastVideoFrame_ >= 0 && vsyncsSinceLast > 4) {
+                    LOG_WARNING << "Frame pacing: frame " << lastVideoFrame_ << " held for " 
                                 << vsyncsSinceLast << " vsyncs (possible stall)";
                 }
-                lastFrameChangeVsync = vsyncCount;
-                lastVideoFrame = adjustedFrame;
+                lastFrameChangeVsync_ = vsyncCount_;
+                lastVideoFrame_ = adjustedFrame;
             } else {
                 // If load fails, try seeking first (helps with keyframe-based codecs)
                 LOG_WARNING << "Failed to load frame " << adjustedFrame << ", trying seek first";

@@ -122,6 +122,11 @@ private:
     int debugCounter_;       // Debug counter for periodic logging
     bool loggedExceededDuration_; // True if we've logged "frame exceeded duration" message
     
+    // Frame pacing diagnosis (per-layer)
+    int64_t vsyncCount_;           // Approximate vsync counter (incremented each update)
+    int64_t lastFrameChangeVsync_; // vsyncCount_ when frame last changed
+    int64_t lastVideoFrame_;       // Last video frame number for pacing diagnosis
+    
     // Frame buffers (CPU and GPU)
     FrameBuffer cpuFrameBuffer_;
     GPUTextureFrameBuffer gpuFrameBuffer_;
