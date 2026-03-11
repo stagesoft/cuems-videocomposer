@@ -1,3 +1,25 @@
+/*
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * Copyright (C) 2020-2026 Stage Lab Coop.
+ * Author: Ion Reguera <ion@stagelab.coop>
+ *
+ * This file is part of cuems-videocomposer.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #ifndef VIDEOCOMPOSER_LAYERPLAYBACK_H
 #define VIDEOCOMPOSER_LAYERPLAYBACK_H
 
@@ -99,6 +121,11 @@ private:
     int64_t lastLoggedFrame_; // Last logged frame for periodic logging
     int debugCounter_;       // Debug counter for periodic logging
     bool loggedExceededDuration_; // True if we've logged "frame exceeded duration" message
+    
+    // Frame pacing diagnosis (per-layer)
+    int64_t vsyncCount_;           // Approximate vsync counter (incremented each update)
+    int64_t lastFrameChangeVsync_; // vsyncCount_ when frame last changed
+    int64_t lastVideoFrame_;       // Last video frame number for pacing diagnosis
     
     // Frame buffers (CPU and GPU)
     FrameBuffer cpuFrameBuffer_;

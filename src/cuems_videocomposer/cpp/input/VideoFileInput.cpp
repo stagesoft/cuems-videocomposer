@@ -1,3 +1,25 @@
+/*
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * Copyright (C) 2020-2026 Stage Lab Coop.
+ * Author: Ion Reguera <ion@stagelab.coop>
+ *
+ * This file is part of cuems-videocomposer.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "VideoFileInput.h"
 #include "../../ffcompat.h"
 #include "../utils/CLegacyBridge.h"
@@ -64,6 +86,7 @@ VideoFileInput::VideoFileInput()
     , currentFrame_(-1)
     , ready_(false)
     , frameRateQ_({1, 1})
+    , lastDecodedHWFrame_(-1)
     , useAsyncDecode_(false)
 {
 }
@@ -1817,19 +1840,21 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     // Seek to frame if needed
     // Only seek if this frame is far from the last decoded position
     // For consecutive frames, just decode forward
-    static int64_t lastDecodedFrame = -1;
+    // NOTE: lastDecodedHWFrame_ is a per-instance member (NOT static!)
+    // A static variable here was shared across all layers, causing the rightmost
+    // monitor to skip decoding at loop boundaries (it saw another layer's state).
     
     // QUICK WIN #2: Early return for same frame (xjadeo-style)
     // If same frame is requested, GPU texture already has correct data
     // This avoids re-decoding when the caller requests the same frame multiple times
-    if (lastDecodedFrame == frameNumber && textureBuffer.isValid()) {
+    if (lastDecodedHWFrame_ == frameNumber && textureBuffer.isValid()) {
         // Same frame already decoded and texture is valid - nothing to do
         return true;
     }
     
-    bool needSeek = (lastDecodedFrame < 0 ||  // Initial state - must seek
-                     frameNumber < lastDecodedFrame ||  // Backward seek
-                     frameNumber > lastDecodedFrame + 30);  // Large forward jump
+    bool needSeek = (lastDecodedHWFrame_ < 0 ||  // Initial state - must seek
+                     frameNumber < lastDecodedHWFrame_ ||  // Backward seek
+                     frameNumber > lastDecodedHWFrame_ + 30);  // Large forward jump
     
     if (needSeek) {
         // SPECIAL CASE: Frames before first keyframe
@@ -2003,7 +2028,7 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         hwFrame_->best_effort_timestamp != AV_NOPTS_VALUE ? hwFrame_->best_effort_timestamp : hwFrame_->pts,
         timeBase, frameRateQ_
     );
-    lastDecodedFrame = decodedFrameNum;
+    lastDecodedHWFrame_ = decodedFrameNum;
 
     // Lazy initialization of VaapiInterop (needs GL context which may not be available at open time)
 #ifdef HAVE_VAAPI_INTEROP
@@ -2336,6 +2361,7 @@ void VideoFileInput::cleanup() {
     videoStream_ = -1;
     lastDecodedPTS_ = -1;
     lastDecodedFrameNo_ = -1;
+    lastDecodedHWFrame_ = -1;
     scanComplete_ = false;
     currentFrame_ = -1;
     useHardwareDecoding_ = false;

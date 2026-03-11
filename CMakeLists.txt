@@ -532,8 +532,22 @@ endif()
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/src/cuems_videocomposer)
 include_directories(${CMAKE_SOURCE_DIR}/src/cuems_videocomposer/cpp)
+include_directories(${CMAKE_SOURCE_DIR}/external/stb)
 # cuems-mediadecoder includes (also propagated via PUBLIC interface)
 include_directories(${CMAKE_SOURCE_DIR}/src/cuems-mediadecoder/include)
+
+# Embed splash.png at build time (resources/splash.png -> generated/splash_png.h)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
+add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/splash_png.h
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/cmake/embed_splash.py
+        ${CMAKE_SOURCE_DIR}/resources/splash.png
+        ${CMAKE_BINARY_DIR}/generated/splash_png.h
+    DEPENDS ${CMAKE_SOURCE_DIR}/resources/splash.png ${CMAKE_SOURCE_DIR}/cmake/embed_splash.py
+    COMMENT "Embedding splash.png into splash_png.h"
+)
+add_custom_target(splash_png_embed ALL DEPENDS ${CMAKE_BINARY_DIR}/generated/splash_png.h)
+include_directories(${CMAKE_BINARY_DIR}/generated)
 
 # Source files for existing C code (will be gradually replaced)
 # Note: main.c removed - using cpp/main.cpp instead
@@ -612,6 +626,7 @@ set(CPP_SOURCES
     # Wayland backend (conditional compilation via #ifdef HAVE_WAYLAND)
     src/cuems_videocomposer/cpp/display/WaylandDisplay.cpp
     src/cuems_videocomposer/cpp/display/XineramaHelper.cpp
+    src/cuems_videocomposer/cpp/display/StartupSplash.cpp
     # Output capture and virtual outputs
     src/cuems_videocomposer/cpp/output/FrameCapture.cpp
     src/cuems_videocomposer/cpp/output/OutputSinkManager.cpp
@@ -795,6 +810,7 @@ endif()
 
 # Create executable
 add_executable(cuems-videocomposer ${C_SOURCES} ${CPP_SOURCES})
+add_dependencies(cuems-videocomposer splash_png_embed)
 
 # Test executable (optional)
 option(BUILD_TESTS "Build test suite" ON)

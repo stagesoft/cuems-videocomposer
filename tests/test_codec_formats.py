@@ -45,7 +45,7 @@ class CodecFormatTest:
     def _find_videocomposer(self) -> Path:
         """Find videocomposer wrapper script."""
         # Try scripts directory first
-        scripts_dir = Path(__file__).parent.parent / "scripts"
+        scripts_dir = Path(__file__).parent / "scripts"
         wrapper_script = scripts_dir / "cuems-videocomposer-wrapper.sh"
         if wrapper_script.exists():
             return wrapper_script
@@ -1235,4 +1235,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

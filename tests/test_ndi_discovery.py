@@ -23,7 +23,7 @@ def discover_ndi_sources(timeout_seconds=5):
     """
     Discover NDI sources using videocomposer's --discover-ndi flag.
     """
-    videocomposer_bin = Path(__file__).parent.parent / "scripts" / "cuems-videocomposer-wrapper.sh"
+    videocomposer_bin = Path(__file__).parent / "scripts" / "cuems-videocomposer-wrapper.sh"
     
     # Try system path if wrapper script doesn't exist
     if not videocomposer_bin.exists():
@@ -129,4 +129,3 @@ Examples:
 
 if __name__ == "__main__":
     sys.exit(main())
-

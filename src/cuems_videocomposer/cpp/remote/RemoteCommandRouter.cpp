@@ -1,3 +1,25 @@
+/*
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * Copyright (C) 2020-2026 Stage Lab Coop.
+ * Author: Ion Reguera <ion@stagelab.coop>
+ *
+ * This file is part of cuems-videocomposer.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "RemoteCommandRouter.h"
 #include "../VideoComposerApplication.h"
 #include "../layer/LayerManager.h"
@@ -1152,8 +1174,11 @@ bool RemoteCommandRouter::handleLayerMtcFollow(VideoLayer* layer, const std::vec
         return false;
     }
     
-    int enabled = std::atoi(args[0].c_str());
-    layer->setMtcFollow(enabled != 0);
+    // Engine sends the MIDI port name (e.g. "Midi Through Port-0") to enable,
+    // or "0" / empty string to disable.
+    const std::string& val = args[0];
+    bool enabled = !val.empty() && val != "0";
+    layer->setMtcFollow(enabled);
     return true;
 }
 

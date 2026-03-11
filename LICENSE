@@ -1,0 +1,11 @@
+SPDX-License-Identifier: LGPL-3.0-or-later
+
+CUEMS Video Composer is licensed under the GNU Lesser General Public License
+version 3 or (at your option) any later version.
+
+The full license text is provided in:
+- COPYING.LESSER (LGPL-3.0)
+- COPYING (legacy GPL text retained from earlier components)
+
+For distribution/package attribution, see:
+- debian/copyright

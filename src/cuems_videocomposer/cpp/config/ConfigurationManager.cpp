@@ -1,3 +1,25 @@
+/*
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * Copyright (C) 2020-2026 Stage Lab Coop.
+ * Author: Ion Reguera <ion@stagelab.coop>
+ *
+ * This file is part of cuems-videocomposer.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "ConfigurationManager.h"
 #include <fstream>
 #include <sstream>
@@ -33,6 +55,7 @@ void ConfigurationManager::loadDefaults() {
     setBool("want_noindex", false); // Index frames by default for frame-accurate seeking
     setString("hardware_decoder", "auto");
     setString("resolution_mode", "1080p"); // Default resolution mode
+    setBool("no_splash", false); // Show startup splash by default
 }
 
 bool ConfigurationManager::loadFromFile(const std::string& filename) {
@@ -152,6 +175,8 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
                               [](unsigned char c) { return std::tolower(c); });
                 setString("resolution_mode", value);
             }
+        } else if (arg == "--no-splash" || arg == "--nosplash") {
+            setBool("no_splash", true);
         } else if (arg[0] != '-') {
             // Assume it's a movie file
             if (movieFile_.empty()) {
@@ -250,6 +275,7 @@ void ConfigurationManager::printUsage() const {
 #ifdef HAVE_NDI_SDK
     printf("  --discover-ndi [SEC]  discover and list available NDI sources (optional timeout in seconds)\n");
 #endif
+    printf("  --no-splash            disable startup logo splash\n");
     printf("\n");
     printf("MIDI Sync:\n");
     printf("  The application uses ALSA Sequencer for MIDI Time Code (MTC) synchronization.\n");

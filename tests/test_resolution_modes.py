@@ -55,11 +55,12 @@ class ResolutionModesTest:
                 print(f"WARNING: Provided path not found: {provided_path}, trying auto-detect...")
         
         # Try wrapper script first (handles library paths - preferred)
-        script_dir = Path(__file__).parent.parent
+        script_dir = Path(__file__).parent
         possible_paths = [
             script_dir / "scripts" / "cuems-videocomposer-wrapper.sh",
+            script_dir.parent / "scripts" / "cuems-videocomposer-wrapper.sh",
             script_dir / "cuems-videocomposer.sh",
-            script_dir / "build" / "cuems-videocomposer",
+            script_dir.parent / "build" / "cuems-videocomposer",
             Path("/usr/bin/cuems-videocomposer"),
             Path("/usr/local/bin/cuems-videocomposer"),
         ]
@@ -281,4 +282,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

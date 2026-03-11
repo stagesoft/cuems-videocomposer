@@ -13,9 +13,17 @@ from typing import Optional
 
 # Add libmtcmaster python path
 libmtcmaster_python = Path(__file__).parent.parent.parent / "libmtcmaster" / "python"
-libmtcmaster_lib = Path(__file__).parent.parent.parent / "libmtcmaster" / "libmtcmaster.so"
+if not libmtcmaster_python.exists():
+    print(f"libmtcmaster python not found at {libmtcmaster_python}, using local path")
+    libmtcmaster_python = Path(__file__).parent
+print(f"Loading MTC Python from {libmtcmaster_python}")
 sys.path.insert(0, str(libmtcmaster_python))
 
+libmtcmaster_lib = Path("/usr/lib/libmtcmaster.so.0")
+if not libmtcmaster_lib.exists():
+    print(f"libmtcmaster.so not found at {libmtcmaster_lib}, using development path")
+    libmtcmaster_lib = Path(__file__).parent.parent.parent / "libmtcmaster" / "libmtcmaster.so"
+print(f"Loading MTC Library from {libmtcmaster_lib}")
 # Import mtcsender and patch it to use the correct library path
 original_cwd = os.getcwd()
 MTC_AVAILABLE = False
@@ -192,4 +200,3 @@ def create_mtc_helper(fps: float = 25.0, port: int = 0, portname: str = "TestPor
     if not MTC_AVAILABLE:
         return None
     return MTCHelper(fps=fps, port=port, portname=portname)
-

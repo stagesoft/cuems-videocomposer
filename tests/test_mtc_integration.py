@@ -95,7 +95,7 @@ class MTCIntegrationTest:
     
     def launch_videocomposer(self):
         """Launch the videocomposer application with the test video."""
-        videocomposer_path = Path(__file__).parent.parent / "scripts" / "cuems-videocomposer-wrapper.sh"
+        videocomposer_path = Path(__file__).parent / "scripts" / "cuems-videocomposer-wrapper.sh"
         
         if not videocomposer_path.exists():
             print(f"ERROR: videocomposer wrapper script not found at {videocomposer_path}")
@@ -581,4 +581,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

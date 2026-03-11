@@ -1,3 +1,25 @@
+/*
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ *
+ * Copyright (C) 2020-2026 Stage Lab Coop.
+ * Author: Ion Reguera <ion@stagelab.coop>
+ *
+ * This file is part of cuems-videocomposer.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "LayerPlayback.h"
 #include "../utils/Logger.h"
 #include "../utils/SMPTEUtils.h"
@@ -17,11 +39,14 @@ LayerPlayback::LayerPlayback()
     , timeOffset_(0)
     , timeScale_(1.0)
     , wraparound_(false)
-    , mtcFollow_(true)  // Default: follow MTC
+    , mtcFollow_(false)  // Default: don't follow MTC until engine sends /mtcfollow
     , wasRolling_(false)
     , lastLoggedFrame_(-1)
     , debugCounter_(0)
     , loggedExceededDuration_(false)
+    , vsyncCount_(0)
+    , lastFrameChangeVsync_(0)
+    , lastVideoFrame_(-1)
     , frameOnGPU_(false)
 {
 }
@@ -223,11 +248,7 @@ void LayerPlayback::updateFromSyncSource() {
         // However, full SYSEX frames are explicit position commands and must always seek
         // even if the frame number is the same (e.g., 00:00:00:00 to reset position)
         if (adjustedFrame != lastSyncFrame_ || fullFrameReceived) {
-            // Track vsync count when frames change (for micro-jump diagnosis)
-            static int64_t vsyncCount = 0;
-            static int64_t lastFrameChangeVsync = 0;
-            static int64_t lastVideoFrame = -1;
-            vsyncCount++;
+            vsyncCount_++;
             
             if (fullFrameReceived) {
                 // Full frame received - force a seek first, then load
@@ -254,17 +275,13 @@ void LayerPlayback::updateFromSyncSource() {
                 lastSyncFrame_ = adjustedFrame;
                 
                 // Log frame display duration (vsyncs since last frame change)
-                // With MTC interpolation at 60Hz, we get a new frame number every vsync,
-                // so 1 vsync per frame is normal and expected for smooth playback.
-                // Only log if something truly unusual happens (like stuck on same frame for many vsyncs)
-                int64_t vsyncsSinceLast = vsyncCount - lastFrameChangeVsync;
-                if (lastVideoFrame >= 0 && vsyncsSinceLast > 4) {
-                    // Only warn if frame was held for more than 4 vsyncs (>66ms - likely stall)
-                    LOG_WARNING << "Frame pacing: frame " << lastVideoFrame << " held for " 
+                int64_t vsyncsSinceLast = vsyncCount_ - lastFrameChangeVsync_;
+                if (lastVideoFrame_ >= 0 && vsyncsSinceLast > 4) {
+                    LOG_WARNING << "Frame pacing: frame " << lastVideoFrame_ << " held for " 
                                 << vsyncsSinceLast << " vsyncs (possible stall)";
                 }
-                lastFrameChangeVsync = vsyncCount;
-                lastVideoFrame = adjustedFrame;
+                lastFrameChangeVsync_ = vsyncCount_;
+                lastVideoFrame_ = adjustedFrame;
             } else {
                 // If load fails, try seeking first (helps with keyframe-based codecs)
                 LOG_WARNING << "Failed to load frame " << adjustedFrame << ", trying seek first";
