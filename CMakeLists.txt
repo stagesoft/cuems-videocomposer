@@ -49,6 +49,13 @@ endif()
 find_package(PkgConfig REQUIRED)
 include(CheckIncludeFiles)
 
+# Ensure pkg-config searches architecture-specific directories (Debian/Ubuntu multiarch)
+if(NOT DEFINED ENV{PKG_CONFIG_PATH})
+    set(ENV{PKG_CONFIG_PATH} "/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig")
+else()
+    set(ENV{PKG_CONFIG_PATH} "/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+endif()
+
 # FFmpeg (required)
 pkg_check_modules(FFMPEG REQUIRED 
     libavformat 
@@ -140,11 +147,18 @@ if(ENABLE_OPENGL)
             pkg_check_modules(VAAPI libva libva-drm libva-x11)
             pkg_check_modules(DRM libdrm)
             pkg_check_modules(LIBSEAT libseat)
-            
+
+            # Always add DRM include dirs so transitive headers (e.g. from FFmpeg's
+            # hwcontext_drm.h / xf86drm.h) can find <drm.h> regardless of whether
+            # the full VAAPI interop stack is present.
+            if(DRM_FOUND)
+                include_directories(${DRM_INCLUDE_DIRS})
+            endif()
+
             if(EGL_FOUND AND VAAPI_FOUND AND DRM_FOUND)
                 add_definitions(-DHAVE_EGL)
                 add_definitions(-DHAVE_VAAPI_INTEROP)
-                include_directories(${EGL_INCLUDE_DIRS} ${VAAPI_INCLUDE_DIRS} ${DRM_INCLUDE_DIRS})
+                include_directories(${EGL_INCLUDE_DIRS} ${VAAPI_INCLUDE_DIRS})
                 list(APPEND GL_LIBS ${EGL_LIBRARIES} ${VAAPI_LIBRARIES} ${DRM_LIBRARIES})
                 message(STATUS "VAAPI zero-copy interop enabled (EGL + VAAPI + DRM)")
                 
