@@ -3,6 +3,14 @@ set -e
 
 case "$1" in
     configure)
+        # Ensure the cuems user has audio group access for ALSA MIDI (/dev/snd/seq)
+        # This is required for cuems-videocomposer to receive MIDI timecode (MTC)
+        if id cuems >/dev/null 2>&1; then
+            if ! id -nG cuems | grep -qw audio; then
+                usermod -aG audio cuems || echo "WARNING: Failed to add cuems to audio group" >&2
+            fi
+        fi
+
         # Reload systemd to pick up any service file changes
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
@@ -34,7 +42,5 @@ case "$1" in
         exit 1
         ;;
 esac
-
-#DEBHELPER#
 
 exit 0
