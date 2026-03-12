@@ -32,6 +32,7 @@
 #include "../../osd/OSDManager.h"
 #include "../../utils/Logger.h"
 
+#include <algorithm>
 #include <cstdlib>  // for getenv
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -100,6 +101,9 @@ bool DRMBackend::openWindow() {
     EGLDisplay sharedDisplay = EGL_NO_DISPLAY;
     gbm_device* sharedGbmDevice = nullptr;
     
+    // Record kernel enumeration order before storing into the sorted map
+    outputOrder_.clear();
+    
     for (const auto& outputInfo : outputs) {
         const std::string& outputName = outputInfo.name;
         LOG_INFO << "DRMBackend: Creating surface for " << outputName;
@@ -122,6 +126,7 @@ bool DRMBackend::openWindow() {
         }
         
         surfaces_[outputName] = std::move(surface);
+        outputOrder_.push_back(outputName);
     }
     
     if (surfaces_.empty()) {
@@ -200,6 +205,7 @@ void DRMBackend::closeWindow() {
         surface->cleanup();
     }
     surfaces_.clear();
+    outputOrder_.clear();
     
     // Cleanup DRM
     outputManager_->cleanup();
@@ -579,7 +585,7 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
     LOG_INFO << "DRMBackend: Configured " << outputName 
              << " region: " << canvasX << "," << canvasY
              << " " << canvasWidth << "x" << canvasHeight;
-    
+
     // Update MultiOutputRenderer if initialized
     if (multiRenderer_) {
         // Make GL context current before any GL operations (FBO creation, etc.)
@@ -588,8 +594,8 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
         }
         
         std::vector<OutputSurface*> surfacePtrs;
-        for (auto& [name, surface] : surfaces_) {
-            surfacePtrs.push_back(surface.get());
+        for (const auto& reg : outputRegions_) {
+            surfacePtrs.push_back(surfaces_.at(reg.name).get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
@@ -633,8 +639,8 @@ bool DRMBackend::configureOutputBlend(const std::string& outputName,
         }
         
         std::vector<OutputSurface*> surfacePtrs;
-        for (auto& [name, surface] : surfaces_) {
-            surfacePtrs.push_back(surface.get());
+        for (const auto& reg : outputRegions_) {
+            surfacePtrs.push_back(surfaces_.at(reg.name).get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
@@ -744,10 +750,10 @@ bool DRMBackend::setOutputMode(const std::string& outputName, int width, int hei
             canvas->configure(canvasWidth, canvasHeight);
         }
         
-        // Reconfigure renderer with new regions
+        // Reconfigure renderer with new regions (matching order)
         std::vector<OutputSurface*> surfacePtrs;
-        for (auto& [name, surf] : surfaces_) {
-            surfacePtrs.push_back(surf.get());
+        for (const auto& reg : outputRegions_) {
+            surfacePtrs.push_back(surfaces_.at(reg.name).get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
@@ -1002,10 +1008,10 @@ bool DRMBackend::initVirtualCanvas() {
     // Build default output regions
     buildOutputRegions();
     
-    // Configure MultiOutputRenderer with surfaces and regions
+    // Configure MultiOutputRenderer with surfaces and regions (matching order)
     std::vector<OutputSurface*> surfacePtrs;
-    for (auto& [name, surface] : surfaces_) {
-        surfacePtrs.push_back(surface.get());
+    for (const auto& region : outputRegions_) {
+        surfacePtrs.push_back(surfaces_.at(region.name).get());
     }
     
     multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
@@ -1016,15 +1022,22 @@ bool DRMBackend::initVirtualCanvas() {
     return true;
 }
 
+std::vector<std::string> DRMBackend::getSortedOutputNames() const {
+    // Return outputs in kernel enumeration order so that auto-detected canvas
+    // regions match the order returned by getOutputs() (which the engine sees).
+    // This makes output ordering consistent and predictable across machines;
+    // the mappings file mapped_to fields can then be adjusted when connector
+    // names differ between machines.
+    return outputOrder_;
+}
+
 void DRMBackend::buildOutputRegions() {
     outputRegions_.clear();
     
     int canvasX = 0;
     
-    for (auto& [outputName, surface] : surfaces_) {
-        if (!surface) continue;
-        
-        const OutputInfo& info = surface->getOutputInfo();
+    for (const auto& outputName : getSortedOutputNames()) {
+        const OutputInfo& info = surfaces_.at(outputName)->getOutputInfo();
         
         OutputRegion region = OutputRegion::createDefault(
             info.name,
@@ -1051,10 +1064,8 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
     int canvasX = 0;
     int canvasY = 0;
     
-    for (auto& [outputName, surface] : surfaces_) {
-        if (!surface) continue;
-        
-        const OutputInfo& info = surface->getOutputInfo();
+    for (const auto& outputName : getSortedOutputNames()) {
+        const OutputInfo& info = surfaces_.at(outputName)->getOutputInfo();
         
         OutputRegion region;
         region.name = info.name;
@@ -1102,8 +1113,8 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
         }
         
         std::vector<OutputSurface*> surfacePtrs;
-        for (auto& [name, surf] : surfaces_) {
-            surfacePtrs.push_back(surf.get());
+        for (const auto& region : outputRegions_) {
+            surfacePtrs.push_back(surfaces_.at(region.name).get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
@@ -1127,8 +1138,8 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName, const Outp
                 }
                 
                 std::vector<OutputSurface*> surfacePtrs;
-                for (auto& [name, surf] : surfaces_) {
-                    surfacePtrs.push_back(surf.get());
+                for (const auto& reg : outputRegions_) {
+                    surfacePtrs.push_back(surfaces_.at(reg.name).get());
                 }
                 multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
             }

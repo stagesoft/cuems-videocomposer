@@ -11,8 +11,8 @@ Wants=graphical.target
 Type=simple
 User=cuems
 Group=cuems
-# DRI/GPU access: video and render groups
-SupplementaryGroups=video render
+# DRI/GPU access: video and render groups; audio for ALSA MIDI (/dev/snd/seq)
+SupplementaryGroups=video render audio
 # Environment for GPU/display (adjust for your setup)
 Environment=HOME=/var/lib/cuems
 # Optional: disable splash when starting at boot to avoid blocking
@@ -24,7 +24,7 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=cuems-videocomposer
 
-# DRI/ALSA: need access to device nodes (run with User=, SupplementaryGroups=video render)
+# DRI/ALSA: need access to device nodes (run with User=, SupplementaryGroups=video render audio)
 PrivateTmp=yes
 NoNewPrivileges=yes
 # Do not use PrivateDevices so /dev/dri and /dev/snd are visible

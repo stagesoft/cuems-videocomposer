@@ -198,7 +198,7 @@ void MultiOutputRenderer::renderToCanvas(LayerManager* layerManager, OSDManager*
     for (auto* layer : layers) {
         constLayers.push_back(layer);
     }
-    
+
     // Composite all layers
     renderer_->compositeLayers(constLayers);
     
@@ -236,7 +236,7 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
     if (!output.surface || !blitShader_ || !canvas_) {
         return;
     }
-    
+
     // Make output surface current
     output.surface->makeCurrent();
     

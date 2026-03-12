@@ -265,6 +265,7 @@ private:
     std::unique_ptr<DRMOutputManager> outputManager_;
     std::unique_ptr<DisplayConfigurationManager> configManager_;
     std::map<std::string, std::unique_ptr<DRMSurface>> surfaces_;  // key = output name
+    std::vector<std::string> outputOrder_;  // kernel enumeration order
     
     // Rendering - Legacy mode (per-output)
     std::unique_ptr<OpenGLRenderer> renderer_;
@@ -314,6 +315,9 @@ private:
     
     // Build output regions from detected outputs
     void buildOutputRegions();
+
+    // Get surface names sorted by physical CRTC position (left-to-right, top-to-bottom)
+    std::vector<std::string> getSortedOutputNames() const;
 };
 
 } // namespace videocomposer
