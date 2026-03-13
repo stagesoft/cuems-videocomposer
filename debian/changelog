@@ -1,3 +1,11 @@
+cuems-videocomposer (0.1.1-1) unstable; urgency=medium
+
+  * Fix AsyncDecodeQueue stuck after cue loop: detect backward jump
+    (target < oldest - MAX_QUEUE_SIZE) in decode thread, clear stale
+    frames and seek to new position so second output resumes playback
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 13 Mar 2026 10:30:00 +0100
+
 cuems-videocomposer (0.1.0-1) unstable; urgency=medium
 
   * Initial Debian package release

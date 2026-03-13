@@ -389,6 +389,30 @@ void AsyncDecodeQueue::decodeThreadFunc() {
             lastDecodedFrame_ = seekFrame - 1;
         }
         
+        // Detect backward jump (e.g. cue loop): if the oldest queued frame is more than
+        // MAX_QUEUE_SIZE frames ahead of the current target, the target has jumped backward
+        // and the queue contains only stale frames from near the old position. Clear the
+        // queue and schedule a seek so decoding resumes from the new target position.
+        // Without this, the decode thread never decodes new frames (shouldDecode stays false
+        // because newestInQueue >= target + MAX_QUEUE_SIZE) and the trim never fires
+        // (front.frameNumber > target - 2), leaving the queue permanently stuck.
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            if (!frameQueue_.empty()) {
+                int64_t current = targetFrame_.load();
+                int64_t oldest = frameQueue_.front().frameNumber;
+                if (oldest > current + static_cast<int64_t>(MAX_QUEUE_SIZE)) {
+                    LOG_INFO << "AsyncDecodeQueue: Backward jump detected (oldest=" << oldest
+                             << ", target=" << current << ") - clearing stale frames and seeking";
+                    frameQueue_.clear();
+                    seekTarget_ = current;
+                    seekRequested_ = true;
+                    lastDecodedFrame_ = -1;
+                    continue;  // Restart loop to process seek before decoding
+                }
+            }
+        }
+        
         // Check if we should decode more
         int64_t target = targetFrame_.load();
         
