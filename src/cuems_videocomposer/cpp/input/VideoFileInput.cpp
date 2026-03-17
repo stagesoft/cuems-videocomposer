@@ -2225,7 +2225,16 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
 
     // FALLBACK: For other formats, use sws_scale to convert to RGBA
     // This is slower but ensures compatibility with all pixel formats
-    
+
+    // Guard: hardware formats and AV_PIX_FMT_NONE have no swscale descriptor → crash.
+    // If we reach here with such a format (e.g. av_hwframe_transfer_data produced an unexpected
+    // result), return false gracefully instead of asserting inside sws_getContext.
+    if (!av_pix_fmt_desc_get(srcFormat)) {
+        LOG_WARNING << "transferHardwareFrameToGPU: unsupported/hw srcFormat " 
+                   << (int)srcFormat << " for sws_scale, skipping frame";
+        return false;
+    }
+
     // Allocate RGBA texture buffer if needed
     if (!textureBuffer.isValid() || 
         textureBuffer.getPlaneType() != TexturePlaneType::SINGLE ||

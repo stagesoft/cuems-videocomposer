@@ -460,15 +460,12 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         }
     }
     
-    // CRITICAL: Release any existing frame BEFORE importing new one
-    // This is necessary when multiple layers share the same VaapiInterop instance
-    // Each layer may try to import a frame before the previous layer's frame is released
-    // Releasing here ensures we don't have multiple frames in flight
-    if (currentFrame_->buf[0]) {
-        // Release the previous frame's resources (but keep EGL images/textures for now)
-        // They will be cleaned up in bindTexturesToImages() after new textures are bound
-        av_frame_unref(currentFrame_);
-    }
+    // CRITICAL: Release any existing frame BEFORE importing new one.
+    // av_frame_unref is safe to call on an empty/zeroed frame (it's a no-op).
+    // The old check `if (currentFrame_->buf[0])` was insufficient: FFmpeg 5.x+ av_frame_ref
+    // returns EINVAL if dst has any non-zero fields (width, height, format) even with buf[0]==NULL,
+    // which can occur after a partial previous ref attempt. Unconditional unref is the correct fix.
+    av_frame_unref(currentFrame_);
     
     // Get VAAPI device context from frame
     AVHWFramesContext* hwFramesCtx = (AVHWFramesContext*)vaapiFrame->hw_frames_ctx->data;
@@ -611,6 +608,7 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     // CRITICAL: Clone the new frame to currentFrame_ (increment ref count)
     // This keeps the VAAPI surface alive while we use its EGL images
     // We do this AFTER all validation and EGL image creation succeeds
+
     int ret = av_frame_ref(currentFrame_, vaapiFrame);
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
