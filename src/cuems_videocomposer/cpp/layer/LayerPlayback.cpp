@@ -213,18 +213,22 @@ void LayerPlayback::updateFromSyncSource() {
             int64_t totalFrames = info.totalFrames;
             
             if (totalFrames > 0) {
-                // Wrap frame using modulo so the video loops seamlessly.
-                // The engine sends offset updates to implement looping, but the
-                // offset can arrive a few frames late. Without wrapping, the video
-                // clamps to the last frame during that gap (visible stall on 4K).
-                // Modulo wrapping is transparent: once the engine offset arrives,
-                // both produce the same result.
                 if (adjustedFrame >= totalFrames) {
-                    adjustedFrame = adjustedFrame % totalFrames;
+                    if (wraparound_) {
+                        // Loop mode: wrap via modulo so the decode queue pre-buffers
+                        // frame 0 seamlessly before the engine offset command arrives.
+                        adjustedFrame = adjustedFrame % totalFrames;
+                    } else {
+                        // Non-loop mode: hold the last frame until MTC stops.
+                        adjustedFrame = totalFrames - 1;
+                    }
                 } else if (adjustedFrame < 0) {
-                    // Negative frames: wrap backward
-                    adjustedFrame = totalFrames - ((-adjustedFrame) % totalFrames);
-                    if (adjustedFrame == totalFrames) adjustedFrame = 0;
+                    if (wraparound_) {
+                        adjustedFrame = totalFrames - ((-adjustedFrame) % totalFrames);
+                        if (adjustedFrame == totalFrames) adjustedFrame = 0;
+                    } else {
+                        adjustedFrame = 0;
+                    }
                 }
                 loggedExceededDuration_ = (adjustedFrame == 0);
             }

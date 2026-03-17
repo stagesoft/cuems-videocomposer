@@ -15,8 +15,8 @@ Group=cuems
 SupplementaryGroups=video render audio
 # Environment for GPU/display (adjust for your setup)
 Environment=HOME=/var/lib/cuems
-# Optional: disable splash when starting at boot to avoid blocking
-# ExecStart=/usr/bin/cuems-videocomposer --no-splash
+# Generate display config from default_mappings.xml before starting
+ExecStartPre=/usr/lib/cuems/bin/cuems-generate-display-conf
 ExecStart=/usr/bin/cuems-videocomposer
 Restart=on-failure
 RestartSec=5
@@ -32,6 +32,7 @@ PrivateDevices=no
 ProtectSystem=full
 ProtectHome=read-only
 ReadWritePaths=/var/lib/cuems
+RuntimeDirectory=cuems
 
 [Install]
 WantedBy=graphical.target

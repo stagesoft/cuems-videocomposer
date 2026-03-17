@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Read video output mappings from default_mappings.xml and generate
+a display.conf that the videocomposer can load at startup.
+
+The XML file is the single source of truth for connector→region mappings.
+The generated config is written to /run/cuems/display.conf (tmpfs, ephemeral).
+"""
+
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+MAPPINGS_XML = '/etc/cuems/default_mappings.xml'
+OUTPUT_DIR = '/run/cuems'
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'display.conf')
+NS = {'cms': 'https://stagelab.coop/cuems/'}
+
+
+def parse_video_outputs(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    outputs = []
+    for output_el in root.findall('.//video/outputs/output'):
+        mapped_el = output_el.find('mappings/mapped_to')
+        region_el = output_el.find('canvas_region')
+        if mapped_el is None or mapped_el.text is None:
+            continue
+        connector = mapped_el.text.strip()
+        x = int(region_el.findtext('x', '0')) if region_el is not None else 0
+        y = int(region_el.findtext('y', '0')) if region_el is not None else 0
+        w = int(region_el.findtext('width', '1920')) if region_el is not None else 1920
+        h = int(region_el.findtext('height', '1080')) if region_el is not None else 1080
+        outputs.append((connector, x, y, w, h))
+    return outputs
+
+
+def write_display_conf(outputs, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        f.write('# Auto-generated from {}\n'.format(MAPPINGS_XML))
+        f.write('canvas_layout=custom\n\n')
+        for connector, x, y, w, h in outputs:
+            f.write('[output:{}]\n'.format(connector))
+            f.write('canvas_region={},{},{},{}\n'.format(x, y, w, h))
+            f.write('\n')
+
+
+def main():
+    if not os.path.isfile(MAPPINGS_XML):
+        print('No mappings file at {}, skipping'.format(MAPPINGS_XML), file=sys.stderr)
+        return 0
+    try:
+        outputs = parse_video_outputs(MAPPINGS_XML)
+    except ET.ParseError as e:
+        print('XML parse error: {}'.format(e), file=sys.stderr)
+        return 1
+    if not outputs:
+        print('No video outputs found in {}'.format(MAPPINGS_XML), file=sys.stderr)
+        return 0
+    write_display_conf(outputs, OUTPUT_FILE)
+    print('Generated {} with {} output(s)'.format(OUTPUT_FILE, len(outputs)))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

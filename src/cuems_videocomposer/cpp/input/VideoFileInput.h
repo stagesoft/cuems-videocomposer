@@ -108,6 +108,14 @@ public:
 
     void setHardwareDecodePreference(HardwareDecodePreference preference) { hwPreference_ = preference; }
 
+    /**
+     * Enable/disable seamless loop pre-buffering in the async decode queue.
+     * Call this when the cue's loop mode changes (e.g. engine sends /loop 1).
+     * @param loop       true when the video is set to loop
+     * @param totalFrames total frame count of the loaded video
+     */
+    void setLoopMode(bool loop, int64_t totalFrames);
+
 #ifdef HAVE_VAAPI_INTEROP
     /**
      * Set DisplayBackend for creating per-instance VAAPI interop

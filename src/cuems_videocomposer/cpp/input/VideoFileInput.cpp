@@ -2447,6 +2447,12 @@ void VideoFileInput::startAsyncDecode(int64_t startFrame) {
 #endif
 }
 
+void VideoFileInput::setLoopMode(bool loop, int64_t totalFrames) {
+    if (asyncDecodeQueue_) {
+        asyncDecodeQueue_->setLoopMode(loop, totalFrames);
+    }
+}
+
 VideoFileInput::CachedFrame* VideoFileInput::findCachedFrame(int64_t frameNumber) {
     for (auto& cf : frameCache_) {
         if (cf.frameNumber == frameNumber && cf.valid) {

@@ -288,6 +288,17 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
         }
     }
     
+    // Also check for virtual frames (pre-buffered loop start: stored as totalFrames_ + realFrame)
+    int64_t tf = totalFrames_.load();
+    if (tf > 0) {
+        int64_t virtualNum = tf + frameNumber;
+        for (auto& qf : frameQueue_) {
+            if (qf.frameNumber == virtualNum && qf.ready) {
+                return qf.frame;
+            }
+        }
+    }
+
     // Frame not ready - wait if requested
     if (maxWaitMs > 0) {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(maxWaitMs);
@@ -299,10 +310,19 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
             // Wait for frame
             queueCond_.wait_for(lock, std::chrono::milliseconds(1));
             
-            // Check again
+            // Check again (exact match)
             for (auto& qf : frameQueue_) {
                 if (qf.frameNumber == frameNumber && qf.ready) {
                     return qf.frame;
+                }
+            }
+            // Also check virtual match
+            if (tf > 0) {
+                int64_t virtualNum = tf + frameNumber;
+                for (auto& qf : frameQueue_) {
+                    if (qf.frameNumber == virtualNum && qf.ready) {
+                        return qf.frame;
+                    }
                 }
             }
         }
@@ -359,6 +379,14 @@ void AsyncDecodeQueue::setTargetFrame(int64_t frameNumber) {
     queueCond_.notify_one();
 }
 
+void AsyncDecodeQueue::setLoopMode(bool loop, int64_t totalFrames) {
+    loopMode_ = loop;
+    totalFrames_ = totalFrames;
+    if (!loop) {
+        virtualOffset_ = 0;
+    }
+}
+
 size_t AsyncDecodeQueue::getQueueSize() const {
     std::lock_guard<std::mutex> lock(queueMutex_);
     return frameQueue_.size();
@@ -395,25 +423,64 @@ void AsyncDecodeQueue::decodeThreadFunc() {
         }
         
         // Detect backward jump (e.g. cue loop): if the oldest queued frame is more than
-        // MAX_QUEUE_SIZE frames ahead of the current target, the target has jumped backward
-        // and the queue contains only stale frames from near the old position. Clear the
-        // queue and schedule a seek so decoding resumes from the new target position.
-        // Without this, the decode thread never decodes new frames (shouldDecode stays false
-        // because newestInQueue >= target + MAX_QUEUE_SIZE) and the trim never fires
-        // (front.frameNumber > target - 2), leaving the queue permanently stuck.
+        // MAX_QUEUE_SIZE frames ahead of the current target, the target has jumped backward.
+        //
+        // Special case: when loop pre-buffering is active, the queue contains both real
+        // end-of-video frames AND virtual frames (totalFrames_ + realN) representing the
+        // start of the next loop. In this case, instead of a full clear+seek, we:
+        //   1. Remove the stale real frames
+        //   2. Convert virtual frames to their real frame numbers in-place
+        //   3. Reset virtualOffset_ so subsequent decoding uses real numbers
+        // This makes frame 0 immediately available without a seek.
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
             int64_t current = targetFrame_.load();
+            int64_t tf = totalFrames_.load();
+
             if (!frameQueue_.empty()) {
                 int64_t oldest = frameQueue_.front().frameNumber;
+
                 if (oldest > current + static_cast<int64_t>(MAX_QUEUE_SIZE)) {
-                    LOG_INFO << "AsyncDecodeQueue: Backward jump detected (oldest=" << oldest
-                             << ", target=" << current << ") - clearing stale frames and seeking";
-                    frameQueue_.clear();
-                    seekTarget_ = current;
-                    seekRequested_ = true;
-                    lastDecodedFrame_ = -1;
-                    continue;  // Restart loop to process seek before decoding
+                    // Check if the queue contains virtual pre-buffered frames
+                    bool hasVirtual = false;
+                    if (tf > 0) {
+                        for (const auto& qf : frameQueue_) {
+                            if (qf.frameNumber >= tf) { hasVirtual = true; break; }
+                        }
+                    }
+
+                    if (hasVirtual && tf > 0 && current < static_cast<int64_t>(MAX_QUEUE_SIZE) * 2) {
+                        // Loop boundary: target has wrapped to near 0 and we have
+                        // pre-buffered virtual frames. Convert them to real in-place
+                        // so frame 0 is immediately available without a seek.
+                        frameQueue_.erase(
+                            std::remove_if(frameQueue_.begin(), frameQueue_.end(),
+                                [tf](const QueuedFrame& f) { return f.frameNumber < tf; }),
+                            frameQueue_.end()
+                        );
+                        for (auto& qf : frameQueue_) {
+                            if (qf.frameNumber >= tf) {
+                                qf.frameNumber -= tf;
+                            }
+                        }
+                        virtualOffset_ = 0;
+                        if (!frameQueue_.empty()) {
+                            lastDecodedFrame_ = frameQueue_.back().frameNumber;
+                        } else {
+                            lastDecodedFrame_ = -1;
+                        }
+                        LOG_INFO << "AsyncDecodeQueue: Loop boundary - converted virtual frames to real, newest="
+                                 << lastDecodedFrame_.load();
+                    } else {
+                        LOG_INFO << "AsyncDecodeQueue: Backward jump detected (oldest=" << oldest
+                                 << ", target=" << current << ") - clearing stale frames and seeking";
+                        frameQueue_.clear();
+                        seekTarget_ = current;
+                        seekRequested_ = true;
+                        lastDecodedFrame_ = -1;
+                        virtualOffset_ = 0;
+                        continue;  // Restart loop to process seek before decoding
+                    }
                 }
             } else if (lastDecodedFrame_ >= 0 && current < lastDecodedFrame_ - static_cast<int64_t>(MAX_QUEUE_SIZE)) {
                 LOG_INFO << "AsyncDecodeQueue: Backward jump (empty queue) lastDecoded=" << lastDecodedFrame_.load()
@@ -421,6 +488,7 @@ void AsyncDecodeQueue::decodeThreadFunc() {
                 seekTarget_ = current;
                 seekRequested_ = true;
                 lastDecodedFrame_ = -1;
+                virtualOffset_ = 0;
                 continue;
             }
         }
@@ -468,10 +536,21 @@ void AsyncDecodeQueue::decodeThreadFunc() {
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
             int64_t current = targetFrame_.load();
-            
-            // Remove frames that are more than 2 frames behind current
-            while (!frameQueue_.empty() && frameQueue_.front().frameNumber < current - 2) {
-                frameQueue_.pop_front();
+            int64_t tf = totalFrames_.load();
+
+            // Remove real frames that are more than 2 frames behind current.
+            // Virtual frames (frameNumber >= tf) are preserved until the loop
+            // boundary conversion in the backward-jump handler converts them
+            // to real frames.
+            while (!frameQueue_.empty()) {
+                int64_t fn = frameQueue_.front().frameNumber;
+                // Stop at the first virtual frame - don't trim it
+                if (tf > 0 && fn >= tf) break;
+                if (fn < current - 2) {
+                    frameQueue_.pop_front();
+                } else {
+                    break;
+                }
             }
         }
     }
@@ -514,17 +593,30 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                 while (avcodec_receive_frame(codecCtx_, decodeFrame_) == 0) {
                     av_frame_unref(decodeFrame_);
                 }
-                // Proactively seek back to start for looping playback.
-                // Without this, the decode thread spins on EOF until the
-                // backward-jump detector fires (hundreds of ms later).
                 avcodec_flush_buffers(codecCtx_);
                 if (formatCtx_->pb) formatCtx_->pb->eof_reached = 0;
                 av_seek_frame(formatCtx_, videoStream_, 0, AVSEEK_FLAG_BACKWARD);
                 lastDecodedFrame_ = -1;
-                LOG_INFO << "AsyncDecodeQueue: EOF reached, proactively seeked to start";
+
+                if (loopMode_ && totalFrames_ > 0) {
+                    // Loop pre-buffer mode: immediately decode the start of the video
+                    // as virtual frames (totalFrames_ + realN) so they survive the
+                    // trim logic until the loop boundary conversion fires.
+                    // This ensures frame 0 is in the queue before the display needs it,
+                    // eliminating the visible hold on the last frame at loop boundaries.
+                    virtualOffset_ = totalFrames_.load();
+                    LOG_INFO << "AsyncDecodeQueue: EOF in loop mode, pre-buffering start frames (virtualOffset="
+                             << virtualOffset_.load() << ")";
+                    // Fall through: continue the decode loop to read frame 0
+                } else {
+                    LOG_INFO << "AsyncDecodeQueue: EOF reached, proactively seeked to start";
+                    av_packet_free(&packet);
+                    return false;
+                }
+            } else {
+                av_packet_free(&packet);
+                return false;
             }
-            av_packet_free(&packet);
-            return false;
         }
         
         // Skip non-video packets
@@ -562,8 +654,19 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         double seconds = pts * av_q2d(timeBase_);
         frameNum = static_cast<int64_t>(seconds * framerate_ + 0.5);
     } else {
-        // No PTS - use sequential numbering
-        frameNum = lastDecodedFrame_ + 1;
+        // No PTS - use sequential numbering based on last real decoded frame
+        // (virtualOffset_ is added below, so use the actual lastDecodedFrame_ here)
+        int64_t last = lastDecodedFrame_.load();
+        int64_t voff = virtualOffset_.load();
+        // Subtract virtual offset to get the last real decoded frame number
+        int64_t lastReal = (voff > 0 && last >= voff) ? (last - voff) : last;
+        frameNum = lastReal + 1;
+    }
+
+    // Apply virtual offset for loop pre-buffering
+    int64_t voff = virtualOffset_.load();
+    if (voff > 0) {
+        frameNum += voff;
     }
     
     // For VAAPI hardware frames, sync the GPU before marking frame as ready

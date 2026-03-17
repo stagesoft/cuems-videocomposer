@@ -117,6 +117,18 @@ public:
     void setTargetFrame(int64_t frameNumber);
 
     /**
+     * Enable/disable seamless loop pre-buffering.
+     * When enabled, the decode thread pre-buffers the start of the video
+     * using virtual frame numbers (totalFrames + N) so they survive the
+     * trim logic until the loop boundary is detected, at which point they
+     * are converted to real frame numbers in-place (no seek required).
+     * @param loop      true to enable loop pre-buffering
+     * @param totalFrames total number of frames in the video (used to
+     *                    generate and detect virtual frame numbers)
+     */
+    void setLoopMode(bool loop, int64_t totalFrames);
+
+    /**
      * Get queue statistics for debugging
      */
     size_t getQueueSize() const;
@@ -199,6 +211,14 @@ private:
     std::atomic<int64_t> lastDecodedFrame_{-1};
     std::atomic<bool> seekRequested_{false};
     std::atomic<int64_t> seekTarget_{0};
+    
+    // Seamless loop pre-buffering
+    // When loopMode_ is true, the decode thread uses virtual frame numbers
+    // (totalFrames_ + realFrameN) for frames decoded after EOF so they are
+    // not trimmed before the loop boundary conversion happens.
+    std::atomic<bool> loopMode_{false};
+    std::atomic<int64_t> totalFrames_{0};
+    std::atomic<int64_t> virtualOffset_{0};  // Added to decoded frame numbers during pre-buffering
     
     // Synchronization
     std::condition_variable seekCond_;
