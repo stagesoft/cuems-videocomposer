@@ -349,6 +349,7 @@ void AsyncDecodeQueue::seek(int64_t frameNumber) {
     // Set seek request
     seekTarget_ = frameNumber;
     seekRequested_ = true;
+    eofReached_ = false;  // Clear EOF state on external seek
     
     // Clear queue
     {
@@ -382,7 +383,9 @@ void AsyncDecodeQueue::setTargetFrame(int64_t frameNumber) {
 void AsyncDecodeQueue::setLoopMode(bool loop, int64_t totalFrames) {
     loopMode_ = loop;
     totalFrames_ = totalFrames;
-    if (!loop) {
+    if (loop) {
+        eofReached_ = false;  // Entering loop mode: resume decode if at EOF
+    } else {
         virtualOffset_ = 0;
     }
 }
@@ -411,6 +414,7 @@ void AsyncDecodeQueue::decodeThreadFunc() {
         // Check for seek request
         if (seekRequested_) {
             seekRequested_ = false;
+            eofReached_ = false;  // New seek clears EOF state
             int64_t seekFrame = seekTarget_.load();
             
             if (!seekInternal(seekFrame)) {
@@ -479,6 +483,7 @@ void AsyncDecodeQueue::decodeThreadFunc() {
                         seekRequested_ = true;
                         lastDecodedFrame_ = -1;
                         virtualOffset_ = 0;
+                        eofReached_ = false;  // Clear EOF so decode resumes after seek
                         continue;  // Restart loop to process seek before decoding
                     }
                 }
@@ -509,17 +514,16 @@ void AsyncDecodeQueue::decodeThreadFunc() {
         
         // Decide if we should decode
         bool shouldDecode = false;
-        if (queueSize < MAX_QUEUE_SIZE) {
-            // Queue not full
+        if (eofReached_) {
+            // Non-loop EOF: hold last frames, don't decode more until a seek clears this
+        } else if (queueSize < MAX_QUEUE_SIZE) {
             if (newestInQueue < 0) {
-                // Queue empty - start from target
                 shouldDecode = true;
             } else if (newestInQueue < target + static_cast<int64_t>(MAX_QUEUE_SIZE)) {
-                // Buffer ahead of target
                 shouldDecode = true;
             }
         }
-        
+
         if (shouldDecode && !threadStop_) {
             if (!decodeNextFrame()) {
                 // Decode failed or EOF - wait a bit
@@ -538,13 +542,8 @@ void AsyncDecodeQueue::decodeThreadFunc() {
             int64_t current = targetFrame_.load();
             int64_t tf = totalFrames_.load();
 
-            // Remove real frames that are more than 2 frames behind current.
-            // Virtual frames (frameNumber >= tf) are preserved until the loop
-            // boundary conversion in the backward-jump handler converts them
-            // to real frames.
             while (!frameQueue_.empty()) {
                 int64_t fn = frameQueue_.front().frameNumber;
-                // Stop at the first virtual frame - don't trim it
                 if (tf > 0 && fn >= tf) break;
                 if (fn < current - 2) {
                     frameQueue_.pop_front();
@@ -594,22 +593,22 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                     av_frame_unref(decodeFrame_);
                 }
                 avcodec_flush_buffers(codecCtx_);
-                if (formatCtx_->pb) formatCtx_->pb->eof_reached = 0;
-                av_seek_frame(formatCtx_, videoStream_, 0, AVSEEK_FLAG_BACKWARD);
-                lastDecodedFrame_ = -1;
 
                 if (loopMode_ && totalFrames_ > 0) {
-                    // Loop pre-buffer mode: immediately decode the start of the video
-                    // as virtual frames (totalFrames_ + realN) so they survive the
-                    // trim logic until the loop boundary conversion fires.
-                    // This ensures frame 0 is in the queue before the display needs it,
-                    // eliminating the visible hold on the last frame at loop boundaries.
+                    // Loop mode: seek to start and pre-buffer frames with virtual numbers
+                    if (formatCtx_->pb) formatCtx_->pb->eof_reached = 0;
+                    av_seek_frame(formatCtx_, videoStream_, 0, AVSEEK_FLAG_BACKWARD);
+                    lastDecodedFrame_ = -1;
                     virtualOffset_ = totalFrames_.load();
                     LOG_INFO << "AsyncDecodeQueue: EOF in loop mode, pre-buffering start frames (virtualOffset="
                              << virtualOffset_.load() << ")";
-                    // Fall through: continue the decode loop to read frame 0
+                    continue;  // Re-read packet from seeked position
                 } else {
-                    LOG_INFO << "AsyncDecodeQueue: EOF reached, proactively seeked to start";
+                    // Non-loop mode: stop decoding and hold last frames.
+                    // Do NOT seek to 0 — that causes a decode→trim churn cycle
+                    // that fills the queue with duplicate end-of-video frames.
+                    eofReached_ = true;
+                    LOG_INFO << "AsyncDecodeQueue: EOF reached, stopping decode (non-loop)";
                     av_packet_free(&packet);
                     return false;
                 }
@@ -630,7 +629,6 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         av_packet_unref(packet);
         
         if (ret < 0 && ret != AVERROR(EAGAIN)) {
-            // Error
             av_packet_free(&packet);
             return false;
         }
@@ -698,14 +696,21 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     av_frame_move_ref(qf.frame, decodeFrame_);
     qf.ready = true;
     
-    // Add to queue
+    // Add to queue (deduplicated, sorted)
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         
-        // Insert in order
         bool inserted = false;
         for (auto it = frameQueue_.begin(); it != frameQueue_.end(); ++it) {
-            if (it->frameNumber > frameNum) {
+            if (it->frameNumber == frameNum) {
+                // Duplicate: replace existing frame with newer decode
+                if (it->frame) av_frame_free(&(it->frame));
+                it->frame = qf.frame;
+                it->ready = qf.ready;
+                qf.frame = nullptr;  // Prevent double-free in moved-from QueuedFrame
+                inserted = true;
+                break;
+            } else if (it->frameNumber > frameNum) {
                 frameQueue_.insert(it, std::move(qf));
                 inserted = true;
                 break;

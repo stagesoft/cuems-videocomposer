@@ -219,6 +219,7 @@ private:
     std::atomic<bool> loopMode_{false};
     std::atomic<int64_t> totalFrames_{0};
     std::atomic<int64_t> virtualOffset_{0};  // Added to decoded frame numbers during pre-buffering
+    std::atomic<bool> eofReached_{false};    // Set at EOF in non-loop mode; prevents decode-and-trim churn
     
     // Synchronization
     std::condition_variable seekCond_;

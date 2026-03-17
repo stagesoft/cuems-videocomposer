@@ -67,6 +67,12 @@ public:
     void setInputSource(InputSource* inputSource) { inputSource_ = inputSource; }
     
     /**
+     * Get the underlying sync source's framerate (e.g. MTC 25fps) before conversion.
+     * Returns <= 0 if unknown.
+     */
+    double getSourceFramerate() const;
+
+    /**
      * Check if a full frame SYSEX was just received - delegates to wrapped sync source
      */
     bool wasFullFrameReceived() override;

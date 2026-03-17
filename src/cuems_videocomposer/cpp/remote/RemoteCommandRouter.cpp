@@ -1165,6 +1165,16 @@ bool RemoteCommandRouter::handleLayerOffset(VideoLayer* layer, const std::vector
         offset = std::atoll(offsetStr.c_str());
     }
     
+    // Auto-enable wraparound when the engine sends increasingly negative
+    // offsets — this is the engine's loop mechanism.  The engine also sends
+    // /loop 1 but it often arrives before the layer exists (OSC "Node not
+    // found"), so this is the reliable fallback.
+    int64_t prevOffset = layer->getTimeOffset();
+    if (!layer->getWraparound() && offset < prevOffset && offset < 0) {
+        LOG_INFO << "Auto-enabling wraparound: offset went from " << prevOffset << " to " << offset;
+        layer->setWraparound(true);
+    }
+
     layer->setTimeOffset(offset);
     return true;
 }

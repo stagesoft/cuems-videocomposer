@@ -24,6 +24,7 @@
 #include "../utils/Logger.h"
 #include "../utils/SMPTEUtils.h"
 #include "../sync/SyncSource.h"
+#include "../sync/FramerateConverterSyncSource.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/VideoFileInput.h"
 #include <algorithm>
@@ -202,10 +203,21 @@ void LayerPlayback::updateFromSyncSource() {
     
     // Process frame updates only if we have a valid frame
     if (syncFrame >= 0) {
-        // Apply time-scaling: multiply by timescale, then add offset
-        // Note: Framerate conversion is handled by FramerateConverterSyncSource wrapper
-        // LayerPlayback doesn't need to know about framerate conversion
-        int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + timeOffset_;
+        // Apply time-scaling: multiply by timescale, then add offset.
+        // syncFrame is already in video fps (converted by FramerateConverterSyncSource).
+        // timeOffset_ arrives from the engine in MTC fps (always 25fps), so convert
+        // it to video fps using the same ratio the sync source uses for frames.
+        int64_t convertedOffset = timeOffset_;
+        auto* converter = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
+        if (converter && timeOffset_ != 0) {
+            double srcFps = converter->getSourceFramerate();
+            double dstFps = converter->getFramerate();
+            if (srcFps > 0 && dstFps > 0 && std::abs(srcFps - dstFps) > 0.01) {
+                convertedOffset = static_cast<int64_t>(std::floor(
+                    static_cast<double>(timeOffset_) * dstFps / srcFps));
+            }
+        }
+        int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + convertedOffset;
         
         // Clamp frame to valid range (no automatic wrapping - use loop instead)
         if (inputSource_) {

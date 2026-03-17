@@ -118,6 +118,13 @@ double FramerateConverterSyncSource::getFramerate() const {
     return wrappedSyncSource_->getFramerate();
 }
 
+double FramerateConverterSyncSource::getSourceFramerate() const {
+    if (wrappedSyncSource_) {
+        return wrappedSyncSource_->getFramerate();
+    }
+    return -1.0;
+}
+
 bool FramerateConverterSyncSource::wasFullFrameReceived() {
     if (!wrappedSyncSource_) {
         return false;

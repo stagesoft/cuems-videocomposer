@@ -236,9 +236,6 @@ double VideoLayer::getTimeScale() const {
 void VideoLayer::setWraparound(bool enabled) {
     playback_.setWraparound(enabled);
 
-    // Propagate loop mode to AsyncDecodeQueue so it can pre-buffer loop-start
-    // frames before the loop boundary (eliminates the visible hold on the last
-    // frame while frame 0 is being sought and decoded).
     InputSource* src = playback_.getInputSource();
     if (src) {
         VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(src);

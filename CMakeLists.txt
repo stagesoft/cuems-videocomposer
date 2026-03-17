@@ -897,6 +897,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/layer/LayerManager.cpp
         src/cuems_videocomposer/cpp/sync/MTCDecoder.cpp
         src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
+        src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
         src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
         src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
         src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
