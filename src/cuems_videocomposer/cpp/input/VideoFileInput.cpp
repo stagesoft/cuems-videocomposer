@@ -1836,7 +1836,13 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
                            << asyncDecodeQueue_->getOldestFrame() << ", newest=" 
                            << asyncDecodeQueue_->getNewestFrame() << ")";
             }
-            // Fall through to synchronous path as backup
+            // Keep showing the last displayed frame instead of falling through
+            // to the sync path, which competes for VAAPI hardware and causes
+            // progressive surface pool exhaustion → eventual freeze.
+            if (textureBuffer.isValid()) {
+                return true;
+            }
+            // Fall through to synchronous path only if no valid texture exists
         }
     }
     

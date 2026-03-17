@@ -166,6 +166,11 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     if (!useHardware_) {
         codecCtx_->thread_count = 4;
         codecCtx_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    } else {
+        // Request extra VAAPI surfaces so the queue can hold 8 frames
+        // without exhausting the pool (default pool ~17 is too small
+        // when sync fallback + EGL import also hold surfaces).
+        codecCtx_->extra_hw_frames = 16;
     }
     
     // Open codec
@@ -398,8 +403,8 @@ void AsyncDecodeQueue::decodeThreadFunc() {
         // (front.frameNumber > target - 2), leaving the queue permanently stuck.
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
+            int64_t current = targetFrame_.load();
             if (!frameQueue_.empty()) {
-                int64_t current = targetFrame_.load();
                 int64_t oldest = frameQueue_.front().frameNumber;
                 if (oldest > current + static_cast<int64_t>(MAX_QUEUE_SIZE)) {
                     LOG_INFO << "AsyncDecodeQueue: Backward jump detected (oldest=" << oldest
@@ -410,6 +415,13 @@ void AsyncDecodeQueue::decodeThreadFunc() {
                     lastDecodedFrame_ = -1;
                     continue;  // Restart loop to process seek before decoding
                 }
+            } else if (lastDecodedFrame_ >= 0 && current < lastDecodedFrame_ - static_cast<int64_t>(MAX_QUEUE_SIZE)) {
+                LOG_INFO << "AsyncDecodeQueue: Backward jump (empty queue) lastDecoded=" << lastDecodedFrame_.load()
+                         << " target=" << current << " - seeking";
+                seekTarget_ = current;
+                seekRequested_ = true;
+                lastDecodedFrame_ = -1;
+                continue;
             }
         }
         
@@ -497,8 +509,19 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         ret = av_read_frame(formatCtx_, packet);
         if (ret < 0) {
             if (ret == AVERROR_EOF) {
-                // Send flush packet
+                // Drain remaining frames from the codec
                 avcodec_send_packet(codecCtx_, nullptr);
+                while (avcodec_receive_frame(codecCtx_, decodeFrame_) == 0) {
+                    av_frame_unref(decodeFrame_);
+                }
+                // Proactively seek back to start for looping playback.
+                // Without this, the decode thread spins on EOF until the
+                // backward-jump detector fires (hundreds of ms later).
+                avcodec_flush_buffers(codecCtx_);
+                if (formatCtx_->pb) formatCtx_->pb->eof_reached = 0;
+                av_seek_frame(formatCtx_, videoStream_, 0, AVSEEK_FLAG_BACKWARD);
+                lastDecodedFrame_ = -1;
+                LOG_INFO << "AsyncDecodeQueue: EOF reached, proactively seeked to start";
             }
             av_packet_free(&packet);
             return false;
@@ -611,6 +634,12 @@ bool AsyncDecodeQueue::seekInternal(int64_t frameNumber) {
     if (ret < 0) {
         // Try seeking by byte position or other method
         ret = av_seek_frame(formatCtx_, -1, timestamp * AV_TIME_BASE / av_q2d(timeBase_), AVSEEK_FLAG_BACKWARD);
+    }
+    
+    // Clear AVIO EOF flag — some demuxers (MOV/MP4) don't reset it after seek,
+    // causing av_read_frame() to keep returning AVERROR_EOF even though the seek succeeded.
+    if (ret >= 0 && formatCtx_->pb) {
+        formatCtx_->pb->eof_reached = 0;
     }
     
     return ret >= 0;

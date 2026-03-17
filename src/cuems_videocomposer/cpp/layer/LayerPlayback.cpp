@@ -213,22 +213,20 @@ void LayerPlayback::updateFromSyncSource() {
             int64_t totalFrames = info.totalFrames;
             
             if (totalFrames > 0) {
-                // Clamp to valid range instead of wrapping
-                // Only log once to avoid flooding output
+                // Wrap frame using modulo so the video loops seamlessly.
+                // The engine sends offset updates to implement looping, but the
+                // offset can arrive a few frames late. Without wrapping, the video
+                // clamps to the last frame during that gap (visible stall on 4K).
+                // Modulo wrapping is transparent: once the engine offset arrives,
+                // both produce the same result.
                 if (adjustedFrame >= totalFrames) {
-                    if (!loggedExceededDuration_) {
-                        LOG_INFO << "Frame " << adjustedFrame << " exceeds video duration (" << totalFrames << "), clamping to " << (totalFrames - 1) << " (will not log again)";
-                        loggedExceededDuration_ = true;
-                    }
-                    adjustedFrame = totalFrames - 1;
+                    adjustedFrame = adjustedFrame % totalFrames;
                 } else if (adjustedFrame < 0) {
-                    LOG_VERBOSE << "Frame " << adjustedFrame << " is negative, clamping to 0";
-                    adjustedFrame = 0;
-                    loggedExceededDuration_ = false; // Reset since we're back in valid range
-                } else {
-                    // Frame is in valid range, reset the flag
-                    loggedExceededDuration_ = false;
+                    // Negative frames: wrap backward
+                    adjustedFrame = totalFrames - ((-adjustedFrame) % totalFrames);
+                    if (adjustedFrame == totalFrames) adjustedFrame = 0;
                 }
+                loggedExceededDuration_ = (adjustedFrame == 0);
             }
         }
         
