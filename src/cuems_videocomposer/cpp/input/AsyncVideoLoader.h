@@ -29,6 +29,7 @@
 #include <queue>
 #include <mutex>
 #include <thread>
+#include <vector>
 #include <condition_variable>
 #include <functional>
 #include <atomic>
@@ -132,8 +133,9 @@ private:
     ConfigurationManager* config_;
     DisplayBackend* displayBackend_;
 
-    // Threading
-    std::unique_ptr<std::thread> workerThread_;
+    // Threading – pool of worker threads (default: 2, so two videos load in parallel)
+    std::vector<std::thread> workers_;
+    size_t numWorkers_;
     std::atomic<bool> running_;
 
     // Request queue (protected by mutex)

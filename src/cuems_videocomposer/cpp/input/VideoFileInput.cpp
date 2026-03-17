@@ -28,6 +28,9 @@
 #include <cassert>
 #include <algorithm>
 #include <vector>
+#include <cstdio>
+#include <cstdlib>
+#include <sys/stat.h>
 
 #ifdef HAVE_VAAPI_INTEROP
 #include "../hwdec/VaapiInterop.h"
@@ -197,10 +200,15 @@ bool VideoFileInput::open(const std::string& source) {
 
     // Index frames (unless --noindex flag is set)
     if (!noIndex_) {
-    if (!indexFrames()) {
-        cleanup();
-        return false;
-    }
+        if (!loadCachedIndex()) {
+            // Cache miss or stale – run the full 3-pass indexing
+            if (!indexFrames()) {
+                cleanup();
+                return false;
+            }
+            // Persist the index so next open() is instant
+            saveCachedIndex();
+        }
 
         // If indexing completed, use indexed frame count if available
         if (frameCount_ > 0 && frameInfo_.totalFrames == 0) {
@@ -2701,6 +2709,185 @@ bool VideoFileInput::decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffe
 
     currentFrame_ = frameNumber;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Index caching  (shared by videocomposer runtime and cuems-videoindexer CLI)
+// ---------------------------------------------------------------------------
+
+static const char   IDX_MAGIC[4]   = {'C','X','I','D'};
+static const uint32_t IDX_VERSION  = 1;
+
+struct IdxHeader {
+    char     magic[4];
+    uint32_t version;
+    int64_t  video_size;
+    int64_t  video_mtime;
+    int64_t  frameCount;
+    int32_t  frameRateQ_num;
+    int32_t  frameRateQ_den;
+    int32_t  width;
+    int32_t  height;
+    float    aspect;
+    double   framerate;
+    int64_t  totalFrames;
+    double   duration;
+    int64_t  fileFrameOffset;
+    uint8_t  scanComplete;
+    uint8_t  byteSeek;
+    uint8_t  _pad[6]; // align to 8 bytes
+};
+
+std::string VideoFileInput::getIndexPath(const std::string& videoPath) {
+    // /path/to/media/video.mp4  ->  /path/to/media/indexes/video.mp4.idx
+    size_t sep = videoPath.rfind('/');
+    std::string dir  = (sep != std::string::npos) ? videoPath.substr(0, sep) : ".";
+    std::string base = (sep != std::string::npos) ? videoPath.substr(sep + 1) : videoPath;
+    return dir + "/indexes/" + base + ".idx";
+}
+
+bool VideoFileInput::isCacheValid(const std::string& videoPath) {
+    std::string idxPath = getIndexPath(videoPath);
+
+    struct stat vidSt{}, idxSt{};
+    if (stat(videoPath.c_str(), &vidSt) != 0) return false;
+    if (stat(idxPath.c_str(), &idxSt) != 0) return false;
+
+    FILE* f = fopen(idxPath.c_str(), "rb");
+    if (!f) return false;
+
+    IdxHeader hdr{};
+    bool ok = (fread(&hdr, sizeof(hdr), 1, f) == 1);
+    fclose(f);
+
+    if (!ok) return false;
+    if (memcmp(hdr.magic, IDX_MAGIC, 4) != 0) return false;
+    if (hdr.version != IDX_VERSION) return false;
+    if (hdr.video_size  != (int64_t)vidSt.st_size)  return false;
+    if (hdr.video_mtime != (int64_t)vidSt.st_mtime) return false;
+    return true;
+}
+
+bool VideoFileInput::loadCachedIndex() {
+    if (currentFile_.empty()) return false;
+
+    std::string idxPath = getIndexPath(currentFile_);
+
+    struct stat vidSt{};
+    if (stat(currentFile_.c_str(), &vidSt) != 0) return false;
+
+    FILE* f = fopen(idxPath.c_str(), "rb");
+    if (!f) return false;
+
+    IdxHeader hdr{};
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return false; }
+
+    if (memcmp(hdr.magic, IDX_MAGIC, 4) != 0 ||
+        hdr.version    != IDX_VERSION          ||
+        hdr.video_size  != (int64_t)vidSt.st_size  ||
+        hdr.video_mtime != (int64_t)vidSt.st_mtime ||
+        hdr.frameCount  <= 0)
+    {
+        fclose(f);
+        return false;
+    }
+
+    size_t bytes = (size_t)hdr.frameCount * sizeof(FrameIndex);
+    FrameIndex* idx = static_cast<FrameIndex*>(malloc(bytes));
+    if (!idx) { fclose(f); return false; }
+
+    if (fread(idx, sizeof(FrameIndex), (size_t)hdr.frameCount, f) != (size_t)hdr.frameCount) {
+        free(idx);
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    if (frameIndex_) free(frameIndex_);
+    frameIndex_   = idx;
+    frameCount_   = hdr.frameCount;
+    frameRateQ_   = { hdr.frameRateQ_num, hdr.frameRateQ_den };
+    scanComplete_ = hdr.scanComplete != 0;
+    byteSeek_     = hdr.byteSeek != 0;
+
+    // Restore frameInfo fields that indexing sets
+    frameInfo_.width           = hdr.width;
+    frameInfo_.height          = hdr.height;
+    frameInfo_.aspect          = hdr.aspect;
+    frameInfo_.framerate       = hdr.framerate;
+    frameInfo_.totalFrames     = hdr.totalFrames > 0 ? hdr.totalFrames : hdr.frameCount;
+    frameInfo_.duration        = hdr.duration;
+    frameInfo_.fileFrameOffset = hdr.fileFrameOffset;
+
+    LOG_INFO << "Loaded cached index for " << currentFile_
+             << " (" << frameCount_ << " frames)";
+    return true;
+}
+
+void VideoFileInput::saveCachedIndex() const {
+    if (currentFile_.empty() || !frameIndex_ || frameCount_ <= 0) return;
+
+    std::string idxPath = getIndexPath(currentFile_);
+
+    // Create indexes/ directory if needed
+    size_t sep = idxPath.rfind('/');
+    if (sep != std::string::npos) {
+        std::string dir = idxPath.substr(0, sep);
+        // mkdir -p equivalent using POSIX
+        std::string cmd = "mkdir -p \"" + dir + "\"";
+        (void)system(cmd.c_str());
+    }
+
+    struct stat vidSt{};
+    if (stat(currentFile_.c_str(), &vidSt) != 0) {
+        LOG_WARNING << "saveCachedIndex: cannot stat " << currentFile_;
+        return;
+    }
+
+    IdxHeader hdr{};
+    memcpy(hdr.magic, IDX_MAGIC, 4);
+    hdr.version        = IDX_VERSION;
+    hdr.video_size     = (int64_t)vidSt.st_size;
+    hdr.video_mtime    = (int64_t)vidSt.st_mtime;
+    hdr.frameCount     = frameCount_;
+    hdr.frameRateQ_num = frameRateQ_.num;
+    hdr.frameRateQ_den = frameRateQ_.den;
+    hdr.width          = frameInfo_.width;
+    hdr.height         = frameInfo_.height;
+    hdr.aspect         = frameInfo_.aspect;
+    hdr.framerate      = frameInfo_.framerate;
+    hdr.totalFrames    = frameInfo_.totalFrames;
+    hdr.duration       = frameInfo_.duration;
+    hdr.fileFrameOffset= frameInfo_.fileFrameOffset;
+    hdr.scanComplete   = scanComplete_ ? 1 : 0;
+    hdr.byteSeek       = byteSeek_     ? 1 : 0;
+
+    // Write to a temp file and rename (atomic-ish)
+    std::string tmpPath = idxPath + ".tmp";
+    FILE* f = fopen(tmpPath.c_str(), "wb");
+    if (!f) {
+        LOG_WARNING << "saveCachedIndex: cannot create " << tmpPath;
+        return;
+    }
+
+    bool ok = (fwrite(&hdr, sizeof(hdr), 1, f) == 1) &&
+              (fwrite(frameIndex_, sizeof(FrameIndex), (size_t)frameCount_, f) == (size_t)frameCount_);
+    fclose(f);
+
+    if (!ok) {
+        remove(tmpPath.c_str());
+        LOG_WARNING << "saveCachedIndex: write error for " << idxPath;
+        return;
+    }
+
+    if (rename(tmpPath.c_str(), idxPath.c_str()) != 0) {
+        remove(tmpPath.c_str());
+        LOG_WARNING << "saveCachedIndex: rename failed for " << idxPath;
+        return;
+    }
+
+    LOG_INFO << "Saved index cache: " << idxPath
+             << " (" << frameCount_ << " frames)";
 }
 
 } // namespace videocomposer

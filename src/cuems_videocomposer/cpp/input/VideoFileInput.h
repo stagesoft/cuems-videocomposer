@@ -37,6 +37,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <deque>
+#include <sys/stat.h>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -101,6 +102,10 @@ public:
     void setNoIndex(bool noIndex) { noIndex_ = noIndex; }
     bool getNoIndex() const { return noIndex_; }
 
+    // Index path helpers (used by cuems-videoindexer CLI)
+    static std::string getIndexPath(const std::string& videoPath);
+    static bool isCacheValid(const std::string& videoPath);
+
     void setHardwareDecodePreference(HardwareDecodePreference preference) { hwPreference_ = preference; }
 
 #ifdef HAVE_VAAPI_INTEROP
@@ -139,6 +144,10 @@ private:
     int64_t parsePTSFromFrame(AVFrame* frame);
     bool transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer);
     void cleanup();
+
+    // Index caching
+    bool loadCachedIndex();
+    void saveCachedIndex() const;
 
     // Media decoder module
     cuems_mediadecoder::MediaFileReader mediaReader_;

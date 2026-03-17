@@ -35,12 +35,14 @@
 #include "../display/DisplayBackend.h"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 
 namespace videocomposer {
 
 AsyncVideoLoader::AsyncVideoLoader()
     : config_(nullptr)
     , displayBackend_(nullptr)
+    , numWorkers_(2)
     , running_(false)
 {
 }
@@ -53,11 +55,15 @@ void AsyncVideoLoader::initialize(ConfigurationManager* config, DisplayBackend* 
     config_ = config;
     displayBackend_ = displayBackend;
 
-    // Start worker thread
+    // Start worker thread pool (numWorkers_ threads run workerThread() concurrently)
     running_ = true;
-    workerThread_ = std::make_unique<std::thread>(&AsyncVideoLoader::workerThread, this);
-    
-    LOG_INFO << "AsyncVideoLoader: Worker thread started";
+    workers_.clear();
+    workers_.reserve(numWorkers_);
+    for (size_t i = 0; i < numWorkers_; ++i) {
+        workers_.emplace_back(&AsyncVideoLoader::workerThread, this);
+    }
+
+    LOG_INFO << "AsyncVideoLoader: " << numWorkers_ << " worker thread(s) started";
 }
 
 void AsyncVideoLoader::shutdown() {
@@ -65,15 +71,17 @@ void AsyncVideoLoader::shutdown() {
         return;
     }
 
-    // Signal thread to stop
+    // Signal all threads to stop and wake them up
     running_ = false;
     requestCond_.notify_all();
 
-    // Wait for thread to finish
-    if (workerThread_ && workerThread_->joinable()) {
-        workerThread_->join();
+    // Join all worker threads
+    for (auto& t : workers_) {
+        if (t.joinable()) {
+            t.join();
+        }
     }
-    workerThread_.reset();
+    workers_.clear();
 
     // Clear queues
     {

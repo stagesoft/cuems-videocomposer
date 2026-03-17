@@ -822,6 +822,54 @@ if(NDI_FOUND)
     )
 endif()
 
+# ---------------------------------------------------------------------------
+# cuems-videoindexer -- lightweight CLI to pre-build .idx sidecar files
+# Only needs VideoFileInput + cuems-mediadecoder + FFmpeg (no display libs)
+# ---------------------------------------------------------------------------
+set(VIDEOINDEXER_SOURCES
+    src/cuems-videoindexer/main.cpp
+    src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
+    src/cuems_videocomposer/cpp/input/AsyncDecodeQueue.cpp
+    src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
+    src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
+    src/cuems_videocomposer/cpp/video/GPUTextureFrameBuffer.cpp
+    src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
+)
+
+# Mirror VAAPI interop inclusion from main executable
+if(VAAPI_FOUND AND EGL_FOUND AND DRM_FOUND)
+    list(APPEND VIDEOINDEXER_SOURCES
+        src/cuems_videocomposer/cpp/hwdec/VaapiInterop.cpp
+    )
+endif()
+
+add_executable(cuems-videoindexer ${VIDEOINDEXER_SOURCES})
+target_include_directories(cuems-videoindexer PRIVATE
+    src/cuems_videocomposer
+    src/cuems_videocomposer/cpp
+    ${CMAKE_SOURCE_DIR}/src/cuems-mediadecoder/include
+)
+target_link_libraries(cuems-videoindexer
+    cuems-mediadecoder
+    ${FFMPEG_LIBRARIES}
+    m
+    pthread
+)
+# Link OpenGL if available (GPUTextureFrameBuffer may reference GL symbols)
+if(PLATFORM_LINUX)
+    if(X11_FOUND)
+        target_link_libraries(cuems-videoindexer ${X11_LIBRARIES})
+    endif()
+    find_library(GL_LIBRARY_IDX GL)
+    if(GL_LIBRARY_IDX)
+        target_link_libraries(cuems-videoindexer ${GL_LIBRARY_IDX})
+    endif()
+    if(VAAPI_FOUND AND EGL_FOUND AND DRM_FOUND)
+        target_link_libraries(cuems-videoindexer ${EGL_LIBRARIES} ${VAAPI_LIBRARIES} ${DRM_LIBRARIES})
+    endif()
+endif()
+install(TARGETS cuems-videoindexer DESTINATION bin)
+
 # Create executable
 add_executable(cuems-videocomposer ${C_SOURCES} ${CPP_SOURCES})
 add_dependencies(cuems-videocomposer splash_png_embed)
