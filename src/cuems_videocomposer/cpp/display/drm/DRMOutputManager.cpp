@@ -1224,7 +1224,10 @@ uint64_t DRMOutputManager::getPropertyValue(uint32_t objectId, uint32_t objectTy
 }
 
 void DRMOutputManager::pollHotplug() {
-    refreshOutputs();
+    // NOOP in render loop: drmModeGetConnector() sends I2C probes to each
+    // connector (~25ms each), which would stall the render loop causing
+    // visible frame drops.  Real hotplug detection should use udev/uevent
+    // notifications instead of polling.
 }
 
 // ===== Plane Management =====
