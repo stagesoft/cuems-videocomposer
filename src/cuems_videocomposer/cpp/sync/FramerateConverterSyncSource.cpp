@@ -22,6 +22,7 @@
 
 #include "FramerateConverterSyncSource.h"
 #include <cmath>
+#include <ctime>
 
 namespace videocomposer {
 
@@ -63,22 +64,77 @@ int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
     }
     // Get frame from wrapped sync source
     int64_t syncFrame = wrappedSyncSource_->pollFrame(rolling);
-    
+
     if (syncFrame >= 0 && inputSource_) {
         double syncFps = wrappedSyncSource_->getFramerate();
         if (syncFps > 0) {
             FrameInfo info = inputSource_->getFrameInfo();
             double inputFps = info.framerate;
-            
+
             if (inputFps > 0 && std::abs(syncFps - inputFps) > 0.01) {
                 // When framerates differ, compute video frame directly from
                 // the continuous millisecond time to avoid double-quantization.
-                // floor(floor(ms*syncFps/1000) * inputFps/syncFps) skips frames
-                // because the first floor() loses sub-frame precision.
                 long timeMs = wrappedSyncSource_->getTimeMs();
                 if (timeMs >= 0) {
                     double seconds = static_cast<double>(timeMs) / 1000.0;
-                    syncFrame = static_cast<int64_t>(std::floor(seconds * inputFps));
+                    int64_t rawFrame = static_cast<int64_t>(std::floor(seconds * inputFps));
+
+                    // Vsync-aware cadence smoother.
+                    // When display_rate / video_fps is close to an integer N
+                    // (e.g. 60/29.97 ≈ 2), enforce a minimum hold of N vsyncs
+                    // per frame so the phase drift between vsync and frame
+                    // boundaries never causes visible 1-vsync / (N+1)-vsync
+                    // stutter pairs.  When the ratio is NOT near-integer
+                    // (e.g. 60/24 = 2.5, 60/25 = 2.4), use floor(ratio) and
+                    // let the drift catch-up produce the natural N:(N+1)
+                    // pulldown pattern (e.g. 3:2 for 24fps @ 60Hz).
+                    //
+                    // The display refresh rate is measured from the actual call
+                    // interval (pollFrame is called once per vsync) instead of
+                    // being hardcoded, so this works for any display rate.
+                    static int64_t s_displayFrame  = -1;
+                    static int     s_vsyncCount    =  0;
+                    static double  s_vsyncPeriodMs =  16.667; // initial guess
+                    static long long s_lastCallUs  =  0;
+
+                    struct timespec _now;
+                    clock_gettime(CLOCK_MONOTONIC, &_now);
+                    long long nowUs = static_cast<long long>(_now.tv_sec) * 1000000LL
+                                    + _now.tv_nsec / 1000LL;
+
+                    if (s_lastCallUs > 0) {
+                        double deltaMs = static_cast<double>(nowUs - s_lastCallUs) / 1000.0;
+                        // Only accept plausible vsync intervals (5–50ms)
+                        if (deltaMs > 5.0 && deltaMs < 50.0) {
+                            s_vsyncPeriodMs = 0.95 * s_vsyncPeriodMs + 0.05 * deltaMs;
+                        }
+                    }
+                    s_lastCallUs = nowUs;
+
+                    double frameDurMs = 1000.0 / inputFps;
+                    double ratio = frameDurMs / s_vsyncPeriodMs;
+                    int idealVsyncs = static_cast<int>(std::floor(ratio));
+                    if (idealVsyncs < 1) idealVsyncs = 1;
+
+                    if (s_displayFrame < 0
+                        || rawFrame < s_displayFrame
+                        || rawFrame > s_displayFrame + 2) {
+                        s_displayFrame = rawFrame;
+                        s_vsyncCount   = 0;
+                    } else {
+                        s_vsyncCount++;
+                        int64_t drift = rawFrame - s_displayFrame;
+
+                        if (drift >= 1 && s_vsyncCount >= idealVsyncs) {
+                            s_displayFrame++;
+                            s_vsyncCount = 0;
+                        } else if (drift >= 2) {
+                            s_displayFrame++;
+                            s_vsyncCount = 0;
+                        }
+                    }
+
+                    syncFrame = s_displayFrame;
                 } else {
                     // Fallback: frame-based conversion (may skip frames)
                     syncFrame = static_cast<int64_t>(std::floor(
@@ -87,7 +143,7 @@ int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
             }
         }
     }
-    
+
     return syncFrame;
 }
 
