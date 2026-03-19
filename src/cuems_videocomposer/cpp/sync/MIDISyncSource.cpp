@@ -27,6 +27,7 @@
 #include "MtcReceiverMIDIDriver.h"
 #endif
 #include <cstring>
+#include <ctime>
 
 namespace videocomposer {
 
@@ -199,7 +200,78 @@ bool MIDISyncSource::wasFullFrameReceived() {
 
 long MIDISyncSource::getTimeMs() const {
 #ifdef HAVE_MTCRECEIVER
-    return MtcReceiver::mtcHead.load();
+    long baseMtcMs = MtcReceiver::mtcHead.load();
+    bool isRunning = MtcReceiver::isTimecodeRunning.load();
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long long nowUs = static_cast<long long>(now.tv_sec) * 1000000LL
+                    + now.tv_nsec / 1000LL;
+
+    // MtcReceiver::mtcHead advances in ~10ms discrete steps (2 MIDI quarter-
+    // frames at 25 fps).  Position-correcting PLLs (errorUs/20) introduce
+    // ~500µs per-vsync jitter that pushes frame boundary crossings to wrong
+    // vsyncs when the vsync phase aligns with frame boundaries.
+    //
+    // Solution: rate-correcting extrapolation.  Advance a µs counter at a
+    // continuously adjusted rate so the output is perfectly smooth (zero
+    // position jitter) while the rate slowly tracks the MTC source clock
+    // (eliminating long-term drift).
+    //
+    // The rate is estimated from mtcHead step intervals: each time mtcHead
+    // changes, measure the ratio of MTC advance to wall-clock advance and
+    // feed it into an exponential moving average (α=0.05).  This gives a
+    // stable rate estimate with a ~2s time constant.
+    //
+    // Static locals are safe: called only from the single-threaded render loop.
+    static long long s_smoothUs  = -1;
+    static long long s_lastWcUs  =  0;
+    static double    s_rate      = 1.0;  // MTC µs per wall µs
+    static long      s_prevMtcMs = -1;
+    static long long s_prevMtcWcUs = 0;  // wall time when mtcHead last changed
+
+    if (!isRunning || s_smoothUs < 0) {
+        s_smoothUs   = static_cast<long long>(baseMtcMs) * 1000LL;
+        s_lastWcUs   = nowUs;
+        s_rate       = 1.0;
+        s_prevMtcMs  = baseMtcMs;
+        s_prevMtcWcUs = nowUs;
+        return baseMtcMs;
+    }
+
+    // Detect mtcHead change → update rate estimate
+    if (baseMtcMs != s_prevMtcMs) {
+        long long wcElapsedUs = nowUs - s_prevMtcWcUs;
+        long mtcStepMs = baseMtcMs - s_prevMtcMs;
+
+        // Only update rate from forward, reasonable steps
+        if (mtcStepMs > 0 && mtcStepMs < 100 && wcElapsedUs > 1000) {
+            double measuredRate = (static_cast<double>(mtcStepMs) * 1000.0)
+                                / static_cast<double>(wcElapsedUs);
+            // Exponential moving average, α=0.05 → τ ≈ 20 MTC steps ≈ 200ms
+            s_rate = 0.95 * s_rate + 0.05 * measuredRate;
+        }
+
+        // Large jump (seek / cue change): snap and reset
+        if (mtcStepMs > 200 || mtcStepMs < -10) {
+            s_smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
+            s_rate = 1.0;
+        }
+
+        s_prevMtcMs   = baseMtcMs;
+        s_prevMtcWcUs = nowUs;
+    }
+
+    // Advance by wall-clock delta × rate (smooth, drift-free)
+    long long wallDeltaUs = nowUs - s_lastWcUs;
+    s_lastWcUs = nowUs;
+    if (wallDeltaUs < 0)      wallDeltaUs = 0;
+    if (wallDeltaUs > 100000) wallDeltaUs = 100000;
+
+    s_smoothUs += static_cast<long long>(
+        static_cast<double>(wallDeltaUs) * s_rate);
+
+    return static_cast<long>(s_smoothUs / 1000LL);
 #else
     return -1;
 #endif
