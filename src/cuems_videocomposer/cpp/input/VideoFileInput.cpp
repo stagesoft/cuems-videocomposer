@@ -1816,8 +1816,11 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         // Set target frame so decode thread knows where we are
         asyncDecodeQueue_->setTargetFrame(frameNumber);
         
-        // Try to get frame from queue (wait up to 5ms if not ready)
-        AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, 5);
+        // On the very first frame request the decode thread needs time to cold-start
+        // the VAAPI pipeline (~50ms for 4K). Wait longer so we never fall through to
+        // the synchronous path which blocks the render thread for the full decode time.
+        int waitMs = textureBuffer.isValid() ? 5 : 200;
+        AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, waitMs);
         
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
