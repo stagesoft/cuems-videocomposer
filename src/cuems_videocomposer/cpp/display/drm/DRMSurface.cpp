@@ -677,9 +677,10 @@ void DRMSurface::releaseCurrent() {
 
 void DRMSurface::swapBuffers() {
     if (eglDisplay_ != EGL_NO_DISPLAY && eglSurface_ != EGL_NO_SURFACE) {
-        // Use glFinish to ensure GPU completely finishes before swap
-        // This provides maximum synchronization at cost of some latency
-        glFinish();
+        // Use glFlush (not glFinish) — EGL/GBM implicit sync fences ensure
+        // the GPU completes rendering before the buffer is scanned out.
+        // glFinish would block the CPU for ~4.6ms per frame unnecessarily.
+        glFlush();
         eglSwapBuffers(eglDisplay_, eglSurface_);
     }
 }
