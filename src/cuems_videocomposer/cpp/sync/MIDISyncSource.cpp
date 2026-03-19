@@ -197,5 +197,13 @@ bool MIDISyncSource::wasFullFrameReceived() {
     return false;
 }
 
+long MIDISyncSource::getTimeMs() const {
+#ifdef HAVE_MTCRECEIVER
+    return MtcReceiver::mtcHead.load();
+#else
+    return -1;
+#endif
+}
+
 } // namespace videocomposer
 

@@ -100,6 +100,11 @@ public:
      */
     bool wasFullFrameReceived() override;
     
+    /**
+     * Get MTC timecode position in milliseconds (from mtcreceiver).
+     */
+    long getTimeMs() const override;
+    
 private:
     std::unique_ptr<MIDIDriver> driver_;
     MTCDecoder mtcDecoder_;

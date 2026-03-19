@@ -86,6 +86,15 @@ public:
      * @return true if a full frame was received since last check
      */
     virtual bool wasFullFrameReceived() { return false; }
+    
+    /**
+     * Get the current timecode position in milliseconds.
+     * Used by FramerateConverterSyncSource to compute video frames directly
+     * from continuous time, avoiding double-quantization when converting
+     * between different frame rates.
+     * @return Time in milliseconds, or -1 if not available
+     */
+    virtual long getTimeMs() const { return -1; }
 };
 
 } // namespace videocomposer

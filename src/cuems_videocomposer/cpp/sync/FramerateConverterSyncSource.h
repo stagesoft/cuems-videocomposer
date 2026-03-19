@@ -76,6 +76,11 @@ public:
      * Check if a full frame SYSEX was just received - delegates to wrapped sync source
      */
     bool wasFullFrameReceived() override;
+    
+    /**
+     * Delegate to wrapped sync source's getTimeMs()
+     */
+    long getTimeMs() const override;
 
 private:
     SyncSource* wrappedSyncSource_;  // Non-owning reference to sync source
