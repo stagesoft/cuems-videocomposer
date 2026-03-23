@@ -49,6 +49,9 @@ public:
     VideoLayer* getLayer(int layerId);
     const VideoLayer* getLayer(int layerId) const;
     
+    // Remove all layers (atomic reset for project load)
+    void removeAllLayers();
+
     // Layer management by UUID (cue ID)
     bool addLayerWithId(const std::string& cueId, std::unique_ptr<VideoLayer> layer);
     bool removeLayerByCueId(const std::string& cueId);

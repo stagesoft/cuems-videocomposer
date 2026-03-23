@@ -90,6 +90,13 @@ public:
     void cancelLoad(const std::string& cueId);
 
     /**
+     * Cancel all pending and queued loads (atomic reset for project load)
+     * In-flight loads will complete but their callbacks will find no matching
+     * layer and be harmlessly discarded.
+     */
+    void cancelAll();
+
+    /**
      * Check if a load is pending for a cue ID
      * @param cueId Cue ID to check
      * @return true if load is pending

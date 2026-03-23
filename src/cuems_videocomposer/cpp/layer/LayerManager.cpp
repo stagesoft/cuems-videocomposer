@@ -35,6 +35,12 @@ LayerManager::~LayerManager() {
     layers_.clear();
 }
 
+void LayerManager::removeAllLayers() {
+    layers_.clear();
+    cueIdToLayerId_.clear();
+    nextLayerId_ = 1;
+}
+
 int LayerManager::addLayer(std::unique_ptr<VideoLayer> layer) {
     if (!layer) {
         return -1;

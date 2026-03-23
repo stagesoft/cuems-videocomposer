@@ -267,6 +267,12 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerAppCommand("master/corner4", [this](const std::vector<std::string>& args) {
         return handleMasterCorner4(args);
     });
+    registerAppCommand("reset", [this](const std::vector<std::string>& args) {
+        if (!app_) return false;
+        app_->resetAll();
+        return true;
+    });
+
     registerAppCommand("master/reset", [this](const std::vector<std::string>& args) {
         return handleMasterReset(args);
     });

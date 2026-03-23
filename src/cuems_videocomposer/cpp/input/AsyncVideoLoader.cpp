@@ -155,6 +155,27 @@ void AsyncVideoLoader::cancelLoad(const std::string& cueId) {
     LOG_INFO << "AsyncVideoLoader: Cancelled load for cue: " << cueId;
 }
 
+void AsyncVideoLoader::cancelAll() {
+    // Drain request queue
+    {
+        std::lock_guard<std::mutex> lock(requestMutex_);
+        std::queue<LoadRequest> empty;
+        requestQueue_.swap(empty);
+    }
+    // Clear pending set
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        pendingCueIds_.clear();
+    }
+    // Drain result queue (discard completed but unconsumed results)
+    {
+        std::lock_guard<std::mutex> lock(resultMutex_);
+        std::queue<LoadResult> empty;
+        resultQueue_.swap(empty);
+    }
+    LOG_INFO << "AsyncVideoLoader: Cancelled all pending loads";
+}
+
 bool AsyncVideoLoader::isLoadPending(const std::string& cueId) const {
     std::lock_guard<std::mutex> lock(pendingMutex_);
     return pendingCueIds_.count(cueId) > 0;

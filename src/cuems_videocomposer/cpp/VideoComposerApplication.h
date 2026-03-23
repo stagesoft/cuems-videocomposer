@@ -86,6 +86,9 @@ public:
     // Get renderer access (for master layer controls)
     OpenGLRenderer& renderer();
     
+    // Reset all state (called on project load - removes all layers, cancels loads, resets master)
+    void resetAll();
+
     // File loading methods (called from RemoteCommandRouter)
     bool createLayerWithFile(const std::string& cueId, const std::string& filepath);
     bool loadFileIntoLayer(const std::string& cueId, const std::string& filepath);

@@ -906,6 +906,23 @@ bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const
     return true;
 }
 
+void VideoComposerApplication::resetAll() {
+    LOG_INFO << "Reset: removing all layers, cancelling loads, resetting master";
+
+    // Cancel all pending async loads
+    if (asyncVideoLoader_) {
+        asyncVideoLoader_->cancelAll();
+    }
+
+    // Remove all layers (unique_ptr destructors close files, stop decode queues, free textures)
+    if (layerManager_) {
+        layerManager_->removeAllLayers();
+    }
+
+    // Reset master properties (position, scale, rotation, opacity, color, warp)
+    renderer().masterProperties().reset();
+}
+
 bool VideoComposerApplication::unloadFileFromLayer(const std::string& cueId) {
     VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
     if (!layer) {
