@@ -122,12 +122,19 @@ public:
      * @param displayBackend DisplayBackend instance with VAAPI support
      */
     void setDisplayBackend(DisplayBackend* displayBackend);
-    
+
     /**
      * Check if zero-copy VAAPI decoding is available
      */
     bool hasVaapiZeroCopy() const;
 #endif
+
+    /**
+     * Pre-warm the VAAPI→EGL GPU pipeline by importing frame 0.
+     * Must be called from the GL thread (main thread) after file is loaded.
+     * Eliminates ~20ms first-frame latency from one-time driver setup.
+     */
+    void prewarmGPUPipeline();
 
 private:
     struct FrameIndex {
@@ -150,7 +157,7 @@ private:
     bool seekToFrame(int64_t frameNumber);
     bool seekByTimestamp(int64_t frameNumber);
     int64_t parsePTSFromFrame(AVFrame* frame);
-    bool transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer);
+    bool transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync = false);
     void cleanup();
 
     // Index caching

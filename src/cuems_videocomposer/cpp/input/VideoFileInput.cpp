@@ -237,8 +237,31 @@ bool VideoFileInput::open(const std::string& source) {
             useAsyncDecode_ = false;
         }
     }
-    
+
     return true;
+}
+
+void VideoFileInput::prewarmGPUPipeline() {
+    if (!useAsyncDecode_ || !asyncDecodeQueue_ || !useHardwareDecoding_) {
+        return;
+    }
+#ifdef HAVE_VAAPI_INTEROP
+    if (!vaapiInterop_ || !vaapiInterop_->isAvailable()) {
+        return;
+    }
+
+    // Wait for the decode thread to have frame 0 ready
+    asyncDecodeQueue_->setTargetFrame(0);
+    AVFrame* warmFrame = asyncDecodeQueue_->getFrame(0, 500);
+    if (warmFrame) {
+        // Import frame 0 through the full GPU pipeline (DRM export + EGL + GL texture)
+        // This pays the one-time driver setup cost before playback starts.
+        GPUTextureFrameBuffer warmBuf;
+        if (transferHardwareFrameToGPU(warmFrame, warmBuf, true)) {
+            LOG_INFO << "Pre-warmed VAAPI→EGL pipeline for " << currentFile_;
+        }
+    }
+#endif
 }
 
 void VideoFileInput::close() {
@@ -1808,6 +1831,18 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         return false;
     }
 
+    // Lazy initialization of VaapiInterop (needs GL context which may not be available at open time)
+#ifdef HAVE_VAAPI_INTEROP
+    if (!vaapiInterop_ && displayBackend_ && displayBackend_->hasVaapiSupport() &&
+        hwDecoderType_ == HardwareDecoder::Type::VAAPI) {
+        vaapiInterop_ = std::make_unique<VaapiInterop>();
+        if (!vaapiInterop_->init(displayBackend_)) {
+            LOG_WARNING << "Failed to initialize per-instance VaapiInterop (async path)";
+            vaapiInterop_.reset();
+        }
+    }
+#endif
+
     // =========================================================================
     // ASYNC DECODE PATH (mpv-style)
     // Use async queue if available - provides pre-buffered frames for smooth playback
@@ -1825,7 +1860,7 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
-            bool success = transferHardwareFrameToGPU(queuedFrame, textureBuffer);
+            bool success = transferHardwareFrameToGPU(queuedFrame, textureBuffer, true);  // skipSync: already synced by async queue
             if (success) {
                 return true;
             } else {
@@ -2072,7 +2107,7 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     return success;
 }
 
-bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer) {
+bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync) {
     if (!hwFrame) {
         LOG_WARNING << "transferHardwareFrameToGPU: hwFrame is NULL";
         return false;
@@ -2100,12 +2135,11 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
     if (hwFrame->format == AV_PIX_FMT_VAAPI && vaapiInterop_ && vaapiInterop_->isAvailable()) {
         GLuint texY = 0, texUV = 0;
         int width = 0, height = 0;
-        
+
         // Phase 1: Create EGL images (works on any thread)
-        if (vaapiInterop_->createEGLImages(hwFrame, width, height)) {
+        // Skip vaSyncSurface if frame was already synced by the async decode queue
+        if (vaapiInterop_->createEGLImages(hwFrame, width, height, skipSync)) {
             // Phase 2: Try to bind textures (needs GL context)
-            // If we're on the GL thread, this will succeed
-            // If not, the caller can call bindTexturesToImages later
             if (vaapiInterop_->bindTexturesToImages(texY, texUV)) {
                 // Set up the texture buffer with the imported textures
                 if (!textureBuffer.setExternalNV12Textures(texY, texUV, frameInfo_)) {
