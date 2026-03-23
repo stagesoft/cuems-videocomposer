@@ -333,7 +333,6 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
     if (!inputSource_ || !inputSource_->isReady()) {
         return false;
     }
-
     // Check if this is a live stream (NDI, V4L2, RTSP, etc.)
     if (inputSource_->isLiveStream()) {
         // Live streams: get latest available frame (ignore frameNumber)

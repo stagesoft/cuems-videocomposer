@@ -383,18 +383,17 @@ int VideoComposerApplication::run() {
     
     LOG_INFO << "Entering video update loop @ display refresh rate (vsync-driven)";
     
-    // Timing instrumentation for diagnosing micro-jumps
     while (running_ && shouldContinue()) {
         processEvents();
-        
+
         // Make OpenGL context current before updating layers
         // Required for VAAPI: EGL image creation needs current EGL context
         if (displayBackend_ && displayBackend_->isWindowOpen()) {
             displayBackend_->makeCurrent();
         }
-        
+
         updateLayers();
-        
+
         // Render - vsync/page-flip wait provides timing (60Hz)
         render();
     }
@@ -819,16 +818,25 @@ void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std:
         props.width = info.width;
         props.height = info.height;
     }
+
 }
 
 bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, const std::string& filepath) {
+    // If a layer with this cueId already exists, reuse it instead of creating
+    // a duplicate (the old layer would be orphaned in layers_ but unreachable
+    // by cueId, leaking resources and wasting update cycles).
+    if (layerManager_->getLayerByCueId(cueId)) {
+        LOG_INFO << "Layer already exists for cue ID: " << cueId << ", reloading file";
+        return loadFileIntoLayer(cueId, filepath);
+    }
+
     // Create empty layer first (fast, non-blocking)
     auto layer = createEmptyLayer(cueId);
     if (!layer) {
         LOG_ERROR << "Failed to create empty layer";
         return false;
     }
-    
+
     // Add layer to manager with cue ID
     if (!layerManager_->addLayerWithId(cueId, std::move(layer))) {
         LOG_ERROR << "Failed to add layer with cue ID: " << cueId;
