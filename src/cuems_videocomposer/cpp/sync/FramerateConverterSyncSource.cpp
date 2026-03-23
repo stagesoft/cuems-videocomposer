@@ -92,49 +92,45 @@ int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
                     // The display refresh rate is measured from the actual call
                     // interval (pollFrame is called once per vsync) instead of
                     // being hardcoded, so this works for any display rate.
-                    static int64_t s_displayFrame  = -1;
-                    static int     s_vsyncCount    =  0;
-                    static double  s_vsyncPeriodMs =  16.667; // initial guess
-                    static long long s_lastCallUs  =  0;
-
                     struct timespec _now;
                     clock_gettime(CLOCK_MONOTONIC, &_now);
                     long long nowUs = static_cast<long long>(_now.tv_sec) * 1000000LL
                                     + _now.tv_nsec / 1000LL;
 
-                    if (s_lastCallUs > 0) {
-                        double deltaMs = static_cast<double>(nowUs - s_lastCallUs) / 1000.0;
+                    if (cadenceLastCallUs_ > 0) {
+                        double deltaMs = static_cast<double>(nowUs - cadenceLastCallUs_) / 1000.0;
                         // Only accept plausible vsync intervals (5–50ms)
                         if (deltaMs > 5.0 && deltaMs < 50.0) {
-                            s_vsyncPeriodMs = 0.95 * s_vsyncPeriodMs + 0.05 * deltaMs;
+                            cadenceVsyncPeriodMs_ = 0.95 * cadenceVsyncPeriodMs_ + 0.05 * deltaMs;
                         }
                     }
-                    s_lastCallUs = nowUs;
+                    cadenceLastCallUs_ = nowUs;
 
                     double frameDurMs = 1000.0 / inputFps;
-                    double ratio = frameDurMs / s_vsyncPeriodMs;
+                    double ratio = frameDurMs / cadenceVsyncPeriodMs_;
                     int idealVsyncs = static_cast<int>(std::floor(ratio));
                     if (idealVsyncs < 1) idealVsyncs = 1;
 
-                    if (s_displayFrame < 0
-                        || rawFrame < s_displayFrame
-                        || rawFrame > s_displayFrame + 2) {
-                        s_displayFrame = rawFrame;
-                        s_vsyncCount   = 0;
+                    if (cadenceDisplayFrame_ < 0
+                        || rawFrame < cadenceDisplayFrame_
+                        || rawFrame > cadenceDisplayFrame_ + 2) {
+                        cadenceDisplayFrame_ = rawFrame;
+                        cadenceVsyncCount_   = 0;
                     } else {
-                        s_vsyncCount++;
-                        int64_t drift = rawFrame - s_displayFrame;
+                        cadenceVsyncCount_++;
+                        int64_t drift = rawFrame - cadenceDisplayFrame_;
 
-                        if (drift >= 1 && s_vsyncCount >= idealVsyncs) {
-                            s_displayFrame++;
-                            s_vsyncCount = 0;
+                        if (drift >= 1 && cadenceVsyncCount_ >= idealVsyncs) {
+                            cadenceDisplayFrame_++;
+                            cadenceVsyncCount_ = 0;
                         } else if (drift >= 2) {
-                            s_displayFrame++;
-                            s_vsyncCount = 0;
+                            cadenceDisplayFrame_++;
+                            cadenceVsyncCount_ = 0;
                         }
                     }
 
-                    syncFrame = s_displayFrame;
+                    syncFrame = cadenceDisplayFrame_;
+
                 } else {
                     // Fallback: frame-based conversion (may skip frames)
                     syncFrame = static_cast<int64_t>(std::floor(

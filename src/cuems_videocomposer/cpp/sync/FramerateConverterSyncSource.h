@@ -85,6 +85,12 @@ public:
 private:
     SyncSource* wrappedSyncSource_;  // Non-owning reference to sync source
     InputSource* inputSource_;  // Non-owning reference
+
+    // Per-instance cadence smoother state (was incorrectly static — shared across all layers)
+    int64_t   cadenceDisplayFrame_  = -1;
+    int       cadenceVsyncCount_    =  0;
+    double    cadenceVsyncPeriodMs_ = 16.667;  // initial guess
+    long long cadenceLastCallUs_    =  0;
 };
 
 } // namespace videocomposer
