@@ -411,7 +411,7 @@ bool VaapiInterop::importFrame(AVFrame* vaapiFrame,
     return true;
 }
 
-bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height) {
+bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height, bool skipSync) {
     // Create EGL images only - do NOT bind textures here
     // The caller should call bindTexturesToImages() from the GL thread
     
@@ -486,37 +486,40 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     VADRMPRIMESurfaceDescriptor desc;
     memset(&desc, 0, sizeof(desc));
     
-    // CRITICAL: Sync BEFORE export to ensure decode is complete
-    VAStatus syncStatus = vaSyncSurface(vaDisplay, surface);
-    if (syncStatus != VA_STATUS_SUCCESS) {
-        LOG_WARNING << "VaapiInterop: vaSyncSurface (pre-export) failed: " << syncStatus;
+    // Sync BEFORE export to ensure decode is complete.
+    // Skip if caller guarantees the surface is already synced (e.g. from async decode queue).
+    if (!skipSync) {
+        VAStatus syncStatus = vaSyncSurface(vaDisplay, surface);
+        if (syncStatus != VA_STATUS_SUCCESS) {
+            LOG_WARNING << "VaapiInterop: vaSyncSurface (pre-export) failed: " << syncStatus;
+        }
     }
-    
+
     VAStatus vaStatus = vaExportSurfaceHandle(
         vaDisplay, surface,
         VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
         VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
         &desc);
-    
+
     if (vaStatus != VA_STATUS_SUCCESS) {
         LOG_ERROR << "VaapiInterop: vaExportSurfaceHandle failed: " << vaStatus;
         return false;
     }
-    
+
     // NOTE: Post-export sync removed - pre-export sync is sufficient
     // mpv only syncs once before export, not after
     // The EGL image import provides implicit synchronization
-    
+
     width = desc.width;
     height = desc.height;
-    
+
     // DEBUG: Read back VAAPI surface to verify decoded content
     if (debugSurfaceReadbackEnabled_) {
         debugReadbackVaapiSurface(surface, vaDisplay, width, height);
     }
     frameWidth_ = width;
     frameHeight_ = height;
-    
+
     // Extract plane info (same logic as importFrame)
     int yObjectIdx, uvObjectIdx;
     uint32_t yOffset, uvOffset, yPitch, uvPitch;
@@ -816,7 +819,7 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     // Return NEW texture IDs
     texY = textureY_;
     texUV = textureUV_;
-    
+
     return true;
 }
 

@@ -116,7 +116,7 @@ public:
      * @param height Output: Frame height
      * @return true if EGL images were created successfully
      */
-    bool createEGLImages(AVFrame* vaapiFrame, int& width, int& height);
+    bool createEGLImages(AVFrame* vaapiFrame, int& width, int& height, bool skipSync = false);
     
     /**
      * Phase 2: Bind GL textures to EGL images (MUST be called from GL thread!)
