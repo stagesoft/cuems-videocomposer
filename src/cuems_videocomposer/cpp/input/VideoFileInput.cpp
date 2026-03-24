@@ -1870,8 +1870,8 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
             // Frame not ready - this shouldn't happen often if queue is working
             static int missCount = 0;
             if (++missCount % 30 == 1) {  // Log every 30 misses
-                LOG_WARNING << "Async decode: frame " << frameNumber << " not in queue (oldest=" 
-                           << asyncDecodeQueue_->getOldestFrame() << ", newest=" 
+                LOG_WARNING << "Async decode: frame " << frameNumber << " not in queue (oldest="
+                           << asyncDecodeQueue_->getOldestFrame() << ", newest="
                            << asyncDecodeQueue_->getNewestFrame() << ")";
             }
             // Keep showing the last displayed frame instead of falling through

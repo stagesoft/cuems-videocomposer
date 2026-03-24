@@ -61,6 +61,19 @@ void VideoLayer::setInputSource(std::unique_ptr<InputSource> input) {
     
     // Invalidate frame buffer cache
     frameBufferCacheValid_ = false;
+
+    // If wraparound was already enabled (OSC /loop arrived before the file
+    // finished loading), propagate it to the new input source now.
+    if (playback_.getWraparound() && playback_.isReady()) {
+        InputSource* src = playback_.getInputSource();
+        if (src) {
+            VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(src);
+            if (videoInput) {
+                FrameInfo info = src->getFrameInfo();
+                videoInput->setLoopMode(true, info.totalFrames);
+            }
+        }
+    }
 }
 
 void VideoLayer::setSyncSource(std::unique_ptr<SyncSource> sync) {

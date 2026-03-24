@@ -282,14 +282,14 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
     targetFrame_ = frameNumber;
     
     // Look for frame in queue
+    int64_t tf = totalFrames_.load();
     for (auto& qf : frameQueue_) {
         if (qf.frameNumber == frameNumber && qf.ready) {
             return qf.frame;
         }
     }
-    
+
     // Also check for virtual frames (pre-buffered loop start: stored as totalFrames_ + realFrame)
-    int64_t tf = totalFrames_.load();
     if (tf > 0) {
         int64_t virtualNum = tf + frameNumber;
         for (auto& qf : frameQueue_) {
@@ -587,10 +587,80 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         ret = av_read_frame(formatCtx_, packet);
         if (ret < 0) {
             if (ret == AVERROR_EOF) {
-                // Drain remaining frames from the codec
+                // Drain remaining frames from the codec's B-frame reorder buffer.
+                // For codecs like H.264/HEVC, the decoder holds the last few frames
+                // for reordering. These MUST be queued (not discarded) to avoid
+                // skipping frames at the loop boundary, which causes a visible jump.
                 avcodec_send_packet(codecCtx_, nullptr);
+                int drainCount = 0;
                 while (avcodec_receive_frame(codecCtx_, decodeFrame_) == 0) {
-                    av_frame_unref(decodeFrame_);
+                    // Calculate frame number from PTS (same logic as normal path)
+                    int64_t drainPts = decodeFrame_->best_effort_timestamp;
+                    if (drainPts == AV_NOPTS_VALUE) drainPts = decodeFrame_->pts;
+
+                    int64_t drainFrameNum = 0;
+                    if (drainPts != AV_NOPTS_VALUE) {
+                        double seconds = drainPts * av_q2d(timeBase_);
+                        drainFrameNum = static_cast<int64_t>(seconds * framerate_ + 0.5);
+                    } else {
+                        int64_t last = lastDecodedFrame_.load();
+                        int64_t voff = virtualOffset_.load();
+                        int64_t lastReal = (voff > 0 && last >= voff) ? (last - voff) : last;
+                        drainFrameNum = lastReal + 1;
+                    }
+
+                    // Apply virtual offset (should be 0 at end-of-file)
+                    int64_t voff = virtualOffset_.load();
+                    if (voff > 0) drainFrameNum += voff;
+
+                    // Sync VAAPI surface if hardware decoding
+                    if (useHardware_ && decodeFrame_->format == AV_PIX_FMT_VAAPI) {
+                        VASurfaceID surface = (VASurfaceID)(uintptr_t)decodeFrame_->data[3];
+                        if (surface != VA_INVALID_SURFACE && hwDeviceCtx_) {
+                            AVHWDeviceContext* hwctx = (AVHWDeviceContext*)hwDeviceCtx_->data;
+                            AVVAAPIDeviceContext* vactx = (AVVAAPIDeviceContext*)hwctx->hwctx;
+                            vaSyncSurface(vactx->display, surface);
+                        }
+                    }
+
+                    // Queue the drained frame
+                    QueuedFrame qf;
+                    qf.frameNumber = drainFrameNum;
+                    qf.frame = av_frame_alloc();
+                    if (qf.frame) {
+                        av_frame_move_ref(qf.frame, decodeFrame_);
+                        qf.ready = true;
+
+                        {
+                            std::lock_guard<std::mutex> lock(queueMutex_);
+                            bool inserted = false;
+                            for (auto it = frameQueue_.begin(); it != frameQueue_.end(); ++it) {
+                                if (it->frameNumber == drainFrameNum) {
+                                    if (it->frame) av_frame_free(&(it->frame));
+                                    it->frame = qf.frame;
+                                    it->ready = true;
+                                    qf.frame = nullptr;
+                                    inserted = true;
+                                    break;
+                                } else if (it->frameNumber > drainFrameNum) {
+                                    frameQueue_.insert(it, std::move(qf));
+                                    inserted = true;
+                                    break;
+                                }
+                            }
+                            if (!inserted) {
+                                frameQueue_.push_back(std::move(qf));
+                            }
+                        }
+
+                        lastDecodedFrame_ = drainFrameNum;
+                        drainCount++;
+                    }
+                }
+                if (drainCount > 0) {
+                    LOG_INFO << "AsyncDecodeQueue: Queued " << drainCount
+                             << " drained frames from reorder buffer";
+                    queueCond_.notify_all();
                 }
                 avcodec_flush_buffers(codecCtx_);
 
@@ -605,8 +675,6 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                     continue;  // Re-read packet from seeked position
                 } else {
                     // Non-loop mode: stop decoding and hold last frames.
-                    // Do NOT seek to 0 — that causes a decode→trim churn cycle
-                    // that fills the queue with duplicate end-of-video frames.
                     eofReached_ = true;
                     LOG_INFO << "AsyncDecodeQueue: EOF reached, stopping decode (non-loop)";
                     av_packet_free(&packet);
