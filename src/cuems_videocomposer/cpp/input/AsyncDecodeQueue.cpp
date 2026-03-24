@@ -248,12 +248,15 @@ void AsyncDecodeQueue::close() {
         decodeThread_.reset();
     }
     
-    // Clear queue
+    // Clear queue and borrowed frame
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         frameQueue_.clear();
     }
-    
+    if (borrowedFrame_) {
+        av_frame_free(&borrowedFrame_);
+    }
+
     // Cleanup FFmpeg
     if (swsCtx_) {
         sws_freeContext(swsCtx_);
@@ -275,17 +278,33 @@ void AsyncDecodeQueue::close() {
     ready_ = false;
 }
 
+AVFrame* AsyncDecodeQueue::borrowFrame(AVFrame* src) {
+    if (!src) return nullptr;
+    // Release previous borrowed frame
+    if (borrowedFrame_) {
+        av_frame_unref(borrowedFrame_);
+    } else {
+        borrowedFrame_ = av_frame_alloc();
+        if (!borrowedFrame_) return nullptr;
+    }
+    // Create a ref-counted copy (increments surface refcount for VAAPI)
+    if (av_frame_ref(borrowedFrame_, src) < 0) {
+        return nullptr;
+    }
+    return borrowedFrame_;
+}
+
 AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
     std::unique_lock<std::mutex> lock(queueMutex_);
-    
+
     // Update target so decode thread knows what we need
     targetFrame_ = frameNumber;
-    
+
     // Look for frame in queue
     int64_t tf = totalFrames_.load();
     for (auto& qf : frameQueue_) {
         if (qf.frameNumber == frameNumber && qf.ready) {
-            return qf.frame;
+            return borrowFrame(qf.frame);
         }
     }
 
@@ -294,7 +313,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
         int64_t virtualNum = tf + frameNumber;
         for (auto& qf : frameQueue_) {
             if (qf.frameNumber == virtualNum && qf.ready) {
-                return qf.frame;
+                return borrowFrame(qf.frame);
             }
         }
     }
@@ -302,18 +321,18 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
     // Frame not ready - wait if requested
     if (maxWaitMs > 0) {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(maxWaitMs);
-        
+
         while (std::chrono::steady_clock::now() < deadline) {
             // Wake decode thread
             queueCond_.notify_one();
-            
+
             // Wait for frame
             queueCond_.wait_for(lock, std::chrono::milliseconds(1));
-            
+
             // Check again (exact match)
             for (auto& qf : frameQueue_) {
                 if (qf.frameNumber == frameNumber && qf.ready) {
-                    return qf.frame;
+                    return borrowFrame(qf.frame);
                 }
             }
             // Also check virtual match
@@ -321,17 +340,17 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
                 int64_t virtualNum = tf + frameNumber;
                 for (auto& qf : frameQueue_) {
                     if (qf.frameNumber == virtualNum && qf.ready) {
-                        return qf.frame;
+                        return borrowFrame(qf.frame);
                     }
                 }
             }
         }
     }
-    
+
     // Frame not available - return closest earlier frame if available
     AVFrame* closest = nullptr;
     int64_t closestDiff = INT64_MAX;
-    
+
     for (auto& qf : frameQueue_) {
         if (qf.ready && qf.frameNumber <= frameNumber) {
             int64_t diff = frameNumber - qf.frameNumber;
@@ -341,8 +360,8 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
             }
         }
     }
-    
-    return closest;
+
+    return borrowFrame(closest);
 }
 
 void AsyncDecodeQueue::seek(int64_t frameNumber) {

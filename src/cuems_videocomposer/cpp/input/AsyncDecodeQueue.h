@@ -221,6 +221,16 @@ private:
     std::atomic<int64_t> virtualOffset_{0};  // Added to decoded frame numbers during pre-buffering
     std::atomic<bool> eofReached_{false};    // Set at EOF in non-loop mode; prevents decode-and-trim churn
     
+    // Borrowed frame: ref-counted copy returned by getFrame().
+    // Prevents use-after-free when the decode thread clears the queue
+    // while the render thread is still using a frame for GPU transfer.
+    // Valid until the next getFrame() call (always from the same thread).
+    AVFrame* borrowedFrame_ = nullptr;
+
+    // Ref the found frame into borrowedFrame_ and return it.
+    // Must be called while queueMutex_ is held.
+    AVFrame* borrowFrame(AVFrame* src);
+
     // Synchronization
     std::condition_variable seekCond_;
     std::mutex seekMutex_;
