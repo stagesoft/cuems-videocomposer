@@ -106,8 +106,15 @@ void VideoLayer::update() {
     }
 
     // Update playback (polls sync source and loads frames)
+    int64_t frameBefore = playback_.getCurrentFrame();
     playback_.update();
-    
+
+    // Clear awaitingFrame once a fresh frame has been loaded after
+    // a 0→1 visibility transition (prevents stale frame flash).
+    if (display_.getProperties().awaitingFrame && playback_.getCurrentFrame() != frameBefore) {
+        display_.getProperties().awaitingFrame = false;
+    }
+
     // Check for playback end and handle looping/auto-unload
     if (playback_.checkPlaybackEnd()) {
         auto& props = properties();

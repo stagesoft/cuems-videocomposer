@@ -38,6 +38,7 @@ struct LayerProperties {
     float opacity = 1.0f;   // Opacity (0.0 - 1.0)
     int zOrder = 0;         // Layer stacking order
     bool visible = false;   // Show/hide layer (hidden until engine sends visible=1)
+    bool awaitingFrame = false;  // Skip rendering until a fresh frame loads (prevents stale frame flash on 0→1 transition)
     
     // Transform (simplified for now, can be extended)
     float scaleX = 1.0f;

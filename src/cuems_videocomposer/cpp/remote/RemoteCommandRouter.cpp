@@ -646,6 +646,12 @@ bool RemoteCommandRouter::handleLayerVisible(VideoLayer* layer, const std::vecto
     }
 
     int visible = std::atoi(args[0].c_str());
+    // When transitioning 0→1, suppress rendering until a fresh frame
+    // is loaded by updateFromSyncSource. This prevents a stale frame
+    // from previous playback from flashing on screen.
+    if (visible != 0 && !layer->properties().visible) {
+        layer->properties().awaitingFrame = true;
+    }
     layer->properties().visible = (visible != 0);
     return true;
 }
