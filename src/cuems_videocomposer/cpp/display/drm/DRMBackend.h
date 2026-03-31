@@ -164,6 +164,7 @@ public:
      * Set resolution mode (override)
      */
     bool setResolutionMode(const std::string& mode) override;
+    void setResolutionExplicit(bool explicit_) { resolutionExplicit_ = explicit_; }
     
     /**
      * Save display configuration (override)
@@ -274,6 +275,7 @@ private:
     std::unique_ptr<MultiOutputRenderer> multiRenderer_;
     std::vector<OutputRegion> outputRegions_;
     bool useVirtualCanvas_ = true;  // Default to Virtual Canvas mode
+    bool resolutionExplicit_ = false;  // True when -r was explicitly passed
     
     // Atomic modesetting
     bool atomicPageFlip();  // Returns true if successful

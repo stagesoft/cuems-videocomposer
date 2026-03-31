@@ -226,7 +226,6 @@ void MultiOutputRenderer::blitToOutputs() {
                 glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
                 glClear(GL_COLOR_BUFFER_BIT);
                 output.surface->swapBuffers();
-                output.surface->releaseCurrent();
             }
         }
     }
@@ -257,11 +256,15 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
     
     // Swap buffers
     output.surface->swapBuffers();
-    
+
     // NOTE: Page flips are now handled by DRMBackend for atomic modesetting support
     // This allows all outputs to flip on the same vsync for 60fps dual-output
-    
-    output.surface->releaseCurrent();
+    //
+    // Do NOT call releaseCurrent() here — on Intel Mesa with 3+ GBM surfaces,
+    // fully unbinding the EGL context between outputs (eglMakeCurrent with
+    // EGL_NO_SURFACE) can prevent the next makeCurrent from functioning
+    // correctly.  The next output's makeCurrent() implicitly unbinds the
+    // previous surface, which is both correct and avoids the driver issue.
 }
 
 

@@ -174,6 +174,7 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
                 std::transform(value.begin(), value.end(), value.begin(), 
                               [](unsigned char c) { return std::tolower(c); });
                 setString("resolution_mode", value);
+                resolutionExplicit_ = true;
             }
         } else if (arg == "--no-splash" || arg == "--nosplash") {
             setBool("no_splash", true);

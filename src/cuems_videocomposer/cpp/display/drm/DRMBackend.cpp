@@ -1027,12 +1027,34 @@ bool DRMBackend::initVirtualCanvas() {
         }
     }
     
+    // Apply per-output resolutions from display.conf (if -r was not explicitly passed)
+    if (resolutionExplicit_) {
+        LOG_WARNING << "DRMBackend: Ignoring per-output resolutions from display.conf"
+                    << " — overridden by explicit -r flag";
+    } else if (configManager_) {
+        for (const auto& name : getSortedOutputNames()) {
+            const auto* outConf = configManager_->getOutputConfig(name);
+            if (outConf && outConf->width > 0 && outConf->height > 0) {
+                auto& surface = surfaces_.at(name);
+                int curW = static_cast<int>(surface->getWidth());
+                int curH = static_cast<int>(surface->getHeight());
+                if (outConf->width != curW || outConf->height != curH) {
+                    LOG_INFO << "DRMBackend: Per-output resolution for " << name
+                             << ": " << curW << "x" << curH
+                             << " -> " << outConf->width << "x" << outConf->height;
+                    setOutputMode(name, outConf->width, outConf->height,
+                                  outConf->refreshRate);
+                }
+            }
+        }
+    }
+
     // Configure MultiOutputRenderer with surfaces and regions (matching order)
     std::vector<OutputSurface*> surfacePtrs;
     for (const auto& region : outputRegions_) {
         surfacePtrs.push_back(surfaces_.at(region.name).get());
     }
-    
+
     multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     
     LOG_INFO << "DRMBackend: Virtual Canvas initialized with " 

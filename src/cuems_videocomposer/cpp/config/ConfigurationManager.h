@@ -71,10 +71,14 @@ public:
     // Print version information
     void printVersion() const;
 
+    // Whether -r/--resolution was explicitly passed on the command line
+    bool isResolutionExplicit() const { return resolutionExplicit_; }
+
 private:
     std::map<std::string, std::string> config_;
     std::vector<std::string> arguments_;
     std::string movieFile_;
+    bool resolutionExplicit_ = false;
     
     void loadDefaults();
 };
