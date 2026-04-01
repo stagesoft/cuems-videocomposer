@@ -251,6 +251,13 @@ public:
      * Restore original mode for all outputs
      */
     void restoreOriginalModes();
+
+    /**
+     * Harmonize refresh rates across all connected outputs.
+     * Called once from applyResolutionMode() after all outputs are configured.
+     * Finds the highest refresh rate that all outputs support at their selected resolution.
+     */
+    void harmonizeRefreshRates();
     
     // ===== Atomic Modesetting =====
     

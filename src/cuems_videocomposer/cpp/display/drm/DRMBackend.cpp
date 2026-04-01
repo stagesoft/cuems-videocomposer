@@ -33,6 +33,7 @@
 #include "../../utils/Logger.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>  // for getenv
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -221,7 +222,7 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
     if (!initialized_ || surfaces_.empty()) {
         return;
     }
-    
+
     if (useVirtualCanvas_ && multiRenderer_) {
         renderVirtualCanvas(layerManager, osdManager);
     } else {
@@ -244,29 +245,29 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     for (auto& [name, surface] : surfaces_) {
         surface->processFlipEvents();
     }
-    
+
     primary->makeCurrent();
-    
+
     // MultiOutputRenderer::render() handles:
     // 1. Rendering all layers to VirtualCanvas
     // 2. Blitting regions to each output surface (with blend/warp)
     // 3. Swapping buffers on each surface
     multiRenderer_->render(layerManager, osdManager);
-    
+
     primary->releaseCurrent();
-    
+
     // Wait for all pending flips to complete first
     for (auto& [name, surface] : surfaces_) {
         if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
     }
-    
+
     // Check if we can use atomic modesetting with planes
     bool useAtomic = outputManager_->supportsAtomic() && surfaces_.size() > 1;
     bool allHavePlanes = true;
     bool allModesSet = true;
-    
+
     if (useAtomic) {
         for (auto& [name, surface] : surfaces_) {
             if (!surface->getPlane()) {
@@ -278,7 +279,7 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
         }
         useAtomic = allHavePlanes && allModesSet;
     }
-    
+
     if (useAtomic) {
         // ATOMIC PATH: Submit all page flips in single atomic commit
         // All outputs flip on same vsync = 60fps for any number of outputs
@@ -349,14 +350,18 @@ bool DRMBackend::atomicPageFlip() {
     }
     
     if (success) {
-        // Commit atomically
-        // Use ALLOW_MODESET to permit mode changes if needed
-        // Don't use PAGE_FLIP_EVENT since we handle buffer release in finalizeAtomicFlip
-        uint32_t flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
+        // Commit atomically with NONBLOCK + PAGE_FLIP_EVENT:
+        // - NONBLOCK: returns immediately instead of blocking until vsync
+        // - PAGE_FLIP_EVENT: kernel sends per-CRTC events when flip completes
+        //   (handled by pageFlipHandler2 via processFlipEvents/waitForFlip)
+        // Do NOT use ALLOW_MODESET — it forces full modeset (link training,
+        // DPMS) which takes 2+ vsyncs. Only needed for initial modeset.
+        uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
         if (outputManager_->commitAtomic(request, flags)) {
-            // Success - finalize all surfaces (releases buffers immediately)
+            // Success — mark surfaces as flip-pending; buffer release is
+            // deferred to pageFlipHandler2 when flip event fires
             for (auto* surface : preparedSurfaces) {
-                surface->finalizeAtomicFlip();
+                surface->finalizeAtomicFlipAsync();
             }
         } else {
             LOG_WARNING << "DRMBackend: Atomic commit failed";

@@ -25,6 +25,7 @@
 
 #include "../video/FrameBuffer.h"
 #include "../video/FrameFormat.h"
+#include "../video/GPUTextureFrameBuffer.h"
 #include <string>
 #include <cstdint>
 
@@ -149,6 +150,44 @@ public:
     virtual bool readLatestFrame(FrameBuffer& buffer) {
         return readFrame(0, buffer);
     }
+
+    // --- Shared decoder cache ---
+    // Used by driver layers to store decoded frames for secondary layers to read.
+    // Cache stores frames by value inside InputSource (not raw pointers to external buffers).
+    // Implemented in the base class — all subclasses inherit cache support automatically.
+
+    bool hasCachedFrame() const { return hasCachedFrame_; }
+    const GPUTextureFrameBuffer* getCachedGPUTexture() const { return cachedOnGPU_ ? &cachedGPU_ : nullptr; }
+    const FrameBuffer* getCachedCPUFrame() const { return !cachedOnGPU_ ? &cachedCPU_ : nullptr; }
+    int64_t getCachedFrameNumber() const { return cachedFrameNumber_; }
+    bool isCachedOnGPU() const { return cachedOnGPU_; }
+
+    void setCachedFrame(int64_t frameNumber, const GPUTextureFrameBuffer& gpu) {
+        cachedGPU_ = gpu;               // non-owning copy (ownsTexture_=false via copy ctor)
+        cachedFrameNumber_ = frameNumber;
+        cachedOnGPU_ = true;
+        hasCachedFrame_ = true;
+    }
+
+    void setCachedFrame(int64_t frameNumber, const FrameBuffer& cpu) {
+        cachedCPU_.copyFrom(cpu);        // non-owning shallow copy (pointer + metadata, NOT pixels)
+        cachedFrameNumber_ = frameNumber;
+        cachedOnGPU_ = false;
+        hasCachedFrame_ = true;
+    }
+
+    void invalidateCache() {
+        hasCachedFrame_ = false;
+        cachedFrameNumber_ = -1;
+    }
+
+private:
+    // Shared decoder cache storage (only populated when this InputSource is used as a shared driver)
+    bool hasCachedFrame_ = false;
+    int64_t cachedFrameNumber_ = -1;
+    GPUTextureFrameBuffer cachedGPU_;
+    FrameBuffer cachedCPU_;
+    bool cachedOnGPU_ = false;
 };
 
 } // namespace videocomposer

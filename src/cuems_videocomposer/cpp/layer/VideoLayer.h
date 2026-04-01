@@ -52,9 +52,17 @@ public:
     // Layer management
     void setInputSource(std::unique_ptr<InputSource> input);
     void setSyncSource(std::unique_ptr<SyncSource> sync);
-    
+
     InputSource* getInputSource() const;
     SyncSource* getSyncSource() const;
+
+    // Update priority (decoupled from z-order): lower = updated earlier.
+    // Drivers get priority 0, shared secondaries get priority 1.
+    void setUpdatePriority(int p) { updatePriority_ = p; }
+    int getUpdatePriority() const { return updatePriority_; }
+
+    // Direct access to playback for shared-layer setup
+    LayerPlayback& playback() { return playback_; }
 
     // Properties access
     LayerProperties& properties();
@@ -115,9 +123,12 @@ private:
     // Composed components
     LayerPlayback playback_;
     LayerDisplay display_;
-    
+
     // Layer identification
     int layerId_;
+
+    // Update priority (decoupled from z-order for shared-decoder ordering)
+    int updatePriority_ = 0;
     
     // Backward compatibility: CPU frame buffer cache
     mutable FrameBuffer frameBufferCache_;

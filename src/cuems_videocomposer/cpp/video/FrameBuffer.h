@@ -61,10 +61,19 @@ public:
     // Check if buffer is valid
     bool isValid() const { return buffer_ != nullptr && size_ > 0; }
 
+    // Create a non-owning view of another buffer (copies pointer + metadata, NOT pixel data).
+    // Mirrors GPUTextureFrameBuffer's ownsTexture_ pattern. The viewed buffer must remain
+    // alive for the lifetime of this view.
+    void copyFrom(const FrameBuffer& source);
+
+    // Check if this buffer owns its memory
+    bool ownsBuffer() const { return ownsBuffer_; }
+
 private:
     uint8_t* buffer_;
     size_t size_;
     FrameInfo info_;
+    bool ownsBuffer_ = true;  // false for non-owning views created by copyFrom()
 };
 
 } // namespace videocomposer

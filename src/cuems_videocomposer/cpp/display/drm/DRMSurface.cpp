@@ -28,6 +28,7 @@
 #include "DRMOutputManager.h"
 #include "../../utils/Logger.h"
 
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <cerrno>
@@ -43,6 +44,9 @@
 #include <GL/gl.h>
 
 namespace videocomposer {
+
+// Static map for atomic flip: maps crtc_id → DRMSurface* for pageFlipHandler2
+std::map<uint32_t, DRMSurface*> DRMSurface::s_crtcSurfaceMap_;
 
 DRMSurface::DRMSurface(DRMOutputManager* outputManager, const std::string& outputName)
     : outputManager_(outputManager)
@@ -953,7 +957,7 @@ bool DRMSurface::schedulePageFlip() {
         if (-ret == EBUSY || -ret == ENOSPC) {
             static int failCount = 0;
             failCount++;
-            
+
             // If page flip consistently fails, switch to SetCrtc-only mode
             if (failCount >= 10 && !useSetCrtcOnly_) {
                 LOG_WARNING << "DRMSurface: Page flip consistently failing, switching to SetCrtc mode";
@@ -1039,48 +1043,61 @@ void DRMSurface::finalizeAtomicFlip() {
     if (!pendingBo_) {
         return;
     }
-    
-    // For atomic commits, we don't use page flip events (user_data is NULL)
-    // Instead, we release the previous buffer immediately since atomic commit
-    // guarantees all planes flip together on the same vsync
-    
-    // Release the OLD buffer (it was being displayed, now new one is)
+
+    // For synchronous atomic commits: release the previous buffer immediately
+    // since the commit blocked until vsync flip completed
     if (previousBo_ && gbmSurface_) {
         gbm_surface_release_buffer(gbmSurface_, previousBo_);
     }
-    
-    // Update buffer tracking
-    previousBo_ = currentBo_;  // Current becomes previous (still being displayed until next flip)
+
+    previousBo_ = currentBo_;
     currentBo_ = pendingBo_;
     pendingBo_ = nullptr;
     pendingFbId_ = 0;
-    
-    // Swap framebuffers
     std::swap(currentFb_, nextFb_);
-    
-    // Don't set flipPending_ for atomic - we handle buffer release ourselves
-    // This allows the next frame to proceed immediately
+}
+
+void DRMSurface::finalizeAtomicFlipAsync() {
+    if (!pendingBo_) {
+        return;
+    }
+
+    // For non-blocking atomic commits: don't release previousBo_ yet!
+    // The flip hasn't completed — buffer release happens in pageFlipHandler2
+    // when the kernel fires the page flip event.
+    previousBo_ = currentBo_;
+    currentBo_ = pendingBo_;
+    pendingBo_ = nullptr;
+    pendingFbId_ = 0;
+    std::swap(currentFb_, nextFb_);
+
+    // Mark flip pending so processFlipEvents/waitForFlip will handle it
+    flipPending_ = true;
+
+    // Register in the crtc → surface map for pageFlipHandler2
+    s_crtcSurfaceMap_[crtcId_] = this;
 }
 
 void DRMSurface::waitForFlip() {
     if (!flipPending_ || !outputManager_) {
         return;
     }
-    
+
     int fd = outputManager_->getFd();
-    
+
     // Wait for page flip event
     struct pollfd pfd = {};
     pfd.fd = fd;
     pfd.events = POLLIN;
-    
+
     drmEventContext evctx = {};
-    evctx.version = 2;
+    evctx.version = 3;
     evctx.page_flip_handler = pageFlipHandler;
-    
+    evctx.page_flip_handler2 = pageFlipHandler2;
+
     while (flipPending_) {
         int ret = poll(&pfd, 1, 1000);  // 1 second timeout
-        
+
         if (ret < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1088,17 +1105,17 @@ void DRMSurface::waitForFlip() {
             LOG_ERROR << "DRMSurface: Poll error: " << strerror(errno);
             break;
         }
-        
+
         if (ret == 0) {
             LOG_WARNING << "DRMSurface: Page flip timeout";
             break;
         }
-        
+
         if (pfd.revents & POLLIN) {
             drmHandleEvent(fd, &evctx);
         }
     }
-    
+
     flipPending_ = false;
 }
 
@@ -1119,6 +1136,35 @@ void DRMSurface::pageFlipHandler(int fd, unsigned int frame,
             surface->previousBo_ = nullptr;
         }
         
+        surface->flipPending_ = false;
+    }
+}
+
+void DRMSurface::pageFlipHandler2(int fd, unsigned int sequence,
+                                   unsigned int sec, unsigned int usec,
+                                   unsigned int crtc_id, void* data) {
+    (void)fd;
+
+    DRMSurface* surface = nullptr;
+
+    // For atomic flips: look up surface by CRTC ID
+    auto it = s_crtcSurfaceMap_.find(crtc_id);
+    if (it != s_crtcSurfaceMap_.end()) {
+        surface = it->second;
+        s_crtcSurfaceMap_.erase(it);
+    } else if (data) {
+        // For non-atomic flips (schedulePageFlip): data is the DRMSurface*
+        surface = static_cast<DRMSurface*>(data);
+    }
+
+    if (surface) {
+        surface->presentationTiming_.recordFlip(sec, usec, sequence);
+
+        if (surface->previousBo_ && surface->gbmSurface_) {
+            gbm_surface_release_buffer(surface->gbmSurface_, surface->previousBo_);
+            surface->previousBo_ = nullptr;
+        }
+
         surface->flipPending_ = false;
     }
 }
@@ -1146,12 +1192,13 @@ bool DRMSurface::processFlipEvents() {
     
     if (ret > 0 && (pfd.revents & POLLIN)) {
         drmEventContext evctx = {};
-        evctx.version = 2;
+        evctx.version = 3;
         evctx.page_flip_handler = pageFlipHandler;
+        evctx.page_flip_handler2 = pageFlipHandler2;
         drmHandleEvent(fd, &evctx);
         return !flipPending_;  // Return true if flip completed
     }
-    
+
     return false;
 }
 

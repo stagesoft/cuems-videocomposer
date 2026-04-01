@@ -89,9 +89,13 @@ private:
     std::vector<std::unique_ptr<VideoLayer>> layers_;
     int nextLayerId_;
     std::map<std::string, int> cueIdToLayerId_;  // Map UUID cue ID to internal layer ID
-    
+
     void sortLayersByZOrder();
     int getNextZOrder();
+
+    // Shared decoder support: when a decode driver layer is removed, promote
+    // a surviving secondary to become the new driver.
+    void promoteDecodeDriver(VideoLayer* removedLayer);
 };
 
 } // namespace videocomposer

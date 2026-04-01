@@ -108,6 +108,7 @@ bool OSCRemoteControl::initialize(int port) {
     
     // New file loading commands
     lo_server_add_method(oscServer_, "/videocomposer/layer/load", "ss", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/load_shared", "sss", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/unload", "s", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/file", "s", handleOSCMessage, userData_);
     

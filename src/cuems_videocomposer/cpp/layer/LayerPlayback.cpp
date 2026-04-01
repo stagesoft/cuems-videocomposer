@@ -59,12 +59,29 @@ LayerPlayback::~LayerPlayback() {
 void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
     pause();
     inputSource_ = std::move(input);
+    isSharedLayer_ = false;
+    isDecodeDriver_ = false;
+    currentFrame_ = -1;
+    lastSyncFrame_ = -1;
+    frameOnGPU_ = false;
+}
+
+void LayerPlayback::setInputSource(std::shared_ptr<InputSource> input, bool isShared, bool isDriver) {
+    pause();
+    inputSource_ = std::move(input);
+    isSharedLayer_ = isShared;
+    isDecodeDriver_ = isDriver;
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
     frameOnGPU_ = false;
 }
 
 void LayerPlayback::setSyncSource(std::unique_ptr<SyncSource> sync) {
+    syncSource_ = std::move(sync);
+    lastSyncFrame_ = -1;
+}
+
+void LayerPlayback::setSyncSource(std::shared_ptr<SyncSource> sync) {
     syncSource_ = std::move(sync);
     lastSyncFrame_ = -1;
 }
@@ -125,9 +142,21 @@ void LayerPlayback::updateFromSyncSource() {
 
     // NOTE: These were previously static variables shared across ALL layers (bug!)
     // Now they are instance variables, each layer has its own state
-    
+
     uint8_t rolling = 0;
-    int64_t syncFrame = syncSource_->pollFrame(&rolling);
+    int64_t syncFrame;
+    if (isSharedLayer_ && !isDecodeDriver_) {
+        // Secondary shared layer: read cached smoothed frame from driver's last pollFrame()
+        syncFrame = syncSource_->getCurrentFrame();
+        // Read cached rolling state from driver's last pollFrame()
+        auto* frcSync = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
+        if (frcSync) {
+            rolling = frcSync->getCurrentRolling() ? 1 : 0;
+        }
+    } else {
+        // Driver or non-shared layer: advance the cadence smoother
+        syncFrame = syncSource_->pollFrame(&rolling);
+    }
     
     // Debug: log frame and rolling state periodically
     debugCounter_++;
@@ -264,13 +293,12 @@ void LayerPlayback::updateFromSyncSource() {
         if (adjustedFrame != lastSyncFrame_ || fullFrameReceived) {
             vsyncCount_++;
             
-            if (fullFrameReceived) {
+            if (fullFrameReceived && !(isSharedLayer_ && !isDecodeDriver_)) {
                 // Full frame received - force a seek first, then load
-                // This ensures we jump to the exact position even if frame number is same
-                // Reset seek state to bypass codec optimizations (needed for H264 with indexing)
+                // (Shared secondaries skip: seeking would corrupt driver's decoder)
                 LOG_VERBOSE << "MTC: Full frame - forcing seek to frame " << adjustedFrame;
                 if (inputSource_) {
-                    inputSource_->resetSeekState();  // Force actual seek even if same frame
+                    inputSource_->resetSeekState();
                 }
                 if (inputSource_ && inputSource_->seek(adjustedFrame)) {
                     if (loadFrame(adjustedFrame)) {
@@ -296,6 +324,8 @@ void LayerPlayback::updateFromSyncSource() {
                 }
                 lastFrameChangeVsync_ = vsyncCount_;
                 lastVideoFrame_ = adjustedFrame;
+            } else if (isSharedLayer_ && !isDecodeDriver_) {
+                // Shared secondary: cache not ready yet — skip seek (would corrupt driver's decoder)
             } else {
                 // If load fails, try seeking first (helps with keyframe-based codecs)
                 LOG_WARNING << "Failed to load frame " << adjustedFrame << ", trying seek first";
@@ -333,12 +363,19 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
     if (!inputSource_ || !inputSource_->isReady()) {
         return false;
     }
+
+    // --- Secondary shared layer: read from driver cache ---
+    if (isSharedLayer_ && !isDecodeDriver_) {
+        return copyFromDriverCache(frameNumber);
+    }
+
     // Check if this is a live stream (NDI, V4L2, RTSP, etc.)
     if (inputSource_->isLiveStream()) {
         // Live streams: get latest available frame (ignore frameNumber)
         // The async buffer in LiveInputSource keeps frames ready
         if (inputSource_->readLatestFrame(cpuFrameBuffer_)) {
             frameOnGPU_ = false;
+            if (isDecodeDriver_) inputSource_->setCachedFrame(-1, cpuFrameBuffer_);
             return true;
         }
         return false;
@@ -351,6 +388,7 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         // HAP with direct texture upload: decode directly to compressed DXT GPU texture
         if (hapInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
             frameOnGPU_ = true;
+            if (isDecodeDriver_) inputSource_->setCachedFrame(frameNumber, gpuFrameBuffer_);
             return true;
         }
         // If direct upload fails, fall through to FFmpeg fallback (handled in readFrameToTexture)
@@ -360,21 +398,22 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         // HAP without direct upload: decode to CPU buffer as RGBA (FFmpeg fallback)
         if (hapInput->readFrame(frameNumber, cpuFrameBuffer_)) {
             frameOnGPU_ = false;
+            if (isDecodeDriver_) inputSource_->setCachedFrame(frameNumber, cpuFrameBuffer_);
             return true;
         }
         return false;
 #endif
     }
-    
+
     bool success = false;
     static bool loggedBackend = false;  // Log decode backend once
-    
+
     // Check if this is VideoFileInput with hardware decoding
     VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(inputSource_.get());
     if (videoInput) {
         // Check if hardware decoding is available and should be used
         InputSource::DecodeBackend backend = videoInput->getOptimalBackend();
-        
+
         // Log the decode backend once at startup
         if (!loggedBackend) {
             if (backend == InputSource::DecodeBackend::GPU_HARDWARE) {
@@ -384,7 +423,7 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
             }
             loggedBackend = true;
         }
-        
+
         if (backend == InputSource::DecodeBackend::GPU_HARDWARE) {
             // Hardware decoding: decode directly to GPU texture
             if (videoInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
@@ -395,7 +434,7 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
                 LOG_WARNING << "Hardware decoding failed for frame " << frameNumber << ", falling back to software";
             }
         }
-        
+
         if (!success) {
             // Software decoding: use CPU frame buffer
             if (videoInput->readFrame(frameNumber, cpuFrameBuffer_)) {
@@ -410,8 +449,40 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
             success = true;
         }
     }
-    
+
+    // Populate cache for shared secondaries (all non-HAP, non-live paths)
+    if (success && isDecodeDriver_) {
+        if (frameOnGPU_)
+            inputSource_->setCachedFrame(frameNumber, gpuFrameBuffer_);
+        else
+            inputSource_->setCachedFrame(frameNumber, cpuFrameBuffer_);
+    }
+
     return success;
+}
+
+bool LayerPlayback::copyFromDriverCache(int64_t frameNumber) {
+    if (!inputSource_->hasCachedFrame()) return false;  // Driver hasn't decoded anything yet
+
+    int64_t cachedNum = inputSource_->getCachedFrameNumber();
+    // For live sources cachedNum == -1 (no meaningful frame number) — don't warn
+    if (cachedNum >= 0 && cachedNum != frameNumber) {
+        LOG_DEBUG << "Shared layer frame mismatch: requested " << frameNumber
+                  << ", driver cached " << cachedNum << " (timeOffset divergence?)";
+    }
+
+    if (inputSource_->isCachedOnGPU()) {
+        auto* cached = inputSource_->getCachedGPUTexture();
+        if (!cached) return false;
+        gpuFrameBuffer_ = *cached;  // non-owning copy (ownsTexture_=false via copy ctor)
+        frameOnGPU_ = true;
+    } else {
+        auto* cached = inputSource_->getCachedCPUFrame();
+        if (!cached) return false;
+        cpuFrameBuffer_.copyFrom(*cached);  // non-owning shallow copy (pointer + metadata, NOT pixels)
+        frameOnGPU_ = false;
+    }
+    return true;
 }
 
 bool LayerPlayback::getFrameBuffer(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const {

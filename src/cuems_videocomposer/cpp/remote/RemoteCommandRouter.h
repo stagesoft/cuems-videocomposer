@@ -120,7 +120,8 @@ private:
     
     // File loading/unloading handlers
     bool handleLayerLoad(const std::vector<std::string>& args);  // /layer/load s s (filepath, cueId)
-    bool handleLayerFile(VideoLayer* layer, const std::vector<std::string>& args);  // /layer/<cueId>/file s
+    bool handleLayerLoadShared(const std::vector<std::string>& args);  // /layer/load_shared s s s (filepath, layerId, driverLayerId)
+    bool handleLayerFile(VideoLayer* layer, const std::vector<std::string>& args);  // /layer/<cueId>/file s [DEBUG]
     bool handleLayerUnload(const std::vector<std::string>& args);  // /layer/unload s (cueId)
     
     // Loop and auto-unload handlers

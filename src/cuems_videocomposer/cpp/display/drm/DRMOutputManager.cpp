@@ -33,6 +33,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 
 // For EDID parsing
@@ -966,7 +967,7 @@ void DRMOutputManager::setResolutionMode(ResolutionMode mode) {
 
 bool DRMOutputManager::applyResolutionMode() {
     bool allSuccess = true;
-    
+
     for (size_t i = 0; i < connectors_.size(); ++i) {
         if (connectors_[i].info.connected) {
             if (!applyResolutionModeToOutput(static_cast<int>(i))) {
@@ -974,9 +975,12 @@ bool DRMOutputManager::applyResolutionMode() {
             }
         }
     }
-    
+
+    // Harmonize refresh rates once after all outputs are configured
+    harmonizeRefreshRates();
+
     // No need to rebuild - getOutputs() builds from connectors_ dynamically
-    
+
     return allSuccess;
 }
 
@@ -1112,6 +1116,121 @@ void DRMOutputManager::restoreOriginalModes() {
                           &conn.savedCrtc->mode);
         }
     }
+}
+
+void DRMOutputManager::harmonizeRefreshRates() {
+    // Collect refresh rates from all connected outputs that have a selected mode
+    std::vector<size_t> connectedIndices;
+    for (size_t i = 0; i < connectors_.size(); ++i) {
+        if (connectors_[i].info.connected && connectors_[i].hasCurrentMode) {
+            connectedIndices.push_back(i);
+        }
+    }
+
+    if (connectedIndices.size() < 2) {
+        return;  // Nothing to harmonize with 0-1 outputs
+    }
+
+    // Check if all rates already match (within 0.5Hz tolerance)
+    double firstRate = connectors_[connectedIndices[0]].info.refreshRate;
+    bool allMatch = true;
+    for (size_t idx : connectedIndices) {
+        if (std::abs(connectors_[idx].info.refreshRate - firstRate) > 0.5) {
+            allMatch = false;
+            break;
+        }
+    }
+    if (allMatch) {
+        LOG_VERBOSE << "DRMOutputManager: All outputs already at " << firstRate << "Hz";
+        return;
+    }
+
+    // Find the highest refresh rate that ALL outputs support at their selected resolution
+    double bestCommonRate = 0.0;
+    std::vector<const drmModeModeInfo*> bestCommonModes(connectedIndices.size(), nullptr);
+
+    // For each connected output, build a list of available refresh rates at the selected resolution
+    // Then find the highest rate that's available on ALL outputs
+    // Start by collecting all rates from the first output
+    auto& firstConn = connectors_[connectedIndices[0]];
+    for (int m = 0; m < firstConn.connector->count_modes; ++m) {
+        const drmModeModeInfo* mode = &firstConn.connector->modes[m];
+        if (mode->hdisplay != firstConn.currentMode.hdisplay ||
+            mode->vdisplay != firstConn.currentMode.vdisplay) {
+            continue;
+        }
+        double rate = (mode->htotal && mode->vtotal)
+            ? (double)mode->clock * 1000.0 / ((double)mode->htotal * (double)mode->vtotal)
+            : 0.0;
+        if (rate <= 0.0) continue;
+
+        // Check if all other outputs support this rate at their resolution
+        bool allSupport = true;
+        std::vector<const drmModeModeInfo*> matchingModes(connectedIndices.size(), nullptr);
+        matchingModes[0] = mode;
+
+        for (size_t j = 1; j < connectedIndices.size(); ++j) {
+            auto& conn = connectors_[connectedIndices[j]];
+            const drmModeModeInfo* match = nullptr;
+
+            for (int k = 0; k < conn.connector->count_modes; ++k) {
+                const drmModeModeInfo* m2 = &conn.connector->modes[k];
+                if (m2->hdisplay != conn.currentMode.hdisplay ||
+                    m2->vdisplay != conn.currentMode.vdisplay) {
+                    continue;
+                }
+                double r2 = (m2->htotal && m2->vtotal)
+                    ? (double)m2->clock * 1000.0 / ((double)m2->htotal * (double)m2->vtotal)
+                    : 0.0;
+                if (std::abs(r2 - rate) <= 0.5) {
+                    match = m2;
+                    break;
+                }
+            }
+            if (!match) {
+                allSupport = false;
+                break;
+            }
+            matchingModes[j] = match;
+        }
+
+        if (allSupport && rate > bestCommonRate) {
+            bestCommonRate = rate;
+            for (size_t j = 0; j < connectedIndices.size(); ++j) {
+                bestCommonModes[j] = matchingModes[j];
+            }
+        }
+    }
+
+    if (bestCommonRate <= 0.0) {
+        // No common rate found — log warning with per-output actual rates
+        std::string rateInfo;
+        for (size_t idx : connectedIndices) {
+            if (!rateInfo.empty()) rateInfo += ", ";
+            rateInfo += connectors_[idx].info.name + "=" +
+                        std::to_string(connectors_[idx].info.refreshRate) + "Hz";
+        }
+        LOG_WARNING << "DRMOutputManager: Cannot harmonize refresh rates, no common rate found. "
+                    << "Per-output rates: " << rateInfo;
+        return;
+    }
+
+    // Apply the common rate to each output
+    for (size_t j = 0; j < connectedIndices.size(); ++j) {
+        size_t idx = connectedIndices[j];
+        auto& conn = connectors_[idx];
+        double oldRate = conn.info.refreshRate;
+
+        conn.currentMode = *bestCommonModes[j];
+        conn.info.refreshRate = bestCommonRate;
+
+        if (std::abs(oldRate - bestCommonRate) > 0.5) {
+            LOG_INFO << "DRMOutputManager: " << conn.info.name
+                     << " refresh rate harmonized: " << oldRate << "Hz -> " << bestCommonRate << "Hz";
+        }
+    }
+
+    LOG_INFO << "DRMOutputManager: All outputs harmonized to " << bestCommonRate << "Hz";
 }
 
 uint32_t DRMOutputManager::getCrtcId(int index) const {

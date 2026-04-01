@@ -21,6 +21,7 @@
  */
 
 #include "LayerManager.h"
+#include "../utils/Logger.h"
 #include <algorithm>
 #include <map>
 
@@ -59,8 +60,11 @@ bool LayerManager::removeLayer(int layerId) {
         [layerId](const std::unique_ptr<VideoLayer>& layer) {
             return layer->getLayerId() == layerId;
         });
-    
+
     if (it != layers_.end()) {
+        // Promote a secondary to decode driver before removing (if this was the driver)
+        promoteDecodeDriver(it->get());
+
         // Remove from cueIdToLayerId_ map if present
         for (auto mapIt = cueIdToLayerId_.begin(); mapIt != cueIdToLayerId_.end(); ++mapIt) {
             if (mapIt->second == layerId) {
@@ -71,7 +75,7 @@ bool LayerManager::removeLayer(int layerId) {
         layers_.erase(it);
         return true;
     }
-    
+
     return false;
 }
 
@@ -124,6 +128,10 @@ std::vector<const VideoLayer*> LayerManager::getLayers() const {
 }
 
 void LayerManager::updateAll() {
+    // INVARIANT: updateAll() must complete for ALL layers before render() begins.
+    // Shared-layer texture safety depends on this. If parallelizing decode,
+    // ensure all decode jobs complete (waitAll) before returning from updateAll().
+
     // TODO: PERFORMANCE - Layer-parallel HAP decoding
     // Currently layers are updated sequentially, which means HAP decode happens
     // one layer at a time. For 10+ HAP layers, this takes 10-12ms (30-36% of frame budget).
@@ -145,38 +153,51 @@ void LayerManager::updateAll() {
     //
     // Note: GPU texture uploads must remain on main thread (OpenGL context bound).
     // Only the CPU decode (Snappy decompression) should be parallelized.
-    
-    // Collect layers to remove (auto-unload)
-    std::vector<int> layersToRemove;
-    
+    // INVARIANT: If parallelizing, ensure all decode jobs complete before returning.
+
+    // Build update-order view sorted by updatePriority_ (drivers before secondaries).
+    // This is decoupled from z-order: layers_ remains sorted by z-order for rendering.
+    std::vector<VideoLayer*> updateOrder;
+    updateOrder.reserve(layers_.size());
     for (auto& layer : layers_) {
         if (layer && layer->isReady()) {
-            layer->update();
-            
-            // Check for auto-unload: if playback ended and autoUnload is enabled
-            auto& props = layer->properties();
-            if (props.autoUnload && layer->getInputSource()) {
-                // Check if playback has ended (no loop, at end of file)
-                FrameInfo info = layer->getFrameInfo();
-                int64_t currentFrame = layer->getCurrentFrame();
-                int64_t totalFrames = info.totalFrames;
-                
-                // Playback has ended if:
-                // 1. Current frame is at or beyond total frames
-                // 2. No wraparound (full file loop) is enabled, OR wraparound is enabled but loop count reached
-                // 3. No region loop is enabled
-                bool wraparoundActive = layer->getWraparound() && 
-                                       (props.fullFileLoopCount == -1 || props.currentFullFileLoopCount > 0);
-                if (currentFrame >= totalFrames && 
-                    !wraparoundActive && 
-                    !props.loopRegion.enabled) {
-                    // Mark layer for removal
-                    layersToRemove.push_back(layer->getLayerId());
-                }
+            updateOrder.push_back(layer.get());
+        }
+    }
+    std::stable_sort(updateOrder.begin(), updateOrder.end(),
+        [](const VideoLayer* a, const VideoLayer* b) {
+            return a->getUpdatePriority() < b->getUpdatePriority();
+        });
+
+    // Collect layers to remove (auto-unload)
+    std::vector<int> layersToRemove;
+
+    for (auto* layer : updateOrder) {
+        layer->update();
+
+        // Check for auto-unload: if playback ended and autoUnload is enabled
+        auto& props = layer->properties();
+        if (props.autoUnload && layer->getInputSource()) {
+            // Check if playback has ended (no loop, at end of file)
+            FrameInfo info = layer->getFrameInfo();
+            int64_t currentFrame = layer->getCurrentFrame();
+            int64_t totalFrames = info.totalFrames;
+
+            // Playback has ended if:
+            // 1. Current frame is at or beyond total frames
+            // 2. No wraparound (full file loop) is enabled, OR wraparound is enabled but loop count reached
+            // 3. No region loop is enabled
+            bool wraparoundActive = layer->getWraparound() &&
+                                   (props.fullFileLoopCount == -1 || props.currentFullFileLoopCount > 0);
+            if (currentFrame >= totalFrames &&
+                !wraparoundActive &&
+                !props.loopRegion.enabled) {
+                // Mark layer for removal
+                layersToRemove.push_back(layer->getLayerId());
             }
         }
     }
-    
+
     // Remove layers marked for auto-unload
     for (int layerId : layersToRemove) {
         removeLayer(layerId);
@@ -378,6 +399,32 @@ std::vector<const VideoLayer*> LayerManager::getLayersSortedByZOrder() const {
         });
     
     return result;
+}
+
+void LayerManager::promoteDecodeDriver(VideoLayer* removedLayer) {
+    if (!removedLayer) return;
+
+    // Only act if the removed layer was a decode driver
+    if (!removedLayer->playback().isDecodeDriver()) return;
+
+    InputSource* sharedInput = removedLayer->getInputSource();
+    if (!sharedInput) return;
+
+    // Invalidate cache — prevents secondaries from reading stale non-owning views
+    // that point to the removed driver's freed frame buffers
+    sharedInput->invalidateCache();
+
+    // Find a surviving layer sharing the same InputSource and promote it
+    for (auto& layer : layers_) {
+        if (!layer || layer.get() == removedLayer) continue;
+        if (layer->playback().getSharedInputSource().get() == sharedInput) {
+            layer->playback().setDecodeDriver(true);
+            layer->setUpdatePriority(0);
+            LOG_INFO << "Promoted layer " << layer->getLayerId() << " to decode driver";
+            return;
+        }
+    }
+    // No surviving shared layers — InputSource will be freed by refcount when last shared_ptr is reset
 }
 
 bool LayerManager::addLayerWithId(const std::string& cueId, std::unique_ptr<VideoLayer> layer) {

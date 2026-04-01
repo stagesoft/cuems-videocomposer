@@ -45,6 +45,7 @@
 #include <EGL/eglext.h>
 #include <xf86drmMode.h>
 #include <vector>
+#include <map>
 #include <cstdint>
 
 namespace videocomposer {
@@ -159,10 +160,16 @@ public:
     uint32_t prepareAtomicFlip();
     
     /**
-     * Finalize atomic flip after successful drmModeAtomicCommit
-     * Updates internal state (currentBo_, previousBo_, etc.)
+     * Finalize atomic flip after successful synchronous drmModeAtomicCommit
+     * Releases buffers immediately (safe because commit blocked until vsync)
      */
     void finalizeAtomicFlip();
+
+    /**
+     * Finalize atomic flip after successful non-blocking drmModeAtomicCommit
+     * Sets flipPending and defers buffer release to pageFlipHandler
+     */
+    void finalizeAtomicFlipAsync();
     
     /**
      * Cancel atomic flip if prepare succeeded but commit failed
@@ -269,10 +276,18 @@ private:
     // Destroy framebuffer
     void destroyFramebuffer(Framebuffer& fb);
     
-    // Page flip handler callback
-    static void pageFlipHandler(int fd, unsigned int frame, 
-                                unsigned int sec, unsigned int usec, 
+    // Page flip handler callback (version 2 — used for non-atomic per-surface flips)
+    static void pageFlipHandler(int fd, unsigned int frame,
+                                unsigned int sec, unsigned int usec,
                                 void* data);
+
+    // Page flip handler2 callback (version 3 — used for atomic flips, includes crtc_id)
+    static void pageFlipHandler2(int fd, unsigned int sequence,
+                                 unsigned int sec, unsigned int usec,
+                                 unsigned int crtc_id, void* data);
+
+    // Map from crtc_id to DRMSurface* for atomic flip events
+    static std::map<uint32_t, DRMSurface*> s_crtcSurfaceMap_;
     
     // ===== Members =====
     

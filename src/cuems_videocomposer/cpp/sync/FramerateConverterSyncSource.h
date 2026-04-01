@@ -76,11 +76,18 @@ public:
      * Check if a full frame SYSEX was just received - delegates to wrapped sync source
      */
     bool wasFullFrameReceived() override;
-    
+
     /**
      * Delegate to wrapped sync source's getTimeMs()
      */
     long getTimeMs() const override;
+
+    /**
+     * Get the rolling state from the last pollFrame() call.
+     * Used by shared secondary layers to read the driver's rolling state
+     * without calling pollFrame() themselves.
+     */
+    bool getCurrentRolling() const { return lastRolling_; }
 
 private:
     SyncSource* wrappedSyncSource_;  // Non-owning reference to sync source
@@ -91,6 +98,10 @@ private:
     int       cadenceVsyncCount_    =  0;
     double    cadenceVsyncPeriodMs_ = 16.667;  // initial guess
     long long cadenceLastCallUs_    =  0;
+
+    // Cached results from last pollFrame() — used by shared secondary layers
+    int64_t lastSmoothedFrame_ = -1;  // last frame returned by pollFrame()
+    bool    lastRolling_ = false;     // last rolling state from pollFrame()
 };
 
 } // namespace videocomposer

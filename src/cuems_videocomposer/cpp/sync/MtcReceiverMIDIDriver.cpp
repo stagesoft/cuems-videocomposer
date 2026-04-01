@@ -144,11 +144,11 @@ bool MtcReceiverMIDIDriver::isConnected() const {
 
 int64_t MtcReceiverMIDIDriver::pollFrame() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     if (!mtcReceiver_) {
         return -1;
     }
-    
+
     // Check if a full frame was just received
     bool fullFrameReceived = MtcReceiver::wasLastUpdateFullFrame;
     
@@ -231,7 +231,6 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     
     // Update last reported frame
     lastReportedFrame = frame;
-    
     // Return frame even if not "running" - we have valid MTC data
     // The rolling state will be determined separately
     

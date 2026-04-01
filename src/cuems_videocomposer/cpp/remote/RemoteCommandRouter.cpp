@@ -155,6 +155,7 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerLayerCommand("panorama", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerPanorama(layer, args);
     });
+    // Debug-only: hot-swap file on an existing layer. Not used by engine cue lifecycle.
     registerLayerCommand("file", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerFile(layer, args);
     });
@@ -381,10 +382,13 @@ bool RemoteCommandRouter::routeCommand(const std::string& path, const std::vecto
     if (cleanPath.find("layer/") == 0) {
         std::string remaining = cleanPath.substr(6); // Remove "layer/"
         
-        // Check for special commands: load, unload
+        // Check for special commands: load, load_shared, unload
         if (remaining == "load") {
             // /videocomposer/layer/load s s (filepath, cueId)
             return handleLayerLoad(args);
+        } else if (remaining == "load_shared") {
+            // /videocomposer/layer/load_shared s s s (filepath, layerId, driverLayerId)
+            return handleLayerLoadShared(args);
         } else if (remaining == "unload") {
             // /videocomposer/layer/unload s (cueId)
             return handleLayerUnload(args);
@@ -1082,20 +1086,39 @@ bool RemoteCommandRouter::handleLayerLoad(const std::vector<std::string>& args) 
     return app_->createLayerWithFile(cueId, filepath);
 }
 
+bool RemoteCommandRouter::handleLayerLoadShared(const std::vector<std::string>& args) {
+    if (!app_ || args.size() < 3) {
+        return false;
+    }
+
+    std::string filepath = args[0];
+    std::string layerId = args[1];
+    std::string driverLayerId = args[2];
+
+    return app_->createSharedLayer(layerId, driverLayerId, filepath);
+}
+
 bool RemoteCommandRouter::handleLayerFile(VideoLayer* layer, const std::vector<std::string>& args) {
     if (!layer || !app_ || args.empty()) {
         return false;
     }
-    
+
+    // NOTE: /file is a debug-only command for manual testing. Not part of normal
+    // cue lifecycle (arm→load→run→unload). Engine never sends this.
+    if (layer->playback().isSharedLayer()) {
+        LOG_WARNING << "Cannot change file on shared layer — unload and reload the cue instead";
+        return false;
+    }
+
     std::string filepath = args[0];
-    
+
     // Get cue ID from layer manager
     std::string cueId = layerManager_->getCueIdFromLayer(layer);
     if (cueId.empty()) {
         LOG_WARNING << "Could not find cue ID for layer";
         return false;
     }
-    
+
     return app_->loadFileIntoLayer(cueId, filepath);
 }
 

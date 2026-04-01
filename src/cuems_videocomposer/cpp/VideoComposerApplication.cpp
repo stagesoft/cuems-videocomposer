@@ -383,7 +383,7 @@ int VideoComposerApplication::run() {
     // - Rendering happens every vsync for tear-free smooth output
     
     LOG_INFO << "Entering video update loop @ display refresh rate (vsync-driven)";
-    
+
     while (running_ && shouldContinue()) {
         processEvents();
 
@@ -871,6 +871,71 @@ bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, con
     return true;
 }
 
+bool VideoComposerApplication::createSharedLayer(const std::string& layerId, const std::string& driverLayerId, const std::string& filepath) {
+    // Look up the driver layer
+    VideoLayer* driverLayer = layerManager_->getLayerByCueId(driverLayerId);
+
+    // Driver not ready (async load still in flight): create empty placeholder layer
+    // and register as pending. Will be set up when driver's onAsyncLoadComplete fires.
+    if (!driverLayer || !driverLayer->playback().hasInputSource()) {
+        // Reuse existing layer if present (from previous arm cycle's unload — layer kept but InputSource cleared)
+        if (!layerManager_->getLayerByCueId(layerId)) {
+            auto emptyLayer = createEmptyLayer(layerId);
+            if (emptyLayer) {
+                layerManager_->addLayerWithId(layerId, std::move(emptyLayer));
+            }
+        }
+        pendingSharedLayers_[driverLayerId].push_back({layerId, filepath});
+        LOG_INFO << "Driver " << driverLayerId << " not ready, deferred shared setup for " << layerId;
+        return true;
+    }
+
+    // Get shared InputSource and SyncSource from the driver
+    auto sharedInput = driverLayer->playback().getSharedInputSource();
+    auto sharedSync = driverLayer->playback().getSharedSyncSource();
+
+    // Mark the driver as such (first load_shared call marks it).
+    // Do NOT call setInputSource() — it resets playback state (pause, currentFrame=-1).
+    // The driver already has the correct InputSource from the normal /layer/load path.
+    if (!driverLayer->playback().isDecodeDriver()) {
+        driverLayer->playback().setDecodeDriver(true);
+        driverLayer->setUpdatePriority(0);
+    }
+
+    // Reuse existing layer or create new one
+    VideoLayer* secondary = layerManager_->getLayerByCueId(layerId);
+    if (!secondary) {
+        auto newLayer = createEmptyLayer(layerId);
+        if (!newLayer) {
+            LOG_ERROR << "Failed to create empty shared layer";
+            return false;
+        }
+        layerManager_->addLayerWithId(layerId, std::move(newLayer));
+        secondary = layerManager_->getLayerByCueId(layerId);
+    }
+
+    // Set shared InputSource (isShared=true, isDriver=false)
+    secondary->playback().setInputSource(sharedInput, true, false);
+
+    // Share the same SyncSource (FramerateConverterSyncSource)
+    if (sharedSync) {
+        secondary->playback().setSyncSource(sharedSync);
+    }
+
+    // Secondary gets updatePriority 1 (driver = 0) to ensure driver updates first
+    secondary->setUpdatePriority(1);
+
+    // Set layer properties from shared input source
+    if (secondary->isReady()) {
+        FrameInfo info = secondary->getFrameInfo();
+        secondary->properties().width = info.width;
+        secondary->properties().height = info.height;
+    }
+
+    LOG_INFO << "Created shared layer " << layerId << " (driver: " << driverLayerId << ")";
+    return true;
+}
+
 bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const std::string& filepath) {
     // Get or create layer
     VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
@@ -915,6 +980,9 @@ void VideoComposerApplication::resetAll() {
         asyncVideoLoader_->cancelAll();
     }
 
+    // Clear pending shared layer registrations
+    pendingSharedLayers_.clear();
+
     // Remove all layers (unique_ptr destructors close files, stop decode queues, free textures)
     if (layerManager_) {
         layerManager_->removeAllLayers();
@@ -925,19 +993,16 @@ void VideoComposerApplication::resetAll() {
 }
 
 bool VideoComposerApplication::unloadFileFromLayer(const std::string& cueId) {
-    VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
-    if (!layer) {
+    // Clear any pending secondaries waiting for this driver
+    pendingSharedLayers_.erase(cueId);
+
+    // Fully remove the layer (triggers promoteDecodeDriver if this was a shared driver)
+    if (!layerManager_->removeLayerByCueId(cueId)) {
         LOG_WARNING << "Layer not found for cue ID: " << cueId;
         return false;
     }
-    
-    // Clear input source (unloads file but keeps layer)
-    layer->setInputSource(nullptr);
-    
-    // Clear sync source
-    layer->setSyncSource(nullptr);
-    
-    LOG_INFO << "Unloaded file from layer (cue ID: " << cueId << ")";
+
+    LOG_INFO << "Removed layer (cue ID: " << cueId << ")";
     return true;
 }
 
@@ -958,20 +1023,56 @@ void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, con
                                                    std::unique_ptr<InputSource> inputSource, bool success) {
     if (!success || !inputSource) {
         LOG_ERROR << "Async load failed for: " << filepath << " (cue ID: " << cueId << ")";
+        pendingSharedLayers_.erase(cueId);  // cleanup any pending secondaries
         return;
     }
-    
+
     // Get the layer for this cue ID
     VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
     if (!layer) {
         LOG_WARNING << "Layer no longer exists for cue ID: " << cueId;
+        pendingSharedLayers_.erase(cueId);
         return;
     }
-    
+
+    // If this layer is already a decode driver (deferred setup already ran from a
+    // previous async load), don't replace its InputSource.
+    if (layer->playback().isDecodeDriver()) {
+        LOG_INFO << "Async load complete but layer " << cueId
+                 << " is already decode driver — discarding stale InputSource";
+        return;
+    }
+
     // Setup layer with the loaded input source
     setupLayerWithInputSource(layer, std::move(inputSource));
-    
     LOG_INFO << "Async load complete: " << filepath << " (cue ID: " << cueId << ")";
+
+    // Resolve pending shared layers waiting for this driver
+    auto it = pendingSharedLayers_.find(cueId);
+    if (it != pendingSharedLayers_.end()) {
+        auto sharedInput = layer->playback().getSharedInputSource();
+        auto sharedSync = layer->playback().getSharedSyncSource();
+        layer->playback().setDecodeDriver(true);
+        layer->setUpdatePriority(0);
+
+        for (auto& pending : it->second) {
+            VideoLayer* secondary = layerManager_->getLayerByCueId(pending.layerId);
+            if (!secondary) {
+                LOG_WARNING << "Pending shared layer " << pending.layerId << " no longer exists — skipping";
+                continue;
+            }
+            secondary->playback().setInputSource(sharedInput, true, false);
+            if (sharedSync) secondary->playback().setSyncSource(sharedSync);
+            secondary->setUpdatePriority(1);
+            if (secondary->isReady()) {
+                FrameInfo info = secondary->getFrameInfo();
+                secondary->properties().width = info.width;
+                secondary->properties().height = info.height;
+            }
+            LOG_INFO << "Deferred shared setup complete: " << pending.layerId << " (driver: " << cueId << ")";
+        }
+        pendingSharedLayers_.erase(it);
+    }
 }
 
 } // namespace videocomposer

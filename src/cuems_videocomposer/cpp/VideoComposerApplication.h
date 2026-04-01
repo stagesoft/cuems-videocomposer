@@ -23,8 +23,10 @@
 #ifndef VIDEOCOMPOSER_APPLICATION_H
 #define VIDEOCOMPOSER_APPLICATION_H
 
+#include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace videocomposer {
 
@@ -91,6 +93,7 @@ public:
 
     // File loading methods (called from RemoteCommandRouter)
     bool createLayerWithFile(const std::string& cueId, const std::string& filepath);
+    bool createSharedLayer(const std::string& layerId, const std::string& driverLayerId, const std::string& filepath);
     bool loadFileIntoLayer(const std::string& cueId, const std::string& filepath);
     bool unloadFileFromLayer(const std::string& cueId);
     
@@ -143,6 +146,14 @@ private:
     
     // Async video loader
     std::unique_ptr<AsyncVideoLoader> asyncVideoLoader_;
+
+    // Pending shared layers waiting for their driver's async load to complete.
+    // Key: driver cueId, Value: list of {secondaryCueId, filepath}
+    struct PendingSharedLayer {
+        std::string layerId;
+        std::string filepath;  // kept for logging/diagnostics
+    };
+    std::map<std::string, std::vector<PendingSharedLayer>> pendingSharedLayers_;
 
     // Application state
     bool running_;

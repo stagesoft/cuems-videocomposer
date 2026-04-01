@@ -140,10 +140,18 @@ int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
         }
     }
 
+    // Cache results for shared secondary layers
+    lastSmoothedFrame_ = syncFrame;
+    if (rolling) lastRolling_ = (*rolling != 0);
+
     return syncFrame;
 }
 
 int64_t FramerateConverterSyncSource::getCurrentFrame() const {
+    if (lastSmoothedFrame_ >= 0) {
+        return lastSmoothedFrame_;  // return smoothed frame after first poll
+    }
+    // Cold-start: no pollFrame() yet — fall through to raw MTC frame
     if (!wrappedSyncSource_) {
         return -1;
     }

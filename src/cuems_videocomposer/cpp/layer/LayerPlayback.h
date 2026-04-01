@@ -49,12 +49,24 @@ public:
     LayerPlayback();
     ~LayerPlayback();
 
-    // Set input and sync sources
+    // Set input and sync sources (non-shared — converts to shared_ptr internally)
     void setInputSource(std::unique_ptr<InputSource> input);
     void setSyncSource(std::unique_ptr<SyncSource> sync);
-    
+
+    // Set input and sync sources (shared — for shared decoder layers)
+    void setInputSource(std::shared_ptr<InputSource> input, bool isShared, bool isDriver);
+    void setSyncSource(std::shared_ptr<SyncSource> sync);
+
     InputSource* getInputSource() const { return inputSource_.get(); }
     SyncSource* getSyncSource() const { return syncSource_.get(); }
+    std::shared_ptr<InputSource> getSharedInputSource() const { return inputSource_; }
+    std::shared_ptr<SyncSource> getSharedSyncSource() const { return syncSource_; }
+    bool hasInputSource() const { return inputSource_ != nullptr; }
+
+    // Shared decoder flags
+    bool isSharedLayer() const { return isSharedLayer_; }
+    bool isDecodeDriver() const { return isDecodeDriver_; }
+    void setDecodeDriver(bool v) { isDecodeDriver_ = v; }
 
     // Playback control
     bool play();
@@ -104,8 +116,12 @@ public:
     bool checkPlaybackEnd() const;
 
 private:
-    std::unique_ptr<InputSource> inputSource_;
-    std::unique_ptr<SyncSource> syncSource_;
+    std::shared_ptr<InputSource> inputSource_;
+    std::shared_ptr<SyncSource> syncSource_;
+
+    // Shared decoder flags (NOT derived from use_count — explicit)
+    bool isSharedLayer_ = false;   // true when sharing an InputSource with other layers
+    bool isDecodeDriver_ = false;  // true when this layer drives decode (calls readFrame/readFrameToTexture)
     
     // Playback state
     bool playing_;
@@ -135,6 +151,7 @@ private:
     // Internal methods
     void updateFromSyncSource();
     bool loadFrame(int64_t frameNumber);
+    bool copyFromDriverCache(int64_t frameNumber);  // For shared secondary layers
 };
 
 } // namespace videocomposer
