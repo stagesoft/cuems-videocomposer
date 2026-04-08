@@ -75,6 +75,7 @@ bool OSCRemoteControl::initialize(int port) {
 
     // Register specific methods for compatibility with existing OSC interface
     lo_server_add_method(oscServer_, "/videocomposer/quit", "", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/reset", "", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/load", "s", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/seek", "i", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/fps", "f", handleOSCMessage, userData_);
