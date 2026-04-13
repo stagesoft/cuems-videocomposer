@@ -73,13 +73,16 @@ bool MtcReceiverMIDIDriver::open(const std::string& portId) {
             // Create mtcreceiver with custom client name for aconnect -l
             // Use "cuems-videocomposer" to match ALSA Sequencer naming
             mtcReceiver_ = std::make_unique<MtcReceiver>(
-                RtMidi::LINUX_ALSA,
+                MTCRECV_DEFAULT_API,
                 "cuems-videocomposer",
                 100  // queueSizeLimit
             );
-            
+
+            // Enable network-tolerant MTC timeouts (for rtpmidid / MTC over network)
+            mtcReceiver_->setNetworkMode(true);
+
             errorFlag = false;
-            
+
             // mtcreceiver constructor opens port 0 automatically
             printf("MTC: mtcreceiver initialized successfully, port opened\n");
             printf("MTC: Note: RtMidi ports may not appear in 'aconnect' - use 'aconnect -l' to see ALSA Sequencer ports\n");
