@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+
 """Generate splash_png.h from resources/splash.png (same format as xxd -i)."""
 import sys
 import os

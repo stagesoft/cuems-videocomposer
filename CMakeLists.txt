@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+
 cmake_minimum_required(VERSION 3.10)
 project(cuems-videocomposer VERSION 0.1.1 LANGUAGES C CXX)
 

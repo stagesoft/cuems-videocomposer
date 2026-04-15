@@ -1,4 +1,8 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+
 #
 # Download HAP sample files from Vidvox/VDMX
 #

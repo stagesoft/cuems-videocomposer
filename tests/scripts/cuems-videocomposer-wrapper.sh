@@ -1,4 +1,8 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+
 #
 # Alternative wrapper script location
 # This can be installed to /usr/local/bin/ for system-wide use

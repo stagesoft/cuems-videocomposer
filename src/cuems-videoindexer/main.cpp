@@ -1,20 +1,22 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * This file is part of cuems-videocomposer.
  *
- * cuems-videoindexer - Standalone video frame-index pre-builder
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
- * Usage:
- *   cuems-videoindexer <video_file> [video_file ...]
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
  *
- * For each file it writes a binary .idx sidecar into the indexes/ subdirectory
- * next to the video.  If a valid (non-stale) index already exists it is skipped.
- *
- * Exit codes:
- *   0  all files indexed (or already up-to-date)
- *   1  one or more files failed
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "../cuems_videocomposer/cpp/input/VideoFileInput.h"
