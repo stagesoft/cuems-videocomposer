@@ -16,7 +16,7 @@ Use `--fullscreen` to start in fullscreen and `--ontop` to keep the window above
 - **Via OSC:** send `/videocomposer/load` with a file path (string) to load a video, replacing the current one.
 - **Multiple layers:** use OSC layer commands to add, load, and manage layers. Add a layer with `/videocomposer/layer/add` (path), load a file into a layer with `/videocomposer/layer/load` (filepath, cueId) or `/videocomposer/layer/<id>/file` (path). Reorder with `/videocomposer/layer/reorder`, set opacity and visibility per layer.
 
-For the full list of layer and application OSC paths, see the [OSC reference](../OSC_CONTROLS_SUMMARY.md).
+For the full list of layer and application OSC paths, see the OSC reference in the repository root.
 
 ## Timecode sync
 
@@ -32,7 +32,7 @@ Enable OSC with `--osc PORT` (default 7000). Main use cases:
 - OSD: `/videocomposer/osd/timecode`, `/videocomposer/osd/text`
 - Quit: `/videocomposer/quit`
 
-See the [OSC reference](../OSC_CONTROLS_SUMMARY.md) for the complete API.
+See the OSC reference in the repository root for the complete API.
 
 ## Display and resolution
 
@@ -53,11 +53,11 @@ Switch to `software` if you see decode errors or need a codec not supported by t
 
 ## NDI
 
-NDI input is supported when the application is built with the NDI SDK. You can discover and use NDI sources as inputs; the NDI SDK is bundled in the Debian package. For setup and testing, see [tests/NDI_QUICK_START.md](../tests/NDI_QUICK_START.md) and [tests/README_NDI.md](../tests/README_NDI.md).
+NDI input is supported when the application is built with the NDI SDK. You can discover and use NDI sources as inputs; the NDI SDK is bundled in the Debian package. For setup and testing, see `tests/NDI_QUICK_START.md` and `tests/README_NDI.md` in the repository.
 
 ## HAP
 
-HAP (and HAP Q, HAP Q Alpha) is supported for low-latency, GPU-friendly playback. Use HAP-encoded files for best performance in multi-layer setups. For creating and testing HAP files, see [HAP_TESTING_GUIDE.md](../HAP_TESTING_GUIDE.md) and [tests/README_CODEC_TESTS.md](../tests/README_CODEC_TESTS.md).
+HAP (and HAP Q, HAP Q Alpha) is supported for low-latency, GPU-friendly playback. Use HAP-encoded files for best performance in multi-layer setups. For creating and testing HAP files, see `HAP_TESTING_GUIDE.md` and `tests/README_CODEC_TESTS.md` in the repository.
 
 ## Command-line options (summary)
 

@@ -68,3 +68,6 @@ build/
 # cache and test files
 .cache/
 video_test_files/
+
+# mkdocs
+site/
