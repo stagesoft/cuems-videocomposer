@@ -97,7 +97,8 @@ Ion Reguera <ion@stagelab.coop> — [Stagelab Coop SCCL](https://stagelab.coop)
 
 - **Copyright (C) 2026 Stagelab Coop SCCL**
 - **CUEMS Video Composer:** GPL-3.0-or-later (see [LICENSES/](LICENSES/) and [debian/copyright](debian/copyright)).
-- Based on **xjadeo** by Robin Gareus; see individual source files for xjadeo copyright and attribution.
+- Inspired and partially Based on [**xjadeo**](https://xjadeo.sourceforge.net/) by Robin Gareus; see individual source files for xjadeo copyright and attribution.
+- Also inspired by [**MPV**](https://mpv.io/)
 - **HAP codec:** BSD license, Tom Butterworth & Vidvox (see [external/hap/](external/hap/)).
 - **NDI** support uses NDI SDK under its license; NDI® is a trademark of Vizrt NDI AB. See `/usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE/` when installed.
 
