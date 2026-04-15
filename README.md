@@ -89,10 +89,16 @@ NDI SDK must be available (e.g. `/opt/NDI SDK for Linux/` or `NDI_SDK_DIR`). Ful
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Input/render flow and components |
 | [contrib/README.md](contrib/README.md) | Systemd service (cuems-commons) |
 
+## Author
+
+Ion Reguera <ion@stagelab.coop> — [Stagelab Coop SCCL](https://stagelab.coop)
+
 ## License and credits
 
-- **CUEMS Video Composer:** LGPL-3.0 (see [debian/copyright](debian/copyright)).
-- Based on **xjadeo**; see source files for xjadeo copyright.
+- **Copyright (C) 2026 Stagelab Coop SCCL**
+- **CUEMS Video Composer:** GPL-3.0-or-later (see [LICENSES/](LICENSES/) and [debian/copyright](debian/copyright)).
+- Based on **xjadeo** by Robin Gareus; see individual source files for xjadeo copyright and attribution.
+- **HAP codec:** BSD license, Tom Butterworth & Vidvox (see [external/hap/](external/hap/)).
 - **NDI** support uses NDI SDK under its license; NDI® is a trademark of Vizrt NDI AB. See `/usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE/` when installed.
 
-Report bugs: [GitHub issues](https://github.com/cuems/cuems-videocomposer/issues)
+Report bugs: [GitHub issues](https://github.com/stagesoft/cuems-videocomposer/issues)

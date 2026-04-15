@@ -1,64 +1,112 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: cuems-videocomposer
-Upstream-Contact: CUEMS Team <team@cuems.org>
-Source: https://github.com/cuems/cuems-videocomposer
+Upstream-Contact: Ion Reguera <ion@stagelab.coop>
+Source: https://github.com/stagesoft/cuems-videocomposer
 
 Files: *
-Copyright: 2024 CUEMS Team
-License: LGPL-3.0+
+Copyright: 2020-2026 Stagelab Coop SCCL
+License: GPL-3.0+
 
 Files: src/cuems_videocomposer/*
-Copyright: 2024 CUEMS Team
-License: LGPL-3.0+
+Copyright: 2020-2026 Stagelab Coop SCCL
+License: GPL-3.0+
+
+Files: src/cuems_videocomposer/display.c
+       src/cuems_videocomposer/display_glx.c
+       src/cuems_videocomposer/display_x11.c
+       src/cuems_videocomposer/common.c
+Copyright: 2024 Stagelab Coop SCCL
+           2006-2014 Robin Gareus <robin@gareus.org>
+           2006-2011 Luis Garrido <luisgarrido@users.sourceforge.net>
+License: GPL-2.0+
+Comment: Partially based on xjadeo code.
+
+Files: src/cuems_videocomposer/display_gl_common.h
+Copyright: 2014-2015 Robin Gareus <robin@gareus.org>
+License: GPL-3.0+
+Comment: From xjadeo project.
+
+Files: src/cuems_videocomposer/freetype.c
+Copyright: 2006-2014 Robin Gareus <robin@gareus.org>
+           2006-2011 Luis Garrido <luisgarrido@users.sourceforge.net>
+License: GPL-2.0+
+Comment: From xjadeo project.
 
 Files: src/cuems-mediadecoder/*
-Copyright: 2024 CUEMS Team
-License: LGPL-3.0+
+Copyright: 2020-2026 Stagelab Coop SCCL
+License: GPL-3.0+
 
 Files: src/cuemslogger/*
-Copyright: 2024 CUEMS Team
-License: LGPL-3.0+
+Copyright: 2020 Stagelab Coop SCCL
+           2020 bTactic
+License: GPL-3.0+
 
 Files: src/mtcreceiver/*
-Copyright: 2024 CUEMS Team
-License: LGPL-3.0+
+Copyright: 2020-2026 Stagelab Coop SCCL
+License: GPL-3.0+
 
 Files: external/hap/*
-Copyright: Vidvox LLC
-License: MIT
+Copyright: 2011-2013 Tom Butterworth and Vidvox LLC
+License: BSD-2-Clause
 
-License: LGPL-3.0+
+Files: external/stb/*
+Copyright: Sean Barrett
+License: public-domain
+
+License: GPL-3.0+
  This package is free software; you can redistribute it and/or modify
- it under the terms of the GNU Lesser General Public License as published by
+ it under the terms of the GNU General Public License as published by
  the Free Software Foundation; either version 3 of the License, or
  (at your option) any later version.
  .
  This package is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU Lesser General Public License for more details.
+ GNU General Public License for more details.
  .
- You should have received a copy of the GNU Lesser General Public License
- along with this program. If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <https://www.gnu.org/licenses/gpl-3.0.html>.
 
-License: MIT
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights
- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
+License: GPL-2.0+
+ This program is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
  .
- The above copyright notice and this permission notice shall be included in all
- copies or substantial portions of the Software.
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
  .
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- SOFTWARE.
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+License: BSD-2-Clause
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions are met:
+ .
+ 1. Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+ .
+ 2. Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+ THE POSSIBILITY OF SUCH DAMAGE.
+
+License: public-domain
+ This software is available in the public domain. You can do anything you
+ want with it. No warranty is provided.
 
 Files: usr/lib/cuems-videocomposer/libndi.so*
 Copyright: 2024 NewTek, Inc.
@@ -75,4 +123,3 @@ License: NDI-SDK-PROPRIETARY
  /usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE/EULA for full terms.
  .
  NDI® is a registered trademark of Vizrt NDI AB.
-
