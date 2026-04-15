@@ -42,6 +42,7 @@ License: GPL-3.0+
 
 Files: src/cuemslogger/*
 Copyright: 2020 Stagelab Coop SCCL
+           Alex Ramos <alex@stagelab.coop>
            Ion Reguera <ion@stagelab.coop>
 License: GPL-3.0+
 
