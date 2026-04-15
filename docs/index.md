@@ -30,6 +30,7 @@ Or build from source — see [Building and installation](building.md).
 | [User guide](user-guide.md) | Starting the app, layers, sync, OSC, display, NDI, HAP |
 | [Building and installation](building.md) | CMake build and Debian package build/install |
 | [Architecture](architecture.md) | Input-to-render flow, components, design principles |
+| [API Reference](api.md) | Auto-generated C++ class and method documentation |
 
 ## Release notes
 

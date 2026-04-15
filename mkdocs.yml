@@ -9,3 +9,28 @@ theme:
 
 plugins:
 - search
+- mkdoxy:
+    projects:
+      cuems-videocomposer:
+        src-dirs: src/cuems_videocomposer
+        full-doc: True
+        doxy-cfg:
+          FILE_PATTERNS: "*.h *.hpp"
+          RECURSIVE: True
+          EXTRACT_ALL: False
+          EXTRACT_PRIVATE: False
+          EXTRACT_STATIC: True
+          GENERATE_HTML: False
+          GENERATE_LATEX: False
+          GENERATE_XML: True
+          WARN_AS_ERROR: "NO"
+          PREDEFINED: >
+            HAVE_EGL
+            HAVE_VAAPI_INTEROP
+            HAVE_NDI_SDK
+            ENABLE_HAP_DIRECT
+            HAVE_LIBSEAT
+            HAVE_WAYLAND
+            PLATFORM_LINUX
+            USE_GLX
+            __cplusplus=201703L
