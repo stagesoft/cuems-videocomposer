@@ -23,6 +23,30 @@
 #include "../utils/Logger.h"
 #include "../utils/SMPTEUtils.h"
 #include "../sync/SyncSource.h"
+
+// #region DEBUG
+#include <fstream>
+#include <chrono>
+#include <iomanip>
+#include <sys/stat.h>
+namespace {
+void dbg_log_playback(const std::string& msg) {
+    try {
+        mkdir("/tmp/.claude", 0755);
+        auto now = std::chrono::system_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+            now.time_since_epoch()) % 1000000;
+        auto t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_buf{};
+        localtime_r(&t, &tm_buf);
+        std::ofstream f("/tmp/.claude/debug.log", std::ios::app);
+        f << "[" << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%S")
+          << "." << std::setw(6) << std::setfill('0') << us.count()
+          << "] [VIDEO-WRAP] [DEBUG H3 H4 H6 H7] " << msg << "\n";
+    } catch (...) {}
+}
+}
+// #endregion DEBUG
 #include "../sync/FramerateConverterSyncSource.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/VideoFileInput.h"
@@ -255,6 +279,15 @@ void LayerPlayback::updateFromSyncSource() {
             if (totalFrames > 0) {
                 if (adjustedFrame >= totalFrames) {
                     if (wraparound_) {
+                        // #region DEBUG
+                        {
+                            int64_t _orig = adjustedFrame;
+                            int64_t _wrapped = adjustedFrame % totalFrames;
+                            if (_wrapped == 0 || _wrapped < 5) {
+                                dbg_log_playback("AUTO-WRAP sync_frame=" + std::to_string(syncFrame) + " orig_adjusted=" + std::to_string(_orig) + " wrapped=" + std::to_string(_wrapped) + " total_frames=" + std::to_string(totalFrames) + " time_offset=" + std::to_string(timeOffset_) + " converted_offset=" + std::to_string(convertedOffset));
+                            }
+                        }
+                        // #endregion DEBUG
                         // Loop mode: wrap via modulo so the decode queue pre-buffers
                         // frame 0 seamlessly before the engine offset command arrives.
                         adjustedFrame = adjustedFrame % totalFrames;

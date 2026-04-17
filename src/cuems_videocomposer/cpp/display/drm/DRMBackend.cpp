@@ -34,6 +34,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>  // for getenv
+
+// #region DEBUG
+#include <fstream>
+#include <iomanip>
+#include <sys/stat.h>
+// #endregion DEBUG
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <xf86drmMode.h>  // for atomic modesetting
@@ -222,11 +228,46 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
         return;
     }
 
+    // #region DEBUG
+    static int dbg_render_count = 0;
+    static auto dbg_render_last = std::chrono::steady_clock::now();
+    static int64_t dbg_total_render_us = 0;
+    auto dbg_render_start = std::chrono::steady_clock::now();
+    // #endregion DEBUG
+
     if (useVirtualCanvas_ && multiRenderer_) {
         renderVirtualCanvas(layerManager, osdManager);
     } else {
         renderLegacy(layerManager, osdManager);
     }
+
+    // #region DEBUG
+    dbg_render_count++;
+    auto dbg_render_end = std::chrono::steady_clock::now();
+    dbg_total_render_us += std::chrono::duration_cast<std::chrono::microseconds>(dbg_render_end - dbg_render_start).count();
+    auto dbg_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(dbg_render_end - dbg_render_last).count();
+    if (dbg_elapsed_ms >= 1000) {
+        try {
+            mkdir("/tmp/.claude", 0755);
+            auto now = std::chrono::system_clock::now();
+            auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) % 1000000;
+            auto t = std::chrono::system_clock::to_time_t(now);
+            std::tm tm_buf{};
+            localtime_r(&t, &tm_buf);
+            std::ofstream f("/tmp/.claude/debug.log", std::ios::app);
+            f << "[" << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%S")
+              << "." << std::setw(6) << std::setfill('0') << us.count()
+              << "] [RENDER] [DEBUG H3 H4 H6 H7] RATE rendered_frames=" << dbg_render_count
+              << " elapsed_ms=" << dbg_elapsed_ms
+              << " effective_fps=" << ((double)dbg_render_count * 1000.0 / dbg_elapsed_ms)
+              << " avg_render_us=" << (dbg_render_count > 0 ? dbg_total_render_us / dbg_render_count : 0)
+              << "\n";
+        } catch (...) {}
+        dbg_render_count = 0;
+        dbg_total_render_us = 0;
+        dbg_render_last = dbg_render_end;
+    }
+    // #endregion DEBUG
 }
 
 void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osdManager) {
