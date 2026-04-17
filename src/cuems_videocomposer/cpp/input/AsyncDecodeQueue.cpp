@@ -514,6 +514,28 @@ void AsyncDecodeQueue::decodeThreadFunc() {
                 virtualOffset_ = 0;
                 continue;
             }
+
+            // Forward-jump: target is far AHEAD of what we've decoded — the
+            // decoder has fallen behind (CPU stall, GPU contention, etc.).
+            // Seek forward instead of chewing through the backlog while the
+            // renderer is shown increasingly stale frames.
+            //
+            // The virtualOffset_==0 guard prevents spurious firing during the
+            // EOF pre-buffer window, where lastDecodedFrame_ lives in the
+            // virtual range (totalFrames + N) and a low target would otherwise
+            // look like a forward jump.
+            if (lastDecodedFrame_.load() >= 0 &&
+                virtualOffset_.load() == 0 &&
+                current > lastDecodedFrame_.load() + FORWARD_JUMP_THRESHOLD) {
+                LOG_INFO << "AsyncDecodeQueue: Forward jump detected (target=" << current
+                         << ", lastDecoded=" << lastDecodedFrame_.load() << ") - clearing and seeking";
+                frameQueue_.clear();
+                seekTarget_ = current;
+                seekRequested_ = true;
+                lastDecodedFrame_ = -1;
+                eofReached_ = false;
+                continue;
+            }
         }
         
         // Check if we should decode more

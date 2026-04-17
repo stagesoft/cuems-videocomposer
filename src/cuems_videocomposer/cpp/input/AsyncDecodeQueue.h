@@ -199,6 +199,12 @@ private:
     
     // Frame queue
     static constexpr size_t MAX_QUEUE_SIZE = 8;  // Buffer up to 8 frames
+    // If the renderer's target runs this many frames ahead of the decoder,
+    // clear the queue and seek forward instead of chewing through the backlog
+    // sequentially while the renderer shows stale frames. Guards against
+    // CPU stalls / GPU contention. Does NOT fire at the loop boundary
+    // (handled by the backward-jump path — target wraps LOW there).
+    static constexpr int64_t FORWARD_JUMP_THRESHOLD = 15;
     std::deque<QueuedFrame> frameQueue_;
     mutable std::mutex queueMutex_;
     std::condition_variable queueCond_;
