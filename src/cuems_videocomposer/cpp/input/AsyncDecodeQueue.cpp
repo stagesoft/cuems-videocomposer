@@ -29,6 +29,29 @@
 #include "../utils/Logger.h"
 #include <chrono>
 
+// #region DEBUG
+#include <fstream>
+#include <iomanip>
+#include <sys/stat.h>
+namespace {
+void dbg_log_decq(const std::string& msg) {
+    try {
+        mkdir("/tmp/.claude", 0755);
+        auto now = std::chrono::system_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+            now.time_since_epoch()) % 1000000;
+        auto t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_buf{};
+        localtime_r(&t, &tm_buf);
+        std::ofstream f("/tmp/.claude/debug.log", std::ios::app);
+        f << "[" << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%S")
+          << "." << std::setw(6) << std::setfill('0') << us.count()
+          << "] [VIDEO-DECQ] [DEBUG H3 H4 H6 H7] " << msg << "\n";
+    } catch (...) {}
+}
+}
+// #endregion DEBUG
+
 extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
@@ -279,6 +302,37 @@ void AsyncDecodeQueue::close() {
 
 AVFrame* AsyncDecodeQueue::borrowFrame(AVFrame* src) {
     if (!src) return nullptr;
+    // #region DEBUG: record when the first post-conversion frame is served to
+    // the renderer. Conversion (backward-jump branch in decodeThreadFunc)
+    // resets virtualOffset_ to 0, so serving a frame while the transition
+    // flag is still set AND virtualOffset_==0 AND firstVirtualInsertNs_ is
+    // populated is the signal. Emit a single timing summary and clear the
+    // flag so subsequent frames are not re-recorded.
+    if (eofTransitionActive_.load() &&
+        firstVirtualInsertNs_.load() != 0 &&
+        virtualOffset_.load() == 0 &&
+        firstVirtualConsumeNs_.load() == 0) {
+        int64_t nowNs = std::chrono::steady_clock::now().time_since_epoch().count();
+        firstVirtualConsumeNs_.store(nowNs);
+        eofTransitionActive_.store(false);
+        int64_t drainStart = eofDrainStartNs_.load();
+        int64_t drainEnd   = eofDrainEndNs_.load();
+        int64_t flushEnd   = eofFlushEndNs_.load();
+        int64_t seekEnd    = eofSeekEndNs_.load();
+        int64_t firstIns   = firstVirtualInsertNs_.load();
+        auto toMs = [](int64_t fromNs, int64_t toNs) -> double {
+            if (fromNs == 0 || toNs == 0) return -1.0;
+            return static_cast<double>(toNs - fromNs) / 1.0e6;
+        };
+        dbg_log_decq(std::string("EOF-TRANSITION-TIMING") +
+                     " drain_ms="                 + std::to_string(toMs(drainStart, drainEnd)) +
+                     " flush_ms="                 + std::to_string(toMs(drainEnd,   flushEnd)) +
+                     " seek_ms="                  + std::to_string(toMs(flushEnd,   seekEnd))  +
+                     " first_virtual_decode_ms="  + std::to_string(toMs(seekEnd,    firstIns)) +
+                     " produce_to_consume_ms="    + std::to_string(toMs(firstIns,   nowNs))    +
+                     " total_ms="                 + std::to_string(toMs(drainStart, nowNs)));
+    }
+    // #endregion DEBUG
     // Release previous borrowed frame
     if (borrowedFrame_) {
         av_frame_unref(borrowedFrame_);
@@ -527,6 +581,9 @@ void AsyncDecodeQueue::decodeThreadFunc() {
             if (lastDecodedFrame_.load() >= 0 &&
                 virtualOffset_.load() == 0 &&
                 current > lastDecodedFrame_.load() + FORWARD_JUMP_THRESHOLD) {
+                dbg_log_decq("FORWARD-JUMP target=" + std::to_string(current) +
+                             " lastDecoded=" + std::to_string(lastDecodedFrame_.load()) +
+                             " gap=" + std::to_string(current - lastDecodedFrame_.load()));
                 LOG_INFO << "AsyncDecodeQueue: Forward jump detected (target=" << current
                          << ", lastDecoded=" << lastDecodedFrame_.load() << ") - clearing and seeking";
                 frameQueue_.clear();
@@ -598,9 +655,26 @@ void AsyncDecodeQueue::decodeThreadFunc() {
 }
 
 bool AsyncDecodeQueue::decodeNextFrame() {
+    // #region DEBUG
+    static thread_local int dbg_frame_count = 0;
+    static thread_local std::chrono::steady_clock::time_point dbg_last = std::chrono::steady_clock::now();
+    static thread_local std::string dbg_tag = "?";
+    if (dbg_tag == "?") {
+        dbg_tag = formatCtx_ && formatCtx_->url ? std::string(formatCtx_->url) : std::string("?");
+        size_t pos = dbg_tag.rfind('/');
+        if (pos != std::string::npos) dbg_tag = dbg_tag.substr(pos+1);
+    }
+    auto dbg_now = std::chrono::steady_clock::now();
+    auto dbg_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(dbg_now - dbg_last).count();
+    if (dbg_elapsed_ms >= 1000) {
+        dbg_log_decq("RATE file=" + dbg_tag + " decoded_frames=" + std::to_string(dbg_frame_count) + " elapsed_ms=" + std::to_string(dbg_elapsed_ms) + " effective_fps=" + std::to_string((double)dbg_frame_count * 1000.0 / dbg_elapsed_ms));
+        dbg_frame_count = 0;
+        dbg_last = dbg_now;
+    }
+    // #endregion DEBUG
     AVPacket* packet = av_packet_alloc();
     if (!packet) return false;
-    
+
     bool gotFrame = false;
     int maxPackets = 100;  // Safety limit
     
@@ -627,6 +701,18 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         ret = av_read_frame(formatCtx_, packet);
         if (ret < 0) {
             if (ret == AVERROR_EOF) {
+                // #region DEBUG: mark EOF transition start and reset stage timestamps
+                {
+                    auto nowNs = std::chrono::steady_clock::now().time_since_epoch().count();
+                    eofDrainStartNs_.store(nowNs);
+                    eofDrainEndNs_.store(0);
+                    eofFlushEndNs_.store(0);
+                    eofSeekEndNs_.store(0);
+                    firstVirtualInsertNs_.store(0);
+                    firstVirtualConsumeNs_.store(0);
+                    eofTransitionActive_.store(true);
+                }
+                // #endregion DEBUG
                 // Drain remaining frames from the codec's B-frame reorder buffer.
                 // For codecs like H.264/HEVC, the decoder holds the last few frames
                 // for reordering. These MUST be queued (not discarded) to avoid
@@ -697,17 +783,29 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                         drainCount++;
                     }
                 }
+                // #region DEBUG: drain stage complete
+                eofDrainEndNs_.store(std::chrono::steady_clock::now().time_since_epoch().count());
+                // #endregion DEBUG
                 if (drainCount > 0) {
                     LOG_INFO << "AsyncDecodeQueue: Queued " << drainCount
                              << " drained frames from reorder buffer";
                     queueCond_.notify_all();
                 }
                 avcodec_flush_buffers(codecCtx_);
+                // #region DEBUG: flush stage complete
+                eofFlushEndNs_.store(std::chrono::steady_clock::now().time_since_epoch().count());
+                // #endregion DEBUG
 
                 if (loopMode_ && totalFrames_ > 0) {
+                    // #region DEBUG
+                    dbg_log_decq("EOF-SEEK total_frames=" + std::to_string(totalFrames_.load()) + " prev_virtual_offset=" + std::to_string(virtualOffset_.load()) + " new_virtual_offset=" + std::to_string(totalFrames_.load()));
+                    // #endregion DEBUG
                     // Loop mode: seek to start and pre-buffer frames with virtual numbers
                     if (formatCtx_->pb) formatCtx_->pb->eof_reached = 0;
                     av_seek_frame(formatCtx_, videoStream_, 0, AVSEEK_FLAG_BACKWARD);
+                    // #region DEBUG: seek stage complete
+                    eofSeekEndNs_.store(std::chrono::steady_clock::now().time_since_epoch().count());
+                    // #endregion DEBUG
                     lastDecodedFrame_ = -1;
                     virtualOffset_ = totalFrames_.load();
                     LOG_INFO << "AsyncDecodeQueue: EOF in loop mode, pre-buffering start frames (virtualOffset="
@@ -716,6 +814,9 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                 } else {
                     // Non-loop mode: stop decoding and hold last frames.
                     eofReached_ = true;
+                    // #region DEBUG: no loop boundary will follow, abandon transition tracking
+                    eofTransitionActive_.store(false);
+                    // #endregion DEBUG
                     LOG_INFO << "AsyncDecodeQueue: EOF reached, stopping decode (non-loop)";
                     av_packet_free(&packet);
                     return false;
@@ -830,10 +931,23 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     }
     
     lastDecodedFrame_ = frameNum;
-    
+
+    // #region DEBUG: record when the first virtual (pre-buffered) frame lands
+    // in the queue after the EOF-SEEK transition. This is the decode-side end
+    // of "seek → first virtual frame produced".
+    if (voff > 0 &&
+        eofTransitionActive_.load() &&
+        firstVirtualInsertNs_.load() == 0) {
+        firstVirtualInsertNs_.store(std::chrono::steady_clock::now().time_since_epoch().count());
+    }
+    // #endregion DEBUG
+
     // Notify waiting threads
     queueCond_.notify_all();
-    
+    // #region DEBUG
+    dbg_frame_count++;
+    // #endregion DEBUG
+
     return true;
 }
 

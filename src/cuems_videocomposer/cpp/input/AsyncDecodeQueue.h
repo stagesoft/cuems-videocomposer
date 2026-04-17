@@ -225,7 +225,21 @@ private:
     std::atomic<int64_t> totalFrames_{0};
     std::atomic<int64_t> virtualOffset_{0};  // Added to decoded frame numbers during pre-buffering
     std::atomic<bool> eofReached_{false};    // Set at EOF in non-loop mode; prevents decode-and-trim churn
-    
+
+    // #region DEBUG: EOF transition instrumentation.
+    // Timestamps are nanoseconds since steady_clock epoch; 0 means "not yet
+    // recorded this transition". Reset at EOF drain start; the summary log
+    // is emitted when the first post-conversion frame is served to the
+    // renderer. Feeds the Phase-1 drift analysis.
+    std::atomic<bool> eofTransitionActive_{false};
+    std::atomic<int64_t> eofDrainStartNs_{0};
+    std::atomic<int64_t> eofDrainEndNs_{0};
+    std::atomic<int64_t> eofFlushEndNs_{0};
+    std::atomic<int64_t> eofSeekEndNs_{0};
+    std::atomic<int64_t> firstVirtualInsertNs_{0};
+    std::atomic<int64_t> firstVirtualConsumeNs_{0};
+    // #endregion DEBUG
+
     // Borrowed frame: ref-counted copy returned by getFrame().
     // Prevents use-after-free when the decode thread clears the queue
     // while the render thread is still using a frame for GPU transfer.

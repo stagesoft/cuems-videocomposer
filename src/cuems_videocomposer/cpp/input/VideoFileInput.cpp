@@ -31,6 +31,29 @@
 #include <cstdlib>
 #include <sys/stat.h>
 
+// #region DEBUG
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+namespace {
+void dbg_log_vfi(const std::string& msg) {
+    try {
+        mkdir("/tmp/.claude", 0755);
+        auto now = std::chrono::system_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+            now.time_since_epoch()) % 1000000;
+        auto t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_buf{};
+        localtime_r(&t, &tm_buf);
+        std::ofstream f("/tmp/.claude/debug.log", std::ios::app);
+        f << "[" << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%S")
+          << "." << std::setw(6) << std::setfill('0') << us.count()
+          << "] [VIDEO-VFI] [DEBUG H3 H4 H6 H7] " << msg << "\n";
+    } catch (...) {}
+}
+}
+// #endregion DEBUG
+
 #ifdef HAVE_VAAPI_INTEROP
 #include "../hwdec/VaapiInterop.h"
 #include "../display/DisplayBackend.h"
@@ -1849,18 +1872,54 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     if (useAsyncDecode_ && asyncDecodeQueue_) {
         // Set target frame so decode thread knows where we are
         asyncDecodeQueue_->setTargetFrame(frameNumber);
-        
+
+        // #region DEBUG: detect MTC loop wrap (large backward jump while near end of clip)
+        int64_t dbgNowNs = std::chrono::steady_clock::now().time_since_epoch().count();
+        if (dbgFileTag_.empty() && !currentFile_.empty()) {
+            size_t pos = currentFile_.rfind('/');
+            dbgFileTag_ = (pos != std::string::npos) ? currentFile_.substr(pos + 1) : currentFile_;
+        }
+        if (dbgLastFrameNum_ >= 0 &&
+            frameCount_ > 0 &&
+            frameNumber < dbgLastFrameNum_ - 30 &&
+            dbgLastFrameNum_ > frameCount_ / 2) {
+            double gapSinceLastServedMs =
+                dbgLastServedNs_ > 0 ? (dbgNowNs - dbgLastServedNs_) / 1.0e6 : -1.0;
+            dbg_log_vfi("RENDER-WRAP-DETECTED file=" + dbgFileTag_ +
+                        " last_real_frame=" + std::to_string(dbgLastFrameNum_) +
+                        " first_wrap_frame=" + std::to_string(frameNumber) +
+                        " ms_since_last_served=" + std::to_string(gapSinceLastServedMs) +
+                        " frame_count=" + std::to_string(frameCount_));
+            dbgWrapPendingNs_ = dbgNowNs;
+            dbgMissesInWrap_ = 0;
+        }
+        dbgLastFrameNum_ = frameNumber;
+        // #endregion DEBUG
+
         // On the very first frame request the decode thread needs time to cold-start
         // the VAAPI pipeline (~50ms for 4K). Wait longer so we never fall through to
         // the synchronous path which blocks the render thread for the full decode time.
         int waitMs = textureBuffer.isValid() ? 5 : 200;
         AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, waitMs);
-        
+
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
             bool success = transferHardwareFrameToGPU(queuedFrame, textureBuffer, true);  // skipSync: already synced by async queue
             if (success) {
+                // #region DEBUG: record successful GPU transfer; emit summary at first post-wrap serve
+                int64_t dbgServedNs = std::chrono::steady_clock::now().time_since_epoch().count();
+                dbgLastServedNs_ = dbgServedNs;
+                if (dbgWrapPendingNs_ != 0) {
+                    double wrapToServeMs = (dbgServedNs - dbgWrapPendingNs_) / 1.0e6;
+                    dbg_log_vfi("RENDER-POST-WRAP-FIRST file=" + dbgFileTag_ +
+                                " frame=" + std::to_string(frameNumber) +
+                                " ms_from_wrap_detect_to_serve=" + std::to_string(wrapToServeMs) +
+                                " misses_before_serve=" + std::to_string(dbgMissesInWrap_));
+                    dbgWrapPendingNs_ = 0;
+                    dbgMissesInWrap_ = 0;
+                }
+                // #endregion DEBUG
                 return true;
             } else {
                 LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;
@@ -1873,6 +1932,18 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
                            << asyncDecodeQueue_->getOldestFrame() << ", newest="
                            << asyncDecodeQueue_->getNewestFrame() << ")";
             }
+            // #region DEBUG: log every miss that occurs during a pending wrap window
+            if (dbgWrapPendingNs_ != 0) {
+                dbgMissesInWrap_++;
+                if (dbgMissesInWrap_ <= 20) {
+                    dbg_log_vfi("RENDER-MISS file=" + dbgFileTag_ +
+                                " frame=" + std::to_string(frameNumber) +
+                                " oldest=" + std::to_string(asyncDecodeQueue_->getOldestFrame()) +
+                                " newest=" + std::to_string(asyncDecodeQueue_->getNewestFrame()) +
+                                " miss_index=" + std::to_string(dbgMissesInWrap_));
+                }
+            }
+            // #endregion DEBUG
             // Keep showing the last displayed frame instead of falling through
             // to the sync path, which competes for VAAPI hardware and causes
             // progressive surface pool exhaustion → eventual freeze.

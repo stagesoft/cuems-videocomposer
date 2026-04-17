@@ -241,6 +241,19 @@ private:
     // This provides mpv-style pre-buffering to decouple decode latency from display timing
     std::unique_ptr<AsyncDecodeQueue> asyncDecodeQueue_;
     bool useAsyncDecode_;  // Whether to use async decode (enabled for hardware decode)
+
+    // #region DEBUG: render-side loop-boundary instrumentation.
+    // Touched only from the render thread in readFrameToTexture; plain
+    // int64_t is fine. Used to measure the gap between MTC wrap
+    // (first low frame after a high frame) and the first successful
+    // post-wrap GPU texture update — this is the actual video-side
+    // loop drift metric, independent of decoder queue depth.
+    int64_t dbgLastFrameNum_{-1};
+    int64_t dbgLastServedNs_{0};
+    int64_t dbgWrapPendingNs_{0};   // set on wrap detect, cleared on first post-wrap serve
+    int     dbgMissesInWrap_{0};
+    std::string dbgFileTag_;        // basename of currentFile_ for log readability
+    // #endregion DEBUG
 };
 
 } // namespace videocomposer
