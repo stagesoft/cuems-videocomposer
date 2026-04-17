@@ -23,6 +23,30 @@
 #include "../VideoComposerApplication.h"
 #include "../layer/LayerManager.h"
 #include "../layer/VideoLayer.h"
+
+// #region DEBUG
+#include <fstream>
+#include <chrono>
+#include <iomanip>
+#include <sys/stat.h>
+namespace {
+void dbg_log_router(const std::string& msg) {
+    try {
+        mkdir("/tmp/.claude", 0755);
+        auto now = std::chrono::system_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+            now.time_since_epoch()) % 1000000;
+        auto t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_buf{};
+        localtime_r(&t, &tm_buf);
+        std::ofstream f("/tmp/.claude/debug.log", std::ios::app);
+        f << "[" << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%S")
+          << "." << std::setw(6) << std::setfill('0') << us.count()
+          << "] [VIDEO-OSC] [DEBUG H3 H4 H6 H7] " << msg << "\n";
+    } catch (...) {}
+}
+}
+// #endregion DEBUG
 #include "../input/VideoFileInput.h"
 #include "../sync/MIDISyncSource.h"
 #include "../osd/OSDManager.h"
@@ -1199,6 +1223,9 @@ bool RemoteCommandRouter::handleLayerOffset(VideoLayer* layer, const std::vector
         offset = std::atoll(offsetStr.c_str());
     }
     
+    // #region DEBUG
+    dbg_log_router("OSC /offset RECV layer_offset_frames=" + std::to_string(offset) + " raw_str=" + offsetStr);
+    // #endregion DEBUG
     layer->setTimeOffset(offset);
     return true;
 }
