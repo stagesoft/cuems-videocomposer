@@ -25,6 +25,7 @@
 #ifdef HAVE_MTCRECEIVER
 #include "MtcReceiverMIDIDriver.h"
 #endif
+#include "../utils/Logger.h"
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -229,8 +230,10 @@ long MIDISyncSource::getTimeMs() const {
     static double    s_rate      = 1.0;  // MTC µs per wall µs
     static long      s_prevMtcMs = -1;
     static long long s_prevMtcWcUs = 0;  // wall time when mtcHead last changed
+    static int       s_stepCount  = 0;  // MTC step counter for EMA warm-up
 
     if (!isRunning || s_smoothUs < 0) {
+        s_stepCount  = 0;
         s_smoothUs   = static_cast<long long>(baseMtcMs) * 1000LL;
         s_lastWcUs   = nowUs;
         s_rate       = 1.0;
@@ -262,6 +265,7 @@ long MIDISyncSource::getTimeMs() const {
 
         s_prevMtcMs   = baseMtcMs;
         s_prevMtcWcUs = nowUs;
+        if (s_stepCount < 1000) s_stepCount++;
     }
 
     // Advance by wall-clock delta × rate (smooth, drift-free)
