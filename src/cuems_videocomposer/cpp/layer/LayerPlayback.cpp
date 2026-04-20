@@ -53,6 +53,10 @@ void dbg_log_playback(const std::string& msg) {
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+// #region DEBUG
+#include <mutex>
+#include <unordered_map>
+// #endregion DEBUG
 
 namespace videocomposer {
 
@@ -270,7 +274,33 @@ void LayerPlayback::updateFromSyncSource() {
             }
         }
         int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + convertedOffset;
-        
+
+        // #region DEBUG: log once per timeOffset_ change, per layer instance
+        {
+            static std::mutex _dbg_mtx;
+            static std::unordered_map<const void*, int64_t> _last_offsets;
+            std::lock_guard<std::mutex> _g(_dbg_mtx);
+            auto it = _last_offsets.find(static_cast<const void*>(this));
+            if (it == _last_offsets.end() || it->second != timeOffset_) {
+                double _src = -1.0, _dst = -1.0;
+                if (auto* conv = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get())) {
+                    _src = conv->getSourceFramerate();
+                    _dst = conv->getFramerate();
+                }
+                dbg_log_playback(std::string("OFFSET-APPLIED")
+                    + " layer=" + std::to_string(reinterpret_cast<uintptr_t>(this))
+                    + " time_offset=" + std::to_string(timeOffset_)
+                    + " converted_offset=" + std::to_string(convertedOffset)
+                    + " sync_frame=" + std::to_string(syncFrame)
+                    + " adjusted_frame=" + std::to_string(adjustedFrame)
+                    + " src_fps=" + std::to_string(_src)
+                    + " dst_fps=" + std::to_string(_dst)
+                    + " time_scale=" + std::to_string(timeScale_));
+                _last_offsets[static_cast<const void*>(this)] = timeOffset_;
+            }
+        }
+        // #endregion DEBUG
+
         // Clamp frame to valid range (no automatic wrapping - use loop instead)
         if (inputSource_) {
             FrameInfo info = inputSource_->getFrameInfo();
