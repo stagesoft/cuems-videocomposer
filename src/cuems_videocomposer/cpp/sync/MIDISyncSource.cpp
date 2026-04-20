@@ -25,6 +25,7 @@
 #ifdef HAVE_MTCRECEIVER
 #include "MtcReceiverMIDIDriver.h"
 #endif
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
@@ -239,6 +240,7 @@ long MIDISyncSource::getTimeMs() const {
     }
 
     // Detect mtcHead change → update rate estimate
+    bool justSnapped = false;
     if (baseMtcMs != s_prevMtcMs) {
         long long wcElapsedUs = nowUs - s_prevMtcWcUs;
         long mtcStepMs = baseMtcMs - s_prevMtcMs;
@@ -255,6 +257,7 @@ long MIDISyncSource::getTimeMs() const {
         if (mtcStepMs > 200 || mtcStepMs < -10) {
             s_smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
             s_rate = 1.0;
+            justSnapped = true;
         }
 
         s_prevMtcMs   = baseMtcMs;
@@ -269,6 +272,27 @@ long MIDISyncSource::getTimeMs() const {
 
     s_smoothUs += static_cast<long long>(
         static_cast<double>(wallDeltaUs) * s_rate);
+
+    // --- Layer 2: position anti-drift (mpv-style) ---
+    // After rate advance, nudge s_smoothUs toward baseMtcMs to prevent
+    // unbounded drift from rate EMA settling below 1.0.
+    // Skip on the same call where a large-jump snap fired — s_smoothUs
+    // was just set to baseMtcMs and the rate advance only added one
+    // poll-interval; errorMs would be tiny or trigger a spurious snap.
+    // justSnapped is intentionally local: same-call suppression is all
+    // that's needed; on the next call errorMs will be small.
+    if (!justSnapped) {
+        long long smoothMs = s_smoothUs / 1000LL;
+        long long errorMs  = static_cast<long long>(baseMtcMs) - smoothMs;
+        constexpr long long SNAP_THRESHOLD_MS  = 10;
+        constexpr int       CORRECTION_DIVISOR = 10;
+        if (std::abs(errorMs) > SNAP_THRESHOLD_MS) {
+            s_smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
+            s_rate = 1.0;
+        } else if (errorMs != 0) {
+            s_smoothUs += (errorMs * 1000LL) / CORRECTION_DIVISOR;
+        }
+    }
 
     return static_cast<long>(s_smoothUs / 1000LL);
 #else
