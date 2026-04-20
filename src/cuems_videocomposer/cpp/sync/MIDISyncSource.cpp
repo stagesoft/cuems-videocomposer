@@ -298,6 +298,19 @@ long MIDISyncSource::getTimeMs() const {
         }
     }
 
+    // Drift monitor (throttled to ~1 log/sec, after EMA warm-up)
+    if (s_stepCount >= 20) {
+        static long long s_lastLogUs = 0;
+        if (nowUs - s_lastLogUs >= 1000000LL) {
+            s_lastLogUs = nowUs;
+            long long errorMs = static_cast<long long>(baseMtcMs) - (s_smoothUs / 1000LL);
+            LOG_INFO << "DRIFT_MONITOR: errorMs=" << errorMs
+                      << " rate=" << s_rate
+                      << " baseMtcMs=" << baseMtcMs
+                      << " smoothMs=" << (s_smoothUs / 1000LL);
+        }
+    }
+
     return static_cast<long>(s_smoothUs / 1000LL);
 #else
     return -1;
