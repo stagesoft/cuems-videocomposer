@@ -584,16 +584,24 @@ void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync)
     if (!midiSync) {
         return;
     }
-    
+
     // Configure MIDI sync source from config
     bool verbose = config_->getBool("want_verbose", false);
     bool midiClkAdj = config_->getBool("midi_clkadj", false);
     double delay = config_->getDouble("delay", -1.0);
-    
+
     // Set configuration before connecting
     midiSync->setVerbose(verbose);
     midiSync->setClockAdjustment(midiClkAdj);
     midiSync->setDelay(delay);
+
+    // Apply operator-configured display-pipeline latency compensation
+    // (from --output-latency-ms, fed by engine from settings.xml).
+    // Sentinel -1 means "not set; use the 33 ms hard-coded default".
+    int outputLatencyMs = config_->getInt("output_latency_ms", -1);
+    if (outputLatencyMs >= 0) {
+        midiSync->setDisplayLatencyMs(static_cast<long>(outputLatencyMs));
+    }
 }
 
 bool VideoComposerApplication::initializeGlobalSyncSource() {
