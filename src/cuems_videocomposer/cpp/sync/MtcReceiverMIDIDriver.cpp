@@ -152,7 +152,7 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     }
 
     // Check if a full frame was just received
-    bool fullFrameReceived = MtcReceiver::wasLastUpdateFullFrame;
+    bool fullFrameReceived = MtcReceiver::wasLastUpdateFullFrame.load();
     
     // Get current timecode frame directly (like xjadeo - discrete updates)
     // xjadeo uses smpte_to_frame() which calculates: frame = f + fps * (s + 60*m + 3600*h)
@@ -279,7 +279,7 @@ bool MtcReceiverMIDIDriver::wasFullFrameReceived() {
     if (result) {
         lastFullFrameReceived_ = false;
         // Also reset the mtcreceiver flag so it doesn't trigger again
-        MtcReceiver::wasLastUpdateFullFrame = false;
+        MtcReceiver::wasLastUpdateFullFrame.store(false);
     }
     return result;
 }
