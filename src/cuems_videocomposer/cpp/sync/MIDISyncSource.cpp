@@ -22,6 +22,7 @@
 #include "MIDISyncSource.h"
 #include "NullMIDIDriver.h"
 #include "ALSASeqMIDIDriver.h"
+#include "../utils/Logger.h"
 #ifdef HAVE_MTCRECEIVER
 #include "MtcReceiverMIDIDriver.h"
 #endif
@@ -35,13 +36,24 @@ MIDISyncSource::MIDISyncSource()
     : framerate_(25.0)
     , currentFrame_(-1)
     , connected_(false)
+    , displayLatencyMs_(33)
 {
     // Start with null driver (will be replaced when driver is chosen)
     driver_ = std::make_unique<NullMIDIDriver>();
+    LOG_INFO << "MIDISyncSource: display latency compensation = "
+             << displayLatencyMs_.load() << " ms";
 }
 
 MIDISyncSource::~MIDISyncSource() {
     disconnect();
+}
+
+void MIDISyncSource::setDisplayLatencyMs(long ms) {
+    if (ms < 0) ms = 0;
+    if (ms > 200) ms = 200;
+    displayLatencyMs_.store(ms);
+    LOG_INFO << "MIDISyncSource: display latency compensation updated to "
+             << ms << " ms";
 }
 
 bool MIDISyncSource::connect(const char* param) {
@@ -236,7 +248,7 @@ long MIDISyncSource::getTimeMs() const {
         s_rate       = 1.0;
         s_prevMtcMs  = baseMtcMs;
         s_prevMtcWcUs = nowUs;
-        return baseMtcMs;
+        return baseMtcMs + displayLatencyMs_.load();
     }
 
     // Detect mtcHead change → update rate estimate
@@ -294,7 +306,7 @@ long MIDISyncSource::getTimeMs() const {
         }
     }
 
-    return static_cast<long>(s_smoothUs / 1000LL);
+    return static_cast<long>(s_smoothUs / 1000LL) + displayLatencyMs_.load();
 #else
     return -1;
 #endif
