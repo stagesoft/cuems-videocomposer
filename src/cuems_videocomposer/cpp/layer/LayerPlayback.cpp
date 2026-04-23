@@ -47,6 +47,7 @@ LayerPlayback::LayerPlayback()
     , vsyncCount_(0)
     , lastFrameChangeVsync_(0)
     , lastVideoFrame_(-1)
+    , lastLoggedTimeOffset_(INT64_MIN)
     , frameOnGPU_(false)
 {
 }
@@ -273,7 +274,15 @@ void LayerPlayback::updateFromSyncSource() {
                 loggedExceededDuration_ = (adjustedFrame == 0);
             }
         }
-        
+
+        if (timeOffset_ != lastLoggedTimeOffset_) {
+            LOG_INFO << "OFFSET-APPLIED adjusted_frame=" << adjustedFrame
+                     << " sync_frame=" << syncFrame
+                     << " converted_offset=" << convertedOffset
+                     << " mtc_ms=" << syncSource_->getTimeMs();
+            lastLoggedTimeOffset_ = timeOffset_;
+        }
+
         // Check if a full frame SYSEX was received (indicates explicit position command)
         // Full frames require immediate seek/update regardless of frame number change
         // This works with any SyncSource (including FramerateConverterSyncSource wrapper)
