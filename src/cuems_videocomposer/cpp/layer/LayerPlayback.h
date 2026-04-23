@@ -141,6 +141,7 @@ private:
     int64_t vsyncCount_;           // Approximate vsync counter (incremented each update)
     int64_t lastFrameChangeVsync_; // vsyncCount_ when frame last changed
     int64_t lastVideoFrame_;       // Last video frame number for pacing diagnosis
+    int64_t lastLoggedTimeOffset_; // Last timeOffset_ value logged via OFFSET-APPLIED (fires once per engine offset change, not per vsync)
     
     // Frame buffers (CPU and GPU)
     FrameBuffer cpuFrameBuffer_;
