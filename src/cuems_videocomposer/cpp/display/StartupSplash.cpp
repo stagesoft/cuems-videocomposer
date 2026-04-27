@@ -300,15 +300,19 @@ std::string formatPaletteHex(const std::array<float, 24>& palette) {
 } // namespace
 
 StartupSplash::StartupSplash() {
-    // Brand fallback palette: blue -> cyan -> warm amber -> rust.
-    // RGBA stops; alpha=1.0. Commit 4 may overwrite from logo extraction.
+    // FormitGo brand fallback palette — extracted from
+    // https://stagelab.coop/formitgo/ (page background gradient stops,
+    // accent purple, button highlight). Six stops sorted by HSV hue so
+    // the radial pulse traverses smoothly during measurement. RGBA;
+    // alpha=1.0. loadFromEmbedded() may overwrite this with logo
+    // median-cut palette when the splash PNG has ≥3 hue bins above 5%.
     static const float kBrand[24] = {
-        0.102f, 0.302f, 0.478f, 1.0f,  // #1a4d7a
-        0.180f, 0.435f, 0.612f, 1.0f,  // #2e6f9c
-        0.373f, 0.639f, 0.780f, 1.0f,  // #5fa3c7
-        0.659f, 0.816f, 0.878f, 1.0f,  // #a8d0e0
-        0.851f, 0.518f, 0.290f, 1.0f,  // #d9844a
-        0.545f, 0.227f, 0.122f, 1.0f,  // #8b3a1f
+        0.165f, 0.118f, 0.243f, 1.0f,  // #2a1e3e — radial-gradient inner (deep aubergine)
+        0.384f, 0.220f, 0.408f, 1.0f,  // #623868 — content surface tint (magenta-purple)
+        0.357f, 0.310f, 0.694f, 1.0f,  // #5b4fb1 — gradient bottom rgb(91,79,177)
+        0.396f, 0.365f, 0.776f, 1.0f,  // #655dc6 — accent purple
+        0.576f, 0.380f, 0.717f, 1.0f,  // #9361b7 — gradient top rgb(147,97,183)
+        0.643f, 0.553f, 1.000f, 1.0f,  // #a48dff — button highlight (lavender)
     };
     for (size_t i = 0; i < palette_.size(); ++i) {
         palette_[i] = kBrand[i];
