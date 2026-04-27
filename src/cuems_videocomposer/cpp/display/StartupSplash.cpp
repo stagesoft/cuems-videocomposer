@@ -72,8 +72,10 @@ const char* FRAG_SHADER = R"(
 in vec2 vTexCoord;
 out vec4 fragColor;
 uniform sampler2D uTex;
+uniform float uIntensity;   // 1.0 normal, 0.0 = invisible (fade-out)
 void main() {
-    fragColor = texture(uTex, vTexCoord);
+    vec4 c = texture(uTex, vTexCoord);
+    fragColor = vec4(c.rgb * uIntensity, c.a * uIntensity);
 }
 )";
 
@@ -97,6 +99,7 @@ out vec4 fragColor;
 uniform vec4 uPalette[6];
 uniform float uPhase;       // 0..1, advances per measurement frame
 uniform float uAspect;      // viewportWidth / viewportHeight
+uniform float uIntensity;   // 1.0 normal, 0.0 = solid black (fade-out tail)
 void main() {
     float t = fract(uPhase);
     float scaled = t * 6.0;
@@ -110,8 +113,8 @@ void main() {
     vec2 p = vec2(vNDC.x * uAspect, vNDC.y);
     float r = clamp(length(p) / sqrt(uAspect * uAspect + 1.0), 0.0, 1.0);
     float curve = smoothstep(0.0, 1.0, r);
-    fragColor = mix(innerC, outerC, curve);
-    fragColor.a = 1.0;
+    vec4 c = mix(innerC, outerC, curve);
+    fragColor = vec4(c.rgb * uIntensity, 1.0);
 }
 )";
 
@@ -507,13 +510,17 @@ bool StartupSplash::ensureMeasurementGL() {
 }
 
 void StartupSplash::renderMeasurementFrame(int viewportWidth, int viewportHeight,
-                                           int frameIndex, int totalFrames) {
+                                           int frameIndex, int totalFrames,
+                                           float intensity) {
     if (!ensureMeasurementGL()) {
         return;
     }
     if (totalFrames <= 0) {
         totalFrames = 1;
     }
+    if (intensity < 0.0f) intensity = 0.0f;
+    if (intensity > 1.0f) intensity = 1.0f;
+
     glViewport(0, 0, viewportWidth, viewportHeight);
     glClearColor(0.f, 0.f, 0.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -529,6 +536,7 @@ void StartupSplash::renderMeasurementFrame(int viewportWidth, int viewportHeight
         ? static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight)
         : 1.0f;
     glUniform1f(locAspect, aspect);
+    glUniform1f(glGetUniformLocation(pulseProgram_, "uIntensity"), intensity);
 
     glBindVertexArray(pulseVAO_);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -539,7 +547,7 @@ void StartupSplash::renderMeasurementFrame(int viewportWidth, int viewportHeight
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     if (initGL()) {
-        renderCenteredQuad(viewportWidth, viewportHeight);
+        renderCenteredQuad(viewportWidth, viewportHeight, intensity);
     }
 }
 
@@ -574,7 +582,7 @@ void StartupSplash::cleanupGL() {
     }
 }
 
-void StartupSplash::renderCenteredQuad(int viewportWidth, int viewportHeight) {
+void StartupSplash::renderCenteredQuad(int viewportWidth, int viewportHeight, float intensity) {
     float lw = static_cast<float>(imageWidth_);
     float lh = static_cast<float>(imageHeight_);
     float vw = static_cast<float>(viewportWidth);
@@ -594,6 +602,7 @@ void StartupSplash::renderCenteredQuad(int viewportWidth, int viewportHeight) {
 
     glUseProgram(shaderProgram_);
     glUniformMatrix4fv(glGetUniformLocation(shaderProgram_, "uMVP"), 1, GL_FALSE, mvp);
+    glUniform1f(glGetUniformLocation(shaderProgram_, "uIntensity"), intensity);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, textureId_);
     glUniform1i(glGetUniformLocation(shaderProgram_, "uTex"), 0);

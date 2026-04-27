@@ -619,7 +619,9 @@ void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync,
         return;
     }
 
-    int measured = drmBackend->measureDisplayLatencyMs(30, 50, splash_.get());
+    // 30 warmup + 120 sample = 2.0 s of visible aura pulse on a 60 Hz display,
+    // plus the orchestrator's own pre-fill (≤6 frames) and 1 s fade-out tail.
+    int measured = drmBackend->measureDisplayLatencyMs(30, 120, splash_.get());
     midiSync->setDisplayLatencyMs(static_cast<long>(measured));
     LOG_INFO << "MIDISyncSource: display latency compensation = " << measured << " ms";
 }

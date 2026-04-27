@@ -61,9 +61,14 @@ public:
      * the active palette + centered logo composited on top. Caller is
      * responsible for makeCurrent/swap/page-flip; this function only issues
      * GL draw calls into the currently-bound framebuffer.
+     *
+     * @param intensity scales the final aura + logo output. 1.0 = full
+     *                  visual; 0.0 = solid black framebuffer (used by the
+     *                  measurement orchestrator's fade-out phase).
      */
     void renderMeasurementFrame(int viewportWidth, int viewportHeight,
-                                int frameIndex, int totalFrames);
+                                int frameIndex, int totalFrames,
+                                float intensity = 1.0f);
 
     /** Read-only view of the active 6-stop RGBA palette (Commit 4 wires extraction). */
     const std::array<float, 24>& getPalette() const { return palette_; }
@@ -91,7 +96,7 @@ private:
     bool initGL();
     bool ensureMeasurementGL();
     void cleanupGL();
-    void renderCenteredQuad(int viewportWidth, int viewportHeight);
+    void renderCenteredQuad(int viewportWidth, int viewportHeight, float intensity = 1.0f);
     void showDRM(DisplayBackend* backend, double durationSeconds);
     void showX11(DisplayBackend* backend, DisplayManager* displayManager, double durationSeconds);
 };

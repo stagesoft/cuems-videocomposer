@@ -1241,7 +1241,7 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
                                         StartupSplash* splash) {
     constexpr int kPanelResponseMs = 5;
     constexpr int kFallbackMs = 33;
-    constexpr double kWallClockTimeoutSec = 4.0;
+    constexpr double kWallClockTimeoutSec = 5.0;
     constexpr int64_t kVsyncP95MultiplierLimit = 6;
     constexpr size_t kMinAcceptableSamples = 30;
     constexpr int kMaxPreFill = 6;
@@ -1421,6 +1421,42 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
         if (wallClockExceeded()) break;
         while (surface->isFlipPending()) {
             surface->waitForFlip();
+        }
+    }
+
+    // ===== Phase E — Fade-out (synchronous, production schedulePageFlip path) =====
+    // Smoothly fade the aura + logo to black over kFadeFrames so the
+    // measurement window doesn't cut hard to the engine's first cue.
+    // The compensation value is already known by this point — this phase
+    // is presentation-only and never affects the returned latency.
+    constexpr int kFadeFrames = 60;  // ~1.0 s at 60 Hz
+    int fadeBaseFrame = steadyFrameIdx;
+    for (int f = 0; f < kFadeFrames; ++f) {
+        if (wallClockExceeded()) {
+            LOG_WARNING << "DisplayLatency: wall-clock timeout in fade phase at frame " << f;
+            break;
+        }
+        float intensity = 1.0f - static_cast<float>(f + 1) / static_cast<float>(kFadeFrames);
+        if (intensity < 0.0f) intensity = 0.0f;
+        for (auto& [name, surface] : surfaces_) {
+            if (!surface || !surface->isInitialized()) continue;
+            if (!surface->beginFrame()) continue;
+            if (splash) {
+                int w = static_cast<int>(surface->getWidth());
+                int h = static_cast<int>(surface->getHeight());
+                splash->renderMeasurementFrame(w, h, fadeBaseFrame + f, totalFrames, intensity);
+            } else {
+                glViewport(0, 0, static_cast<int>(surface->getWidth()),
+                           static_cast<int>(surface->getHeight()));
+                glClearColor(intensity * 0.3f, intensity * 0.2f, intensity * 0.4f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            surface->endFrame();
+            if (surface->isFlipPending()) surface->waitForFlip();
+            surface->schedulePageFlip();
+        }
+        for (auto& [name, surface] : surfaces_) {
+            if (surface && surface->isFlipPending()) surface->waitForFlip();
         }
     }
 
