@@ -41,10 +41,15 @@
 #include <GL/glew.h>
 #include <GL/gl.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
-#include <thread>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <sstream>
+#include <thread>
+#include <vector>
 
 namespace videocomposer {
 
@@ -110,6 +115,188 @@ void main() {
 }
 )";
 
+// Returns true iff the image has at least 3 distinct hue bins (45° each)
+// each populated by ≥5% of the non-masked pixels. Logos with one dominant
+// brand hue fall through to the hardcoded fallback in StartupSplash::ctor.
+bool hasEnoughHueDiversity(const unsigned char* rgba, int width, int height) {
+    int bins[8] = {0};
+    int totalKept = 0;
+    int totalPx = width * height;
+    for (int i = 0; i < totalPx; ++i) {
+        unsigned char r = rgba[i * 4 + 0];
+        unsigned char g = rgba[i * 4 + 1];
+        unsigned char b = rgba[i * 4 + 2];
+        unsigned char a = rgba[i * 4 + 3];
+        if (a < 16) continue;
+        int luma = (r * 299 + g * 587 + b * 114) / 1000;
+        if (luma < 32 || luma > 224) continue;
+        int maxc = std::max({(int)r, (int)g, (int)b});
+        int minc = std::min({(int)r, (int)g, (int)b});
+        int delta = maxc - minc;
+        if (delta < 16) continue;  // near-grey contributes no hue
+        float h = 0.0f;
+        float fr = static_cast<float>(r);
+        float fg = static_cast<float>(g);
+        float fb = static_cast<float>(b);
+        if (maxc == r) {
+            h = 60.0f * std::fmod((fg - fb) / float(delta), 6.0f);
+        } else if (maxc == g) {
+            h = 60.0f * (((fb - fr) / float(delta)) + 2.0f);
+        } else {
+            h = 60.0f * (((fr - fg) / float(delta)) + 4.0f);
+        }
+        if (h < 0.0f) h += 360.0f;
+        int bin = std::min(7, std::max(0, static_cast<int>(h / 45.0f)));
+        ++bins[bin];
+        ++totalKept;
+    }
+    if (totalKept == 0) return false;
+    int floorCount = totalKept * 5 / 100;
+    int populated = 0;
+    for (int i = 0; i < 8; ++i) {
+        if (bins[i] > floorCount) ++populated;
+    }
+    return populated >= 3;
+}
+
+// Median-cut palette extraction over non-masked pixels. Splits boxes along
+// their longest RGB axis until 6 boxes exist; each box's mean colour is one
+// stop. Stops sorted by HSV hue for smooth ring traversal in the pulse shader.
+void extractPaletteMedianCut(const unsigned char* rgba, int width, int height,
+                             std::array<float, 24>& palette) {
+    struct Pixel { unsigned char r, g, b; };
+    struct Box {
+        std::vector<Pixel> px;
+        int rmin = 255, rmax = 0;
+        int gmin = 255, gmax = 0;
+        int bmin = 255, bmax = 0;
+        void compute() {
+            rmin = gmin = bmin = 255;
+            rmax = gmax = bmax = 0;
+            for (const auto& p : px) {
+                rmin = std::min(rmin, static_cast<int>(p.r));
+                rmax = std::max(rmax, static_cast<int>(p.r));
+                gmin = std::min(gmin, static_cast<int>(p.g));
+                gmax = std::max(gmax, static_cast<int>(p.g));
+                bmin = std::min(bmin, static_cast<int>(p.b));
+                bmax = std::max(bmax, static_cast<int>(p.b));
+            }
+        }
+        int range() const {
+            return std::max({rmax - rmin, gmax - gmin, bmax - bmin});
+        }
+        int axis() const {
+            int rr = rmax - rmin, gr = gmax - gmin, br = bmax - bmin;
+            if (rr >= gr && rr >= br) return 0;
+            if (gr >= br) return 1;
+            return 2;
+        }
+    };
+
+    std::vector<Pixel> kept;
+    kept.reserve(static_cast<size_t>(width * height) / 4);
+    int totalPx = width * height;
+    for (int i = 0; i < totalPx; ++i) {
+        unsigned char r = rgba[i * 4 + 0];
+        unsigned char g = rgba[i * 4 + 1];
+        unsigned char b = rgba[i * 4 + 2];
+        unsigned char a = rgba[i * 4 + 3];
+        if (a < 16) continue;
+        int luma = (r * 299 + g * 587 + b * 114) / 1000;
+        if (luma < 32 || luma > 224) continue;
+        kept.push_back({r, g, b});
+    }
+    if (kept.empty()) return;
+
+    std::vector<Box> boxes(1);
+    boxes[0].px = std::move(kept);
+    boxes[0].compute();
+
+    while (boxes.size() < 6) {
+        int splitIdx = -1;
+        int splitRange = -1;
+        for (size_t i = 0; i < boxes.size(); ++i) {
+            if (boxes[i].px.size() <= 1) continue;
+            int r = boxes[i].range();
+            if (r > splitRange) {
+                splitRange = r;
+                splitIdx = static_cast<int>(i);
+            }
+        }
+        if (splitIdx < 0 || splitRange <= 0) break;
+        Box& b = boxes[splitIdx];
+        int ax = b.axis();
+        std::sort(b.px.begin(), b.px.end(), [ax](const Pixel& a, const Pixel& c) {
+            unsigned char av = (ax == 0) ? a.r : (ax == 1) ? a.g : a.b;
+            unsigned char cv = (ax == 0) ? c.r : (ax == 1) ? c.g : c.b;
+            return av < cv;
+        });
+        size_t mid = b.px.size() / 2;
+        Box left, right;
+        left.px.assign(b.px.begin(), b.px.begin() + mid);
+        right.px.assign(b.px.begin() + mid, b.px.end());
+        left.compute();
+        right.compute();
+        boxes.erase(boxes.begin() + splitIdx);
+        boxes.push_back(std::move(left));
+        boxes.push_back(std::move(right));
+    }
+
+    struct Stop { float r, g, b, hue; };
+    std::vector<Stop> stops;
+    stops.reserve(boxes.size());
+    for (const auto& bx : boxes) {
+        if (bx.px.empty()) continue;
+        long sr = 0, sg = 0, sb = 0;
+        for (const auto& p : bx.px) {
+            sr += p.r;
+            sg += p.g;
+            sb += p.b;
+        }
+        float fn = static_cast<float>(bx.px.size());
+        float fr = (sr / fn) / 255.0f;
+        float fg = (sg / fn) / 255.0f;
+        float fb = (sb / fn) / 255.0f;
+        float maxc = std::max({fr, fg, fb});
+        float minc = std::min({fr, fg, fb});
+        float delta = maxc - minc;
+        float h = 0.0f;
+        if (delta > 0.001f) {
+            if (maxc == fr) h = 60.0f * std::fmod((fg - fb) / delta, 6.0f);
+            else if (maxc == fg) h = 60.0f * (((fb - fr) / delta) + 2.0f);
+            else h = 60.0f * (((fr - fg) / delta) + 4.0f);
+            if (h < 0.0f) h += 360.0f;
+        }
+        stops.push_back({fr, fg, fb, h});
+    }
+    if (stops.empty()) return;
+    std::sort(stops.begin(), stops.end(),
+              [](const Stop& a, const Stop& b) { return a.hue < b.hue; });
+    while (stops.size() < 6) {
+        stops.push_back(stops.back());
+    }
+    for (size_t i = 0; i < 6; ++i) {
+        palette[i * 4 + 0] = stops[i].r;
+        palette[i * 4 + 1] = stops[i].g;
+        palette[i * 4 + 2] = stops[i].b;
+        palette[i * 4 + 3] = 1.0f;
+    }
+}
+
+std::string formatPaletteHex(const std::array<float, 24>& palette) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < 6; ++i) {
+        if (i > 0) oss << ",";
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "#%02x%02x%02x",
+                      static_cast<int>(palette[i * 4 + 0] * 255.0f + 0.5f),
+                      static_cast<int>(palette[i * 4 + 1] * 255.0f + 0.5f),
+                      static_cast<int>(palette[i * 4 + 2] * 255.0f + 0.5f));
+        oss << buf;
+    }
+    return oss.str();
+}
+
 } // namespace
 
 StartupSplash::StartupSplash() {
@@ -152,6 +339,15 @@ bool StartupSplash::loadFromEmbedded() {
     imageWidth_ = x;
     imageHeight_ = y;
     imageChannels_ = 4;
+
+    if (hasEnoughHueDiversity(imageData_, imageWidth_, imageHeight_)) {
+        extractPaletteMedianCut(imageData_, imageWidth_, imageHeight_, palette_);
+        LOG_INFO << "StartupSplash: extracted palette from logo: "
+                 << formatPaletteHex(palette_);
+    } else {
+        LOG_INFO << "StartupSplash: low logo colour count, using brand fallback palette: "
+                 << formatPaletteHex(palette_);
+    }
     return true;
 }
 
