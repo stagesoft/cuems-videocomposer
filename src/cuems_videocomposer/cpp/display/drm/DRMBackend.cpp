@@ -1245,7 +1245,6 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
     constexpr int64_t kVsyncP95MultiplierLimit = 6;
     constexpr size_t kMinAcceptableSamples = 30;
     constexpr int kMaxPreFill = 6;
-    constexpr size_t kMinPoolDepthForAsync = 2;  // ≤1 successful pre-fill ⇒ no swap-chain depth to measure
 
     if (surfaces_.empty()) {
         LOG_INFO << "DisplayLatency: no surfaces, falling back to " << kFallbackMs << " ms";
@@ -1355,11 +1354,13 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
     }
 
     // ===== Phase B — Pre-fill (per-surface, capped, async tryAsyncFlip) =====
-    // Submit frames in tight succession until either (a) tryAsyncFlip returns
-    // EBUSY/ENOSPC ("pool full") OR (b) kMaxPreFill submits have accumulated.
-    // If only ≤1 in-flight, mark surface single-buffer — async measurement
-    // won't reveal swap-chain depth there.
-    std::set<std::string> singleBufferSurfaces;
+    // KMS only allows ONE in-flight flip per CRTC — submitting another while
+    // one is pending returns EBUSY at the kernel layer (or -EINVAL via our
+    // own flipPending_ guard). So in practice the pre-fill exits after the
+    // first successful submit on most drivers. That's fine: the steady-state
+    // phase still measures swap_chain + kernel-queue latency correctly,
+    // since waitForFlip → render → tryAsyncFlip cycles through GBM buffers
+    // exactly as production rendering does.
     int preFillFrameIdx = warmupFrames;
     for (auto& [name, surface] : surfaces_) {
         if (!surface || !surface->isInitialized()) continue;
@@ -1373,19 +1374,11 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
             if (ret == 0) {
                 ++submitted;
                 ++preFillFrameIdx;
-            } else if (ret == EBUSY || ret == ENOSPC) {
-                break;  // pool full ⇒ done pre-filling this surface
             } else {
-                LOG_WARNING << "DisplayLatency[" << name << "]: tryAsyncFlip during pre-fill failed errno="
-                            << ret << " — falling back to refresh-derived";
-                singleBufferSurfaces.insert(name);
+                // Any non-zero ret (EBUSY/ENOSPC/EINVAL/etc.) ⇒ done pre-filling.
+                // Steady-state will resume from a known one-in-flight state.
                 break;
             }
-        }
-        if (submitted < static_cast<int>(kMinPoolDepthForAsync)) {
-            LOG_WARNING << "DisplayLatency[" << name << "]: pre-fill produced only " << submitted
-                        << " in-flight; pool depth ≤ 1 — async measurement will not improve on synchronous result, falling back to refresh-derived";
-            singleBufferSurfaces.insert(name);
         }
     }
 
@@ -1398,17 +1391,16 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
         }
         for (auto& [name, surface] : surfaces_) {
             if (!surface || !surface->isInitialized()) continue;
-            if (singleBufferSurfaces.count(name)) continue;
-            // Block for the oldest pending flip — this is the term we want
-            // to measure (full pool depth × vsync).
-            surface->waitForFlip();
+            // Block for the oldest pending flip — submit→flip delta = the
+            // measurement we want.
+            if (surface->isFlipPending()) surface->waitForFlip();
             if (!surface->beginFrame()) continue;
             renderOne(surface.get(), steadyFrameIdx);
             surface->endFrame();
             int ret = surface->tryAsyncFlip();
             if (ret != 0 && ret != EBUSY && ret != ENOSPC) {
-                LOG_WARNING << "DisplayLatency[" << name << "]: tryAsyncFlip mid-steady-state errno="
-                            << ret << " — skipping frame";
+                LOG_DEBUG << "DisplayLatency[" << name << "]: tryAsyncFlip mid-steady-state errno="
+                          << ret << " — skipping frame";
             }
             ++steadyFrameIdx;
         }
@@ -1417,7 +1409,6 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
     // ===== Phase D — Drain (let all in-flight flips complete) =====
     for (auto& [name, surface] : surfaces_) {
         if (!surface || !surface->isInitialized()) continue;
-        if (singleBufferSurfaces.count(name)) continue;
         if (wallClockExceeded()) break;
         while (surface->isFlipPending()) {
             surface->waitForFlip();
@@ -1439,6 +1430,7 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
         float intensity = 1.0f - static_cast<float>(f + 1) / static_cast<float>(kFadeFrames);
         if (intensity < 0.0f) intensity = 0.0f;
         for (auto& [name, surface] : surfaces_) {
+            (void)name;
             if (!surface || !surface->isInitialized()) continue;
             if (!surface->beginFrame()) continue;
             if (splash) {
@@ -1479,13 +1471,6 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
         int derivedFallback = refreshFallbackMs(surface.get());
         if (derivedFallback > fallbackMaxMs) {
             fallbackMaxMs = derivedFallback;
-        }
-
-        if (singleBufferSurfaces.count(name)) {
-            LOG_INFO << "DisplayLatency[" << name << "]: single-buffer pool — using refresh-derived fallback "
-                     << derivedFallback << "ms";
-            pt.disableLatencyCapture();
-            continue;
         }
 
         if (!stats.valid || stats.sampleCount < kMinAcceptableSamples ||
