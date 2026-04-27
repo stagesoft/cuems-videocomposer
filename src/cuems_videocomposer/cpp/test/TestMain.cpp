@@ -44,8 +44,16 @@ extern bool test_ConfigurationManager_NonExistent();
 extern bool test_Integration_LayerManagerWithMultipleLayers();
 extern bool test_Integration_VideoLayerTimeScaling();
 extern bool test_Integration_LayerProperties();
+extern bool test_Integration_MIDISyncSource_DisplayLatencyAtomicity();
 
 extern bool test_MTCDecoder();
+
+extern bool test_PresentationTiming_CaptureDisabled_NoOp();
+extern bool test_PresentationTiming_FifoPairing();
+extern bool test_PresentationTiming_DiscardPendingSubmit();
+extern bool test_PresentationTiming_StatisticsMedianAndP95();
+extern bool test_PresentationTiming_ResetClearsState();
+extern bool test_PresentationTiming_ConcurrentSubmitFlip();
 
 using namespace videocomposer::test;
 
@@ -73,9 +81,17 @@ int main() {
     TestFramework::instance().addTest("Integration_LayerManagerWithMultipleLayers", test_Integration_LayerManagerWithMultipleLayers);
     TestFramework::instance().addTest("Integration_VideoLayerTimeScaling", test_Integration_VideoLayerTimeScaling);
     TestFramework::instance().addTest("Integration_LayerProperties", test_Integration_LayerProperties);
-    
+    TestFramework::instance().addTest("Integration_MIDISyncSource_DisplayLatencyAtomicity", test_Integration_MIDISyncSource_DisplayLatencyAtomicity);
+
     TestFramework::instance().addTest("MTCDecoder", test_MTCDecoder);
-    
+
+    TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
+    TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);
+    TestFramework::instance().addTest("PresentationTiming_DiscardPendingSubmit", test_PresentationTiming_DiscardPendingSubmit);
+    TestFramework::instance().addTest("PresentationTiming_StatisticsMedianAndP95", test_PresentationTiming_StatisticsMedianAndP95);
+    TestFramework::instance().addTest("PresentationTiming_ResetClearsState", test_PresentationTiming_ResetClearsState);
+    TestFramework::instance().addTest("PresentationTiming_ConcurrentSubmitFlip", test_PresentationTiming_ConcurrentSubmitFlip);
+
     return TestFramework::instance().runAll();
 }
 
