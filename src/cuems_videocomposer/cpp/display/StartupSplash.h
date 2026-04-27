@@ -45,7 +45,7 @@ class DisplayManager;
  */
 class StartupSplash {
 public:
-    static constexpr double SPLASH_DURATION_SECONDS = 5.0;
+    static constexpr double SPLASH_DURATION_SECONDS = 10.0;
 
     StartupSplash();
     ~StartupSplash();
