@@ -26,10 +26,12 @@
 #include "DRMBackend.h"
 #include "../OpenGLRenderer.h"
 #include "../DisplayConfigurationManager.h"
+#include "../StartupSplash.h"
 #include "../../layer/LayerManager.h"
 #include "../../layer/VideoLayer.h"
 #include "../../osd/OSDManager.h"
 #include "../../utils/Logger.h"
+#include <cmath>
 
 #include <algorithm>
 #include <chrono>
@@ -1231,6 +1233,181 @@ void DRMBackend::setVideoFramerate(double fps) {
             surface->getPresentationTiming().setVideoFramerate(fps);
         }
     }
+}
+
+int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
+                                        StartupSplash* splash) {
+    constexpr int kPanelResponseMs = 5;
+    constexpr int kFallbackMs = 33;
+    constexpr double kWallClockTimeoutSec = 3.0;
+    constexpr int64_t kVsyncP95MultiplierLimit = 4;
+    constexpr size_t kMinAcceptableSamples = 30;
+
+    if (surfaces_.empty()) {
+        LOG_INFO << "DisplayLatency: no surfaces, falling back to " << kFallbackMs << " ms";
+        return kFallbackMs;
+    }
+
+    // Helper: 2 × vsync derived from a surface's actual refresh rate.
+    auto refreshFallbackMs = [](const DRMSurface* s) -> int {
+        if (!s) {
+            return kFallbackMs;
+        }
+        double hz = s->getOutputInfo().refreshRate;
+        if (hz <= 0.0) {
+            return kFallbackMs;
+        }
+        return static_cast<int>(2.0 * (1000.0 / hz) + 0.5);
+    };
+
+    DRMSurface* primary = getPrimarySurface();
+    if (primary) {
+        primary->makeCurrent();
+    }
+
+    if (splash) {
+        splash->loadFromEmbedded();  // safe to call repeatedly
+    }
+
+    // Reset & enable capture per-surface
+    for (auto& [name, surface] : surfaces_) {
+        if (!surface || !surface->isInitialized()) {
+            continue;
+        }
+        auto& pt = surface->getPresentationTiming();
+        pt.reset();
+        pt.enableLatencyCapture(static_cast<size_t>(warmupFrames + sampleFrames));
+    }
+
+    const int totalFrames = warmupFrames + sampleFrames;
+    auto loopStart = std::chrono::steady_clock::now();
+    bool extendedWarmupApplied = false;
+    int extraWarmup = 0;
+
+    int frame = 0;
+    while (frame < totalFrames + extraWarmup) {
+        if (std::chrono::steady_clock::now() - loopStart >
+            std::chrono::duration<double>(kWallClockTimeoutSec)) {
+            LOG_WARNING << "DisplayLatency: wall-clock timeout at frame " << frame
+                        << " — aborting measurement";
+            break;
+        }
+
+        for (auto& [name, surface] : surfaces_) {
+            if (!surface || !surface->isInitialized()) {
+                continue;
+            }
+            if (!surface->beginFrame()) {
+                continue;
+            }
+            int w = static_cast<int>(surface->getWidth());
+            int h = static_cast<int>(surface->getHeight());
+            if (splash) {
+                splash->renderMeasurementFrame(w, h, frame, totalFrames);
+            } else {
+                // Fallback: full-screen colour cycle so the BO still rotates.
+                float t = static_cast<float>(frame) / static_cast<float>(std::max(1, totalFrames));
+                glViewport(0, 0, w, h);
+                glClearColor(0.5f + 0.5f * std::sin(t * 6.28318f),
+                             0.5f + 0.5f * std::sin(t * 6.28318f + 2.094f),
+                             0.5f + 0.5f * std::sin(t * 6.28318f + 4.188f),
+                             1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            surface->endFrame();
+            if (surface->isFlipPending()) {
+                surface->waitForFlip();
+            }
+            surface->schedulePageFlip();
+        }
+        for (auto& [name, surface] : surfaces_) {
+            if (surface && surface->isFlipPending()) {
+                surface->waitForFlip();
+            }
+        }
+
+        // After warmupFrames, check whether any surface still has no recorded
+        // submits — if so, we're stuck in setCrtc-path. Extend warmup once.
+        if (frame == warmupFrames - 1 && !extendedWarmupApplied) {
+            bool anyEmpty = false;
+            for (auto& [name, surface] : surfaces_) {
+                if (!surface || !surface->isInitialized()) {
+                    continue;
+                }
+                auto stats = surface->getPresentationTiming().getSwapChainLatencyStats();
+                if (stats.sampleCount == 0) {
+                    anyEmpty = true;
+                    break;
+                }
+            }
+            if (anyEmpty) {
+                LOG_INFO << "DisplayLatency: no real page-flip events after "
+                         << warmupFrames << " warmup frames, extending warmup once";
+                extraWarmup = warmupFrames;
+                extendedWarmupApplied = true;
+            }
+        }
+
+        ++frame;
+    }
+
+    // Aggregate: per-surface stats → per-surface total → max across surfaces
+    int appliedMs = 0;
+    int validSurfaces = 0;
+    int fallbackMaxMs = 0;
+    for (auto& [name, surface] : surfaces_) {
+        if (!surface || !surface->isInitialized()) {
+            continue;
+        }
+        auto& pt = surface->getPresentationTiming();
+        auto stats = pt.getSwapChainLatencyStats();
+        double hz = surface->getOutputInfo().refreshRate;
+        if (hz <= 0.0) {
+            hz = 60.0;
+        }
+        int64_t expectedVsyncNs = static_cast<int64_t>(1e9 / hz);
+        int scanoutMs = static_cast<int>((expectedVsyncNs / 1e6) + 0.5);
+        int derivedFallback = refreshFallbackMs(surface.get());
+        if (derivedFallback > fallbackMaxMs) {
+            fallbackMaxMs = derivedFallback;
+        }
+
+        if (!stats.valid || stats.sampleCount < kMinAcceptableSamples ||
+            stats.p95Ns > kVsyncP95MultiplierLimit * expectedVsyncNs) {
+            LOG_WARNING << "DisplayLatency[" << name << "]: measurement noisy (n="
+                        << stats.sampleCount << ", p95="
+                        << (stats.p95Ns / 1e6) << "ms / 4×vsync="
+                        << (kVsyncP95MultiplierLimit * expectedVsyncNs / 1e6)
+                        << "ms) — using refresh-derived fallback " << derivedFallback << "ms";
+            pt.disableLatencyCapture();
+            continue;
+        }
+
+        int swapChainMs = static_cast<int>((stats.medianNs / 1e6) + 0.5);
+        int totalMs = swapChainMs + scanoutMs + kPanelResponseMs;
+        LOG_INFO << "DisplayLatency[" << name << "]: swap_chain=median "
+                 << (stats.medianNs / 1e6) << "ms (p95 " << (stats.p95Ns / 1e6)
+                 << ", n=" << stats.sampleCount
+                 << " / expected_vsync " << (expectedVsyncNs / 1e6)
+                 << "ms) refresh=" << hz
+                 << "Hz scanout=" << scanoutMs
+                 << "ms panel=" << kPanelResponseMs
+                 << "ms => " << totalMs << "ms";
+        if (totalMs > appliedMs) {
+            appliedMs = totalMs;
+        }
+        ++validSurfaces;
+        pt.disableLatencyCapture();
+    }
+
+    if (validSurfaces == 0) {
+        int derived = (fallbackMaxMs > 0) ? fallbackMaxMs : kFallbackMs;
+        LOG_INFO << "DisplayLatency: applied = " << derived
+                 << "ms (refresh-rate-derived fallback)";
+        return derived;
+    }
+    LOG_INFO << "DisplayLatency: applied = " << appliedMs << "ms (auto)";
+    return appliedMs;
 }
 
 } // namespace videocomposer

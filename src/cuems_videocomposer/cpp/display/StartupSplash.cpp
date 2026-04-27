@@ -72,9 +72,61 @@ void main() {
 }
 )";
 
+const char* PULSE_VERT_SHADER = R"(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+out vec2 vNDC;
+void main() {
+    vNDC = aPos;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+)";
+
+// Full-screen radial aura: outer color cycles through the 6-stop palette as
+// the caller advances frameIndex; inner is the same color at low intensity
+// so the gradient still sweeps every pixel each frame (forces a real BO swap).
+const char* PULSE_FRAG_SHADER = R"(
+#version 330 core
+in vec2 vNDC;
+out vec4 fragColor;
+uniform vec4 uPalette[6];
+uniform float uPhase;       // 0..1, advances per measurement frame
+uniform float uAspect;      // viewportWidth / viewportHeight
+void main() {
+    float t = fract(uPhase);
+    float scaled = t * 6.0;
+    int idx = int(floor(scaled));
+    float local = scaled - float(idx);
+    int next = (idx + 1) % 6;
+    vec4 outerC = mix(uPalette[idx], uPalette[next], local);
+    vec4 innerC = outerC * 0.18 + vec4(0.0, 0.0, 0.0, 1.0) * 0.82;
+
+    // Radial position normalised to corner=1.0 (everything visible)
+    vec2 p = vec2(vNDC.x * uAspect, vNDC.y);
+    float r = clamp(length(p) / sqrt(uAspect * uAspect + 1.0), 0.0, 1.0);
+    float curve = smoothstep(0.0, 1.0, r);
+    fragColor = mix(innerC, outerC, curve);
+    fragColor.a = 1.0;
+}
+)";
+
 } // namespace
 
-StartupSplash::StartupSplash() = default;
+StartupSplash::StartupSplash() {
+    // Brand fallback palette: blue -> cyan -> warm amber -> rust.
+    // RGBA stops; alpha=1.0. Commit 4 may overwrite from logo extraction.
+    static const float kBrand[24] = {
+        0.102f, 0.302f, 0.478f, 1.0f,  // #1a4d7a
+        0.180f, 0.435f, 0.612f, 1.0f,  // #2e6f9c
+        0.373f, 0.639f, 0.780f, 1.0f,  // #5fa3c7
+        0.659f, 0.816f, 0.878f, 1.0f,  // #a8d0e0
+        0.851f, 0.518f, 0.290f, 1.0f,  // #d9844a
+        0.545f, 0.227f, 0.122f, 1.0f,  // #8b3a1f
+    };
+    for (size_t i = 0; i < palette_.size(); ++i) {
+        palette_[i] = kBrand[i];
+    }
+}
 
 StartupSplash::~StartupSplash() {
     cleanupGL();
@@ -187,7 +239,123 @@ bool StartupSplash::initGL() {
     return true;
 }
 
+bool StartupSplash::ensureMeasurementGL() {
+    if (pulseProgram_ != 0) {
+        return true;
+    }
+
+    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, 1, &PULSE_VERT_SHADER, nullptr);
+    glCompileShader(vs);
+    GLint ok = 0;
+    glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(vs, sizeof(log), nullptr, log);
+        LOG_WARNING << "StartupSplash pulse vertex shader: " << log;
+        glDeleteShader(vs);
+        return false;
+    }
+
+    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, 1, &PULSE_FRAG_SHADER, nullptr);
+    glCompileShader(fs);
+    glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(fs, sizeof(log), nullptr, log);
+        LOG_WARNING << "StartupSplash pulse fragment shader: " << log;
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        return false;
+    }
+
+    pulseProgram_ = glCreateProgram();
+    glAttachShader(pulseProgram_, vs);
+    glAttachShader(pulseProgram_, fs);
+    glLinkProgram(pulseProgram_);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    glGetProgramiv(pulseProgram_, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(pulseProgram_, sizeof(log), nullptr, log);
+        LOG_WARNING << "StartupSplash pulse program: " << log;
+        glDeleteProgram(pulseProgram_);
+        pulseProgram_ = 0;
+        return false;
+    }
+
+    // Full-screen NDC quad
+    static const float kFullscreenQuad[] = {
+        -1.0f, -1.0f,
+         1.0f, -1.0f,
+        -1.0f,  1.0f,
+         1.0f,  1.0f,
+    };
+    glGenVertexArrays(1, &pulseVAO_);
+    glGenBuffers(1, &pulseVBO_);
+    glBindVertexArray(pulseVAO_);
+    glBindBuffer(GL_ARRAY_BUFFER, pulseVBO_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(kFullscreenQuad), kFullscreenQuad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), reinterpret_cast<void*>(0));
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    return true;
+}
+
+void StartupSplash::renderMeasurementFrame(int viewportWidth, int viewportHeight,
+                                           int frameIndex, int totalFrames) {
+    if (!ensureMeasurementGL()) {
+        return;
+    }
+    if (totalFrames <= 0) {
+        totalFrames = 1;
+    }
+    glViewport(0, 0, viewportWidth, viewportHeight);
+    glClearColor(0.f, 0.f, 0.f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glDisable(GL_BLEND);
+    glUseProgram(pulseProgram_);
+    GLint locPalette = glGetUniformLocation(pulseProgram_, "uPalette");
+    glUniform4fv(locPalette, 6, palette_.data());
+    GLint locPhase = glGetUniformLocation(pulseProgram_, "uPhase");
+    glUniform1f(locPhase, static_cast<float>(frameIndex) / static_cast<float>(totalFrames));
+    GLint locAspect = glGetUniformLocation(pulseProgram_, "uAspect");
+    float aspect = (viewportHeight > 0)
+        ? static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight)
+        : 1.0f;
+    glUniform1f(locAspect, aspect);
+
+    glBindVertexArray(pulseVAO_);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    glUseProgram(0);
+
+    // Composite logo on top (uses splash shader / VAO from initGL)
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (initGL()) {
+        renderCenteredQuad(viewportWidth, viewportHeight);
+    }
+}
+
 void StartupSplash::cleanupGL() {
+    if (pulseVAO_) {
+        glDeleteVertexArrays(1, &pulseVAO_);
+        pulseVAO_ = 0;
+    }
+    if (pulseVBO_) {
+        glDeleteBuffers(1, &pulseVBO_);
+        pulseVBO_ = 0;
+    }
+    if (pulseProgram_) {
+        glDeleteProgram(pulseProgram_);
+        pulseProgram_ = 0;
+    }
     if (quadVAO_) {
         glDeleteVertexArrays(1, &quadVAO_);
         quadVAO_ = 0;

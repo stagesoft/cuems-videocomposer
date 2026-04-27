@@ -22,8 +22,9 @@
 #ifndef VIDEOCOMPOSER_STARTUPSPLASH_H
 #define VIDEOCOMPOSER_STARTUPSPLASH_H
 
-#include <string>
+#include <array>
 #include <cstddef>
+#include <string>
 
 namespace videocomposer {
 
@@ -36,6 +37,11 @@ class DisplayManager;
  *
  * Image is embedded at build time from resources/splash.png (xxd -i).
  * Primary path: DRM/KMS (render to each surface). Fallback: X11 (single window, per-monitor regions).
+ *
+ * After splash, the surface GL state stays alive long enough for the
+ * auto display-latency measurement to render frames through the same
+ * full-screen composite path real cues use. renderMeasurementFrame()
+ * draws a palette-pulsing radial aura behind the centered logo.
  */
 class StartupSplash {
 public:
@@ -50,6 +56,18 @@ public:
     /** Show splash on the given backend for durationSeconds. No-op if load failed. */
     void show(DisplayBackend* backend, DisplayManager* displayManager, double durationSeconds);
 
+    /**
+     * Render one measurement frame: full-screen radial aura cycling through
+     * the active palette + centered logo composited on top. Caller is
+     * responsible for makeCurrent/swap/page-flip; this function only issues
+     * GL draw calls into the currently-bound framebuffer.
+     */
+    void renderMeasurementFrame(int viewportWidth, int viewportHeight,
+                                int frameIndex, int totalFrames);
+
+    /** Read-only view of the active 6-stop RGBA palette (Commit 4 wires extraction). */
+    const std::array<float, 24>& getPalette() const { return palette_; }
+
 private:
     unsigned char* imageData_ = nullptr;
     int imageWidth_ = 0;
@@ -61,7 +79,17 @@ private:
     unsigned int quadVAO_ = 0;
     unsigned int quadVBO_ = 0;
 
+    // Measurement-pulse GL state (compiled lazily on first renderMeasurementFrame)
+    unsigned int pulseProgram_ = 0;
+    unsigned int pulseVAO_ = 0;
+    unsigned int pulseVBO_ = 0;
+
+    // 6 RGBA stops; default initialized to the brand fallback palette in the constructor.
+    // Commit 4 will optionally overwrite this from logo median-cut extraction.
+    std::array<float, 24> palette_{};
+
     bool initGL();
+    bool ensureMeasurementGL();
     void cleanupGL();
     void renderCenteredQuad(int viewportWidth, int viewportHeight);
     void showDRM(DisplayBackend* backend, double durationSeconds);
