@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <thread>
 
 using namespace videocomposer;
@@ -31,13 +32,23 @@ using namespace videocomposer::test;
 
 namespace {
 
-// Build a (sec, usec, msc) tuple T_ms after some base instant, then call
-// recordFlip. usec wraparound is handled by passing the absolute time in ms
-// folded into sec/usec the way DRM events do.
-void flipAtMs(PresentationTiming& pt, uint64_t total_ms, unsigned int msc) {
-    unsigned int sec = static_cast<unsigned int>(total_ms / 1000ULL);
-    unsigned int usec = static_cast<unsigned int>((total_ms % 1000ULL) * 1000ULL);
+// Synthetic flip "right now" in CLOCK_MONOTONIC, encoded into the (sec, usec)
+// DRM event payload. recordFlip pairs against current_.ust (kernel hardware
+// timestamp) for the swap-chain delta, so test flip timestamps must live in
+// the same clock domain as recordSubmit's getCurrentTimeNs().
+void flipNow(PresentationTiming& pt, unsigned int msc) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t total_us = static_cast<int64_t>(ts.tv_sec) * 1000000LL + ts.tv_nsec / 1000LL;
+    unsigned int sec = static_cast<unsigned int>(total_us / 1000000LL);
+    unsigned int usec = static_cast<unsigned int>(total_us % 1000000LL);
     pt.recordFlip(sec, usec, msc);
+}
+
+// Synthetic flip with a deliberately-zero ust (sec=0, usec=0). Used to
+// verify the "kernel didn't supply a timestamp" guard added in Commit 9.
+void flipWithZeroUst(PresentationTiming& pt, unsigned int msc) {
+    pt.recordFlip(0u, 0u, msc);
 }
 
 }  // namespace
@@ -48,7 +59,7 @@ bool test_PresentationTiming_CaptureDisabled_NoOp() {
     // Capture starts disabled; recordSubmit must not collect anything.
     for (int i = 0; i < 50; ++i) {
         pt.recordSubmit();
-        flipAtMs(pt, static_cast<uint64_t>(1000 + i * 16), static_cast<unsigned int>(i + 1));
+        flipNow(pt, static_cast<unsigned int>(i + 1));
     }
     auto stats = pt.getSwapChainLatencyStats();
     TEST_ASSERT_FALSE(stats.valid);
@@ -68,15 +79,44 @@ bool test_PresentationTiming_FifoPairing() {
     pt.recordSubmit();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    flipAtMs(pt, 1000, 1);
-    flipAtMs(pt, 1008, 2);
-    flipAtMs(pt, 1016, 3);
+    flipNow(pt, 1);
+    flipNow(pt, 2);
+    flipNow(pt, 3);
 
     auto stats = pt.getSwapChainLatencyStats();
     TEST_ASSERT_TRUE(stats.valid);
     TEST_ASSERT_EQ(stats.sampleCount, static_cast<size_t>(3));
+    // Submits at t0, t0+5, t0+10; flips around t0+50.
+    // Pair 1: ~50 ms; pair 2: ~45 ms; pair 3: ~40 ms.
     TEST_ASSERT_TRUE(stats.medianNs > 30 * 1000000LL);
     TEST_ASSERT_TRUE(stats.medianNs < 200 * 1000000LL);
+    return true;
+}
+
+bool test_PresentationTiming_FifoPairing_UsesKernelUst() {
+    // Commit 9 specific: confirm recordFlip pairs against current_.ust
+    // (kernel timestamp from sec/usec) and NOT against display_time
+    // (userspace receipt time). With ust == 0 the sample MUST be
+    // dropped, even though display_time would have produced a
+    // legitimate-looking positive delta.
+    PresentationTiming pt;
+    pt.init(60.0);
+    pt.enableLatencyCapture(64);
+
+    pt.recordSubmit();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    flipWithZeroUst(pt, 1);
+
+    auto stats = pt.getSwapChainLatencyStats();
+    TEST_ASSERT_EQ(stats.sampleCount, static_cast<size_t>(0));
+
+    // Now a legitimate flipNow should pair against the second submit.
+    pt.recordSubmit();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    flipNow(pt, 2);
+    auto stats2 = pt.getSwapChainLatencyStats();
+    TEST_ASSERT_EQ(stats2.sampleCount, static_cast<size_t>(1));
+    TEST_ASSERT_TRUE(stats2.medianNs > 0);
     return true;
 }
 
@@ -91,7 +131,7 @@ bool test_PresentationTiming_DiscardPendingSubmit() {
     pt.discardPendingSubmit();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    flipAtMs(pt, 1000, 1);
+    flipNow(pt, 1);
 
     auto stats = pt.getSwapChainLatencyStats();
     TEST_ASSERT_EQ(stats.sampleCount, static_cast<size_t>(1));
@@ -108,11 +148,11 @@ bool test_PresentationTiming_StatisticsMedianAndP95() {
     for (int i = 0; i < 20; ++i) {
         pt.recordSubmit();
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        flipAtMs(pt, static_cast<uint64_t>(i * 16), static_cast<unsigned int>(i + 1));
+        flipNow(pt, static_cast<unsigned int>(i + 1));
     }
     pt.recordSubmit();
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    flipAtMs(pt, 9000, 99);
+    flipNow(pt, 99);
 
     auto stats = pt.getSwapChainLatencyStats();
     TEST_ASSERT_TRUE(stats.valid);
@@ -130,7 +170,7 @@ bool test_PresentationTiming_ResetClearsState() {
     for (int i = 0; i < 5; ++i) {
         pt.recordSubmit();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        flipAtMs(pt, static_cast<uint64_t>(i * 16), static_cast<unsigned int>(i + 1));
+        flipNow(pt, static_cast<unsigned int>(i + 1));
     }
     auto before = pt.getSwapChainLatencyStats();
     TEST_ASSERT_TRUE(before.sampleCount > 0);
@@ -142,7 +182,7 @@ bool test_PresentationTiming_ResetClearsState() {
 
     pt.recordSubmit();
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    flipAtMs(pt, 100, 1);
+    flipNow(pt, 1);
     auto resumed = pt.getSwapChainLatencyStats();
     TEST_ASSERT_EQ(resumed.sampleCount, static_cast<size_t>(1));
     return true;
@@ -164,7 +204,7 @@ bool test_PresentationTiming_ConcurrentSubmitFlip() {
     unsigned int msc = 0;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
     while (std::chrono::steady_clock::now() < deadline) {
-        flipAtMs(pt, static_cast<uint64_t>(msc) * 16, ++msc);
+        flipNow(pt, ++msc);
         std::this_thread::sleep_for(std::chrono::microseconds(800));
     }
     stop.store(true);

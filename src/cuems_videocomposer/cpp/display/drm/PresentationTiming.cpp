@@ -132,17 +132,28 @@ void PresentationTiming::recordFlip(unsigned int sec, unsigned int usec, unsigne
     // Pair with the front pending submit (FIFO per surface) and record the
     // submit→flip latency sample. Capture-disabled = pendingSubmits_ stays
     // empty, so this branch is also a no-op on the production hot path.
+    //
+    // The flip side of the pair uses current_.ust — the kernel's hardware
+    // vsync timestamp (CLOCK_MONOTONIC, same domain as recordSubmit's
+    // getCurrentTimeNs). This measures userspace-submit → actual hardware
+    // flip; using current_.display_time instead would add the kernel-to-
+    // userspace event-delivery latency (~100-500 µs of jitter).
+    //
+    // Skip the sample if the kernel didn't supply a usable timestamp
+    // (current_.ust == 0) — rare, but seen on some atomic-only drivers.
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (captureEnabled_ && !pendingSubmits_.empty()) {
             int64_t submit_ns = pendingSubmits_.front();
             pendingSubmits_.pop_front();
-            int64_t delta = current_.display_time - submit_ns;
-            if (delta > 0) {
-                if (latencySamples_.size() >= maxSamples_ && maxSamples_ > 0) {
-                    latencySamples_.erase(latencySamples_.begin());
+            if (current_.ust > 0) {
+                int64_t delta = current_.ust - submit_ns;
+                if (delta > 0) {
+                    if (latencySamples_.size() >= maxSamples_ && maxSamples_ > 0) {
+                        latencySamples_.erase(latencySamples_.begin());
+                    }
+                    latencySamples_.push_back(delta);
                 }
-                latencySamples_.push_back(delta);
             }
         }
     }

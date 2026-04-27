@@ -50,6 +50,7 @@ extern bool test_MTCDecoder();
 
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
+extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
 extern bool test_PresentationTiming_DiscardPendingSubmit();
 extern bool test_PresentationTiming_StatisticsMedianAndP95();
 extern bool test_PresentationTiming_ResetClearsState();
@@ -87,6 +88,7 @@ int main() {
 
     TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);
+    TestFramework::instance().addTest("PresentationTiming_FifoPairing_UsesKernelUst", test_PresentationTiming_FifoPairing_UsesKernelUst);
     TestFramework::instance().addTest("PresentationTiming_DiscardPendingSubmit", test_PresentationTiming_DiscardPendingSubmit);
     TestFramework::instance().addTest("PresentationTiming_StatisticsMedianAndP95", test_PresentationTiming_StatisticsMedianAndP95);
     TestFramework::instance().addTest("PresentationTiming_ResetClearsState", test_PresentationTiming_ResetClearsState);
