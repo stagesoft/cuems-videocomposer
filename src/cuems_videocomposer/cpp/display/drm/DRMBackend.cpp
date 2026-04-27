@@ -31,7 +31,9 @@
 #include "../../layer/VideoLayer.h"
 #include "../../osd/OSDManager.h"
 #include "../../utils/Logger.h"
+#include <cerrno>
 #include <cmath>
+#include <set>
 
 #include <algorithm>
 #include <chrono>
@@ -1239,9 +1241,11 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
                                         StartupSplash* splash) {
     constexpr int kPanelResponseMs = 5;
     constexpr int kFallbackMs = 33;
-    constexpr double kWallClockTimeoutSec = 3.0;
-    constexpr int64_t kVsyncP95MultiplierLimit = 4;
+    constexpr double kWallClockTimeoutSec = 4.0;
+    constexpr int64_t kVsyncP95MultiplierLimit = 6;
     constexpr size_t kMinAcceptableSamples = 30;
+    constexpr int kMaxPreFill = 6;
+    constexpr size_t kMinPoolDepthForAsync = 2;  // ≤1 successful pre-fill ⇒ no swap-chain depth to measure
 
     if (surfaces_.empty()) {
         LOG_INFO << "DisplayLatency: no surfaces, falling back to " << kFallbackMs << " ms";
@@ -1276,64 +1280,64 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
         }
         auto& pt = surface->getPresentationTiming();
         pt.reset();
-        pt.enableLatencyCapture(static_cast<size_t>(warmupFrames + sampleFrames));
+        // Capacity = warmup + pre-fill + steady-state + drain (generous)
+        pt.enableLatencyCapture(static_cast<size_t>(warmupFrames + kMaxPreFill + sampleFrames + 8));
     }
 
     const int totalFrames = warmupFrames + sampleFrames;
     auto loopStart = std::chrono::steady_clock::now();
+
+    auto wallClockExceeded = [&]() -> bool {
+        return std::chrono::steady_clock::now() - loopStart >
+               std::chrono::duration<double>(kWallClockTimeoutSec);
+    };
+
+    auto renderOne = [&](DRMSurface* s, int frameIdx) -> void {
+        int w = static_cast<int>(s->getWidth());
+        int h = static_cast<int>(s->getHeight());
+        if (splash) {
+            splash->renderMeasurementFrame(w, h, frameIdx, totalFrames);
+        } else {
+            float t = static_cast<float>(frameIdx) / static_cast<float>(std::max(1, totalFrames));
+            glViewport(0, 0, w, h);
+            glClearColor(0.5f + 0.5f * std::sin(t * 6.28318f),
+                         0.5f + 0.5f * std::sin(t * 6.28318f + 2.094f),
+                         0.5f + 0.5f * std::sin(t * 6.28318f + 4.188f),
+                         1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+    };
+
+    // ===== Phase A — Warmup (synchronous, frame-outer; unchanged from Phase 1) =====
     bool extendedWarmupApplied = false;
     int extraWarmup = 0;
-
     int frame = 0;
-    while (frame < totalFrames + extraWarmup) {
-        if (std::chrono::steady_clock::now() - loopStart >
-            std::chrono::duration<double>(kWallClockTimeoutSec)) {
-            LOG_WARNING << "DisplayLatency: wall-clock timeout at frame " << frame
-                        << " — aborting measurement";
+    while (frame < warmupFrames + extraWarmup) {
+        if (wallClockExceeded()) {
+            LOG_WARNING << "DisplayLatency: wall-clock timeout in warmup at frame " << frame;
             break;
         }
-
         for (auto& [name, surface] : surfaces_) {
-            if (!surface || !surface->isInitialized()) {
-                continue;
-            }
-            if (!surface->beginFrame()) {
-                continue;
-            }
-            int w = static_cast<int>(surface->getWidth());
-            int h = static_cast<int>(surface->getHeight());
-            if (splash) {
-                splash->renderMeasurementFrame(w, h, frame, totalFrames);
-            } else {
-                // Fallback: full-screen colour cycle so the BO still rotates.
-                float t = static_cast<float>(frame) / static_cast<float>(std::max(1, totalFrames));
-                glViewport(0, 0, w, h);
-                glClearColor(0.5f + 0.5f * std::sin(t * 6.28318f),
-                             0.5f + 0.5f * std::sin(t * 6.28318f + 2.094f),
-                             0.5f + 0.5f * std::sin(t * 6.28318f + 4.188f),
-                             1.0f);
-                glClear(GL_COLOR_BUFFER_BIT);
-            }
+            if (!surface || !surface->isInitialized()) continue;
+            if (!surface->beginFrame()) continue;
+            renderOne(surface.get(), frame);
             surface->endFrame();
-            if (surface->isFlipPending()) {
-                surface->waitForFlip();
-            }
+            if (surface->isFlipPending()) surface->waitForFlip();
             surface->schedulePageFlip();
         }
         for (auto& [name, surface] : surfaces_) {
-            if (surface && surface->isFlipPending()) {
-                surface->waitForFlip();
-            }
+            if (surface && surface->isFlipPending()) surface->waitForFlip();
         }
 
-        // After warmupFrames, check whether any surface still has no recorded
-        // submits — if so, we're stuck in setCrtc-path. Extend warmup once.
+        // Extended-warmup detection: at the end of warmup, if any surface
+        // has produced zero captured submit→flip pairings, we're stuck in
+        // SetCrtc-path. Extend warmup once. Lives here (frame-outer warmup
+        // phase) and uses the global frame counter — semantics preserved
+        // from Phase 1.
         if (frame == warmupFrames - 1 && !extendedWarmupApplied) {
             bool anyEmpty = false;
             for (auto& [name, surface] : surfaces_) {
-                if (!surface || !surface->isInitialized()) {
-                    continue;
-                }
+                if (!surface || !surface->isInitialized()) continue;
                 auto stats = surface->getPresentationTiming().getSwapChainLatencyStats();
                 if (stats.sampleCount == 0) {
                     anyEmpty = true;
@@ -1347,11 +1351,80 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
                 extendedWarmupApplied = true;
             }
         }
-
         ++frame;
     }
 
-    // Aggregate: per-surface stats → per-surface total → max across surfaces
+    // ===== Phase B — Pre-fill (per-surface, capped, async tryAsyncFlip) =====
+    // Submit frames in tight succession until either (a) tryAsyncFlip returns
+    // EBUSY/ENOSPC ("pool full") OR (b) kMaxPreFill submits have accumulated.
+    // If only ≤1 in-flight, mark surface single-buffer — async measurement
+    // won't reveal swap-chain depth there.
+    std::set<std::string> singleBufferSurfaces;
+    int preFillFrameIdx = warmupFrames;
+    for (auto& [name, surface] : surfaces_) {
+        if (!surface || !surface->isInitialized()) continue;
+        if (wallClockExceeded()) break;
+        int submitted = 0;
+        while (submitted < kMaxPreFill) {
+            if (!surface->beginFrame()) break;
+            renderOne(surface.get(), preFillFrameIdx);
+            surface->endFrame();
+            int ret = surface->tryAsyncFlip();
+            if (ret == 0) {
+                ++submitted;
+                ++preFillFrameIdx;
+            } else if (ret == EBUSY || ret == ENOSPC) {
+                break;  // pool full ⇒ done pre-filling this surface
+            } else {
+                LOG_WARNING << "DisplayLatency[" << name << "]: tryAsyncFlip during pre-fill failed errno="
+                            << ret << " — falling back to refresh-derived";
+                singleBufferSurfaces.insert(name);
+                break;
+            }
+        }
+        if (submitted < static_cast<int>(kMinPoolDepthForAsync)) {
+            LOG_WARNING << "DisplayLatency[" << name << "]: pre-fill produced only " << submitted
+                        << " in-flight; pool depth ≤ 1 — async measurement will not improve on synchronous result, falling back to refresh-derived";
+            singleBufferSurfaces.insert(name);
+        }
+    }
+
+    // ===== Phase C — Steady-state (frame-outer, sampleFrames iterations) =====
+    int steadyFrameIdx = preFillFrameIdx;
+    for (int s_frame = 0; s_frame < sampleFrames; ++s_frame) {
+        if (wallClockExceeded()) {
+            LOG_WARNING << "DisplayLatency: wall-clock timeout in steady-state at frame " << s_frame;
+            break;
+        }
+        for (auto& [name, surface] : surfaces_) {
+            if (!surface || !surface->isInitialized()) continue;
+            if (singleBufferSurfaces.count(name)) continue;
+            // Block for the oldest pending flip — this is the term we want
+            // to measure (full pool depth × vsync).
+            surface->waitForFlip();
+            if (!surface->beginFrame()) continue;
+            renderOne(surface.get(), steadyFrameIdx);
+            surface->endFrame();
+            int ret = surface->tryAsyncFlip();
+            if (ret != 0 && ret != EBUSY && ret != ENOSPC) {
+                LOG_WARNING << "DisplayLatency[" << name << "]: tryAsyncFlip mid-steady-state errno="
+                            << ret << " — skipping frame";
+            }
+            ++steadyFrameIdx;
+        }
+    }
+
+    // ===== Phase D — Drain (let all in-flight flips complete) =====
+    for (auto& [name, surface] : surfaces_) {
+        if (!surface || !surface->isInitialized()) continue;
+        if (singleBufferSurfaces.count(name)) continue;
+        if (wallClockExceeded()) break;
+        while (surface->isFlipPending()) {
+            surface->waitForFlip();
+        }
+    }
+
+    // ===== Aggregate: per-surface stats → per-surface total → max across surfaces =====
     int appliedMs = 0;
     int validSurfaces = 0;
     int fallbackMaxMs = 0;
@@ -1372,11 +1445,18 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
             fallbackMaxMs = derivedFallback;
         }
 
+        if (singleBufferSurfaces.count(name)) {
+            LOG_INFO << "DisplayLatency[" << name << "]: single-buffer pool — using refresh-derived fallback "
+                     << derivedFallback << "ms";
+            pt.disableLatencyCapture();
+            continue;
+        }
+
         if (!stats.valid || stats.sampleCount < kMinAcceptableSamples ||
             stats.p95Ns > kVsyncP95MultiplierLimit * expectedVsyncNs) {
             LOG_WARNING << "DisplayLatency[" << name << "]: measurement noisy (n="
                         << stats.sampleCount << ", p95="
-                        << (stats.p95Ns / 1e6) << "ms / 4×vsync="
+                        << (stats.p95Ns / 1e6) << "ms / 6×vsync="
                         << (kVsyncP95MultiplierLimit * expectedVsyncNs / 1e6)
                         << "ms) — using refresh-derived fallback " << derivedFallback << "ms";
             pt.disableLatencyCapture();
