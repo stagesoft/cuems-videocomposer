@@ -984,7 +984,8 @@ bool DRMSurface::schedulePageFlip() {
     }
     
     flipPending_ = true;
-    
+    presentationTiming_.recordSubmit();
+
     // DON'T release previous buffer yet - it's still being displayed!
     // Store it for release after the flip completes (in pageFlipHandler)
     // This is critical for render-ahead: if we release immediately,
@@ -1107,6 +1108,9 @@ void DRMSurface::waitForFlip() {
 
         if (ret == 0) {
             LOG_WARNING << "DRMSurface: Page flip timeout";
+            // Drop the orphaned submit timestamp so it cannot mispair with a
+            // later flip event (FIFO would otherwise drift by one).
+            presentationTiming_.discardPendingSubmit();
             break;
         }
 
