@@ -45,6 +45,11 @@ extern bool test_Integration_LayerManagerWithMultipleLayers();
 extern bool test_Integration_VideoLayerTimeScaling();
 extern bool test_Integration_LayerProperties();
 extern bool test_Integration_MIDISyncSource_DisplayLatencyAtomicity();
+extern bool test_Integration_MIDISyncSource_GetDisplayLatencyMs();
+extern bool test_Integration_FramerateConverter_DelegatesDisplayLatency();
+#ifdef HAVE_MTCRECEIVER
+extern bool test_Integration_MIDISyncSource_NoJumpSnapBias();
+#endif
 
 extern bool test_MTCDecoder();
 
@@ -83,6 +88,11 @@ int main() {
     TestFramework::instance().addTest("Integration_VideoLayerTimeScaling", test_Integration_VideoLayerTimeScaling);
     TestFramework::instance().addTest("Integration_LayerProperties", test_Integration_LayerProperties);
     TestFramework::instance().addTest("Integration_MIDISyncSource_DisplayLatencyAtomicity", test_Integration_MIDISyncSource_DisplayLatencyAtomicity);
+    TestFramework::instance().addTest("Integration_MIDISyncSource_GetDisplayLatencyMs", test_Integration_MIDISyncSource_GetDisplayLatencyMs);
+    TestFramework::instance().addTest("Integration_FramerateConverter_DelegatesDisplayLatency", test_Integration_FramerateConverter_DelegatesDisplayLatency);
+#ifdef HAVE_MTCRECEIVER
+    TestFramework::instance().addTest("Integration_MIDISyncSource_NoJumpSnapBias", test_Integration_MIDISyncSource_NoJumpSnapBias);
+#endif
 
     TestFramework::instance().addTest("MTCDecoder", test_MTCDecoder);
 
