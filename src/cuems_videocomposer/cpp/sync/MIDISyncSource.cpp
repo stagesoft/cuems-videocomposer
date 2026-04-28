@@ -168,6 +168,29 @@ int64_t MIDISyncSource::pollFrame(uint8_t* rolling) {
         }
     }
 
+    // #region DEBUG
+    {
+        static long long s_lastTickNs = 0;
+        struct timespec _ts;
+        clock_gettime(CLOCK_MONOTONIC, &_ts);
+        long long _nowNs = (long long)_ts.tv_sec * 1000000000LL + _ts.tv_nsec;
+        if (_nowNs - s_lastTickNs >= 1000000000LL) {
+            s_lastTickNs = _nowNs;
+#ifdef HAVE_MTCRECEIVER
+            long _mtcMs = (long)MtcReceiver::mtcHead.load();
+#else
+            long _mtcMs = -1;
+#endif
+            FILE* _f = fopen("/tmp/.claude/debug.log", "a");
+            if (_f) {
+                fprintf(_f, "[DEBUG H3/H4] VIDEO_TICK wall_ns=%lld mtc_ms=%ld\n",
+                        (long long)_nowNs, _mtcMs);
+                fclose(_f);
+            }
+        }
+    }
+    // #endregion DEBUG
+
     return frame;
 }
 
@@ -306,23 +329,6 @@ long MIDISyncSource::getTimeMs() const {
             s_smoothUs += (errorMs * 1000LL) / CORRECTION_DIVISOR;
         }
     }
-
-    // #region DEBUG
-    {
-        static long long s_lastTickNs = 0;
-        long long _nowNs = nowUs * 1000LL;
-        if (_nowNs - s_lastTickNs >= 1000000000LL) {
-            s_lastTickNs = _nowNs;
-            long _ret = static_cast<long>(s_smoothUs / 1000LL) + displayLatencyMs_.load();
-            FILE* _f = fopen("/tmp/.claude/debug.log", "a");
-            if (_f) {
-                fprintf(_f, "[DEBUG H3/H4] VIDEO_TICK wall_ns=%lld mtc_ms=%ld getTimeMs=%ld\n",
-                        (long long)_nowNs, (long)baseMtcMs, (long)_ret);
-                fclose(_f);
-            }
-        }
-    }
-    // #endregion DEBUG
 
     return static_cast<long>(s_smoothUs / 1000LL) + displayLatencyMs_.load();
 #else
