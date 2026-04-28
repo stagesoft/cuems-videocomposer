@@ -195,8 +195,8 @@ int64_t MIDISyncSource::pollFrame(uint8_t* rolling) {
             FILE* _f = fopen("/tmp/.claude/debug.log", "a");
             if (_f) {
                 long _gtm = getTimeMs();
-                fprintf(_f, "[DEBUG H3/H4] VIDEO_TICK wall_ns=%lld mtc_ms=%ld getTimeMs=%ld\n",
-                        (long long)_nowNs, _mtcMs, _gtm);
+                fprintf(_f, "[DEBUG H3/H4] VIDEO_TICK wall_ns=%lld mtc_ms=%ld getTimeMs=%ld frame=%lld\n",
+                        (long long)_nowNs, _mtcMs, _gtm, (long long)frame);
                 fclose(_f);
             }
         }
