@@ -94,6 +94,14 @@ public:
      * @return Time in milliseconds, or -1 if not available
      */
     virtual long getTimeMs() const { return -1; }
+
+    /**
+     * Get the display-pipeline latency compensation in milliseconds.
+     * MIDISyncSource advances pollFrame() by this amount; callers that need
+     * the raw wire-MTC position (e.g. OSD display) subtract it back.
+     * @return Latency in milliseconds (0 if not applicable)
+     */
+    virtual long getDisplayLatencyMs() const { return 0; }
 };
 
 } // namespace videocomposer

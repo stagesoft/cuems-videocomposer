@@ -82,6 +82,11 @@ public:
     long getTimeMs() const override;
 
     /**
+     * Delegate to wrapped sync source's getDisplayLatencyMs()
+     */
+    long getDisplayLatencyMs() const override;
+
+    /**
      * Get the rolling state from the last pollFrame() call.
      * Used by shared secondary layers to read the driver's rolling state
      * without calling pollFrame() themselves.
