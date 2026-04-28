@@ -279,6 +279,14 @@ long MIDISyncSource::getTimeMs() const {
         // Large jump (seek / cue change): snap and reset
         if (mtcStepMs > 200 || mtcStepMs < -10) {
             s_smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
+            // Reset wall-clock anchor so the unconditional advance below
+            // contributes 0 µs on this call. Without this, sparse callers
+            // (e.g. 1 Hz instrumentation polls) re-add up to the 100 ms
+            // wallDelta cap on top of the just-snapped baseMtc, and
+            // justSnapped suppresses the anti-drift correction — yielding
+            // a steady-state +100 ms bias visible to FramerateConverter
+            // when video fps differs from MTC fps.
+            s_lastWcUs = nowUs;
             s_rate = 1.0;
             justSnapped = true;
         }
