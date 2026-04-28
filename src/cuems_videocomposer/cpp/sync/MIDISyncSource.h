@@ -113,6 +113,12 @@ public:
      */
     void setDisplayLatencyMs(long ms);
 
+    /**
+     * Get the display-pipeline latency compensation in ms.
+     * Thread-safe (atomic read).
+     */
+    long getDisplayLatencyMs() const override { return displayLatencyMs_.load(); }
+
 private:
     std::unique_ptr<MIDIDriver> driver_;
     MTCDecoder mtcDecoder_;
