@@ -154,10 +154,10 @@ int64_t MIDISyncSource::pollFrame(uint8_t* rolling) {
         // clock when the GPU/scanout pipeline actually presents it on screen.
         // Conversion is at MTC framerate; FramerateConverterSyncSource may
         // re-compute downstream from getTimeMs() for non-matching video fps.
-        long latencyMs = displayLatencyMs_.load();
-        if (latencyMs > 0 && framerate_ > 0.0) {
-            frame += static_cast<int64_t>(std::llround(
-                static_cast<double>(latencyMs) * framerate_ / 1000.0));
+        long latencyCompMs = displayLatencyMs_.load();
+        if (latencyCompMs > 0 && framerate_ > 0.0) {
+            frame += static_cast<int64_t>(std::round(
+                static_cast<double>(latencyCompMs) * framerate_ / 1000.0));
         }
         currentFrame_ = frame;
     }
