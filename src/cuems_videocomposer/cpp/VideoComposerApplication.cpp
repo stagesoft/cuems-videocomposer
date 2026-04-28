@@ -424,13 +424,23 @@ void VideoComposerApplication::updateLayers() {
         if (syncFrame >= 0) {
             // Get framerate from sync source (MTC framerate)
             double syncFps = globalSyncSource_->getFramerate();
+            // Undo the display-latency advance: pollFrame() returns the
+            // GPU-pipeline-compensated frame, but the OSD must show wire MTC
+            // so operators can compare against an external SMPTE reference.
+            long latencyCompMs = globalSyncSource_->getDisplayLatencyMs();
+            int64_t osdFrame = syncFrame;
+            if (latencyCompMs > 0 && syncFps > 0.0) {
+                int64_t latencyFrames = static_cast<int64_t>(
+                    std::round(static_cast<double>(latencyCompMs) * syncFps / 1000.0));
+                osdFrame = std::max(int64_t(0), syncFrame - latencyFrames);
+            }
             if (syncFps > 0.0) {
                 // Display sync source timecode (MTC) - this is monotonic and won't jump backwards
-                std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, syncFps);
+                std::string smpte = SMPTEUtils::frameToSmpteString(osdFrame, syncFps);
                 osdManager_->setSMPTETimecode(smpte);
-                
+
                 // Also set frame number from sync source
-                osdManager_->setFrameNumber(syncFrame);
+                osdManager_->setFrameNumber(osdFrame);
             } else {
                 // Fallback: use first layer's frame if sync source framerate not available
                 auto layers = layerManager_->getLayers();
@@ -439,9 +449,9 @@ void VideoComposerApplication::updateLayers() {
                     if (layer->isReady()) {
                         FrameInfo info = layer->getFrameInfo();
                         if (info.framerate > 0.0) {
-                            std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
+                            std::string smpte = SMPTEUtils::frameToSmpteString(osdFrame, info.framerate);
                             osdManager_->setSMPTETimecode(smpte);
-                            osdManager_->setFrameNumber(syncFrame);
+                            osdManager_->setFrameNumber(osdFrame);
                         } else {
                             osdManager_->setSMPTETimecode("00:00:00:00");
                         }
