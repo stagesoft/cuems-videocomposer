@@ -26,6 +26,7 @@
 #ifdef HAVE_MTCRECEIVER
 #include "MtcReceiverMIDIDriver.h"
 #endif
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -146,8 +147,18 @@ int64_t MIDISyncSource::pollFrame(uint8_t* rolling) {
 
     // Poll driver for frame (driver handles MIDI message parsing)
     int64_t frame = driver_->pollFrame();
-    
+
     if (frame >= 0) {
+        // Display-pipeline latency compensation: advance the chosen frame so
+        // the buffer submitted now is the one visible at MTC = current wall
+        // clock when the GPU/scanout pipeline actually presents it on screen.
+        // Conversion is at MTC framerate; FramerateConverterSyncSource may
+        // re-compute downstream from getTimeMs() for non-matching video fps.
+        long latencyMs = displayLatencyMs_.load();
+        if (latencyMs > 0 && framerate_ > 0.0) {
+            frame += static_cast<int64_t>(std::llround(
+                static_cast<double>(latencyMs) * framerate_ / 1000.0));
+        }
         currentFrame_ = frame;
     }
 
