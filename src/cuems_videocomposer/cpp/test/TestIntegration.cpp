@@ -25,7 +25,11 @@
 #include "../config/ConfigurationManager.h"
 #include "../input/InputSource.h"
 #include "../sync/SyncSource.h"
+#include "../sync/MIDISyncSource.h"
+#include <atomic>
+#include <chrono>
 #include <memory>
+#include <thread>
 
 using namespace videocomposer;
 using namespace videocomposer::test;
@@ -150,10 +154,48 @@ bool test_Integration_LayerProperties() {
     // Test panorama mode
     props.panoramaMode = true;
     props.panOffset = 500;
-    
+
     TEST_ASSERT_TRUE(props.panoramaMode);
     TEST_ASSERT_EQ(props.panOffset, 500);
-    
+
+    return true;
+}
+
+// Atomicity smoke test: setDisplayLatencyMs from one thread while getTimeMs
+// runs from another. The displayLatencyMs_ field is std::atomic<long>, so
+// reads must always observe a coherent value (one of the writes — never a
+// torn or out-of-range value). The point isn't to verify scheduling order
+// but to catch any future regression that drops the atomic qualifier or
+// adds non-atomic state alongside it.
+bool test_Integration_MIDISyncSource_DisplayLatencyAtomicity() {
+    MIDISyncSource sync;
+    std::atomic<bool> stop{false};
+    std::atomic<long> mismatches{0};
+
+    std::thread writer([&]() {
+        long values[] = {0, 33, 50, 71, 90, 120};
+        size_t i = 0;
+        while (!stop.load()) {
+            sync.setDisplayLatencyMs(values[i % 6]);
+            ++i;
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    });
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    while (std::chrono::steady_clock::now() < deadline) {
+        // No cue is loaded ⇒ getTimeMs returns wire-MTC + compensation. We
+        // can't predict the exact return value, but it must be in the clamped
+        // [-10000, 10_000_000] range — anything wildly outside indicates a torn read.
+        long t = sync.getTimeMs();
+        if (t < -10000 || t > 10000000) {
+            ++mismatches;
+        }
+    }
+    stop.store(true);
+    writer.join();
+
+    TEST_ASSERT_EQ(mismatches.load(), 0L);
     return true;
 }
 

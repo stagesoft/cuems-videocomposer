@@ -114,7 +114,7 @@ private:
     std::unique_ptr<InputSource> createInputSourceFromFile(const std::string& filepath);
     std::unique_ptr<VideoLayer> createEmptyLayer(const std::string& cueId);
     std::unique_ptr<SyncSource> createLayerSyncSource(InputSource* inputSource);
-    void configureMIDISyncSource(MIDISyncSource* midiSync);
+    void configureMIDISyncSource(MIDISyncSource* midiSync, DisplayBackend* displayBackend);
     void setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource);
     
     // Source detection helpers
@@ -137,6 +137,7 @@ private:
     std::unique_ptr<RemoteControl> remoteControl_;
     std::unique_ptr<DisplayBackend> displayBackend_;
     std::unique_ptr<DisplayManager> displayManager_;
+    std::unique_ptr<StartupSplash> splash_;  // kept alive past showStartupSplash() so the auto display-latency measurement can reuse its palette + GL state
     std::unique_ptr<LayerManager> layerManager_;
     std::unique_ptr<OSDManager> osdManager_;
     

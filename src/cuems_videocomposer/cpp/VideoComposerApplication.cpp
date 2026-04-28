@@ -281,11 +281,13 @@ void VideoComposerApplication::showStartupSplash() {
     if (!displayBackend_ || !displayBackend_->isWindowOpen()) {
         return;
     }
-    StartupSplash splash;
-    if (!splash.loadFromEmbedded()) {
+    splash_ = std::make_unique<StartupSplash>();
+    if (!splash_->loadFromEmbedded()) {
+        splash_.reset();
         return;
     }
-    splash.show(displayBackend_.get(), displayManager_.get(), StartupSplash::SPLASH_DURATION_SECONDS);
+    splash_->show(displayBackend_.get(), displayManager_.get(),
+                  StartupSplash::SPLASH_DURATION_SECONDS);
 }
 
 bool VideoComposerApplication::initializeRemoteControl() {
@@ -580,7 +582,8 @@ void VideoComposerApplication::shutdown() {
     initialized_ = false;
 }
 
-void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync) {
+void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync,
+                                                       DisplayBackend* displayBackend) {
     if (!midiSync) {
         return;
     }
@@ -595,21 +598,41 @@ void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync)
     midiSync->setClockAdjustment(midiClkAdj);
     midiSync->setDelay(delay);
 
-    // Apply operator-configured display-pipeline latency compensation
-    // (from --output-latency-ms, fed by engine from settings.xml).
-    // Sentinel -1 means "not set; use the 33 ms hard-coded default".
+    // Display-pipeline latency compensation. Three-way decision:
+    //   1. CLI passed --output-latency-ms <N>  (operator override)  → use N, skip measurement.
+    //   2. CLI did not pass; backend is DRM    (auto)                 → measure on real surfaces.
+    //   3. CLI did not pass; backend is X11/headless                  → leave constructor default 33 ms.
     int outputLatencyMs = config_->getInt("output_latency_ms", -1);
     if (outputLatencyMs >= 0) {
         midiSync->setDisplayLatencyMs(static_cast<long>(outputLatencyMs));
+        LOG_INFO << "DisplayLatency: applied = " << outputLatencyMs
+                 << "ms (operator override via --output-latency-ms)";
+        LOG_INFO << "MIDISyncSource: display latency compensation = "
+                 << outputLatencyMs << " ms";
+        return;
     }
+
+    DRMBackend* drmBackend = dynamic_cast<DRMBackend*>(displayBackend);
+    if (!drmBackend) {
+        LOG_INFO << "DisplayLatency: backend is not DRM, skipping measurement (X11 / headless)";
+        LOG_INFO << "DisplayLatency: applied = 33ms (constructor default)";
+        return;
+    }
+
+    // 30 warmup + 120 sample = 2.0 s of visible aura pulse on a 60 Hz display,
+    // plus the orchestrator's own pre-fill (≤6 frames) and 1 s fade-out tail.
+    int measured = drmBackend->measureDisplayLatencyMs(30, 120, splash_.get());
+    midiSync->setDisplayLatencyMs(static_cast<long>(measured));
+    LOG_INFO << "MIDISyncSource: display latency compensation = " << measured << " ms";
 }
 
 bool VideoComposerApplication::initializeGlobalSyncSource() {
     // Always create and enable global MIDI sync source by default
     auto midiSync = std::make_unique<MIDISyncSource>();
     
-    // Configure MIDI sync source
-    configureMIDISyncSource(midiSync.get());
+    // Configure MIDI sync source (also runs the auto display-latency measurement
+    // when --output-latency-ms is unset and the backend is DRM)
+    configureMIDISyncSource(midiSync.get(), displayBackend_.get());
     
     // Get MIDI port (default: "-1" for autodetect, can be disabled with "none" or "off")
     std::string midiPort = config_->getString("midi_port", "-1");
