@@ -152,12 +152,11 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     }
 
     // Check if a full frame was just received
-    bool fullFrameReceived = MtcReceiver::wasLastUpdateFullFrame;
+    bool fullFrameReceived = MtcReceiver::wasLastUpdateFullFrame.load();
     
-    // Get current timecode frame directly (like xjadeo - discrete updates)
-    // xjadeo uses smpte_to_frame() which calculates: frame = f + fps * (s + 60*m + 3600*h)
-    // This matches xjadeo's approach: only update when complete timecode is received
-    // No incremental updates, no backwards jumps from mtcHead resets
+    // Read the current timecode frame (populated from mtcHead; the driver
+    // below interpolates sub-frame positions for smooth playback, unlike a
+    // pure xjadeo-style discrete-update reader).
     MtcFrame curFrame = MtcReceiver::getCurFrame();
     
     // For detecting resync vs seek: remember last frame we reported
@@ -206,7 +205,9 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     bool isSeekFullFrame = false;
     if (fullFrameReceived) {
         // Check if the full frame position matches where we expect to be
-        // Allow tolerance of 2 frames (accounts for MTC 8-quarter-frame delay)
+        // Allow tolerance of 2 frames as a network-MTC jitter budget.
+        // Not related to any implicit MTC bias — mtcreceiver returns
+        // raw wire-MTC post-Phase-2.
         int64_t frameDiff = std::abs(frame - lastReportedFrame);
         if (lastReportedFrame < 0 || frameDiff > 2) {
             // Position jump or first full frame - this is a SEEK
@@ -279,7 +280,7 @@ bool MtcReceiverMIDIDriver::wasFullFrameReceived() {
     if (result) {
         lastFullFrameReceived_ = false;
         // Also reset the mtcreceiver flag so it doesn't trigger again
-        MtcReceiver::wasLastUpdateFullFrame = false;
+        MtcReceiver::wasLastUpdateFullFrame.store(false);
     }
     return result;
 }

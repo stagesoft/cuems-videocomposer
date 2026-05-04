@@ -121,11 +121,28 @@ public:
     // ===== Page Flipping =====
     
     /**
-     * Schedule page flip (non-blocking)
+     * Schedule page flip (non-blocking).
+     * Production entry point. Falls back to SetCrtc on EBUSY/ENOSPC after
+     * 10 consecutive strikes (legacy compatibility for unstable iGPU
+     * drivers).
      * @return true on success
      */
     bool schedulePageFlip() override;
-    
+
+    /**
+     * Async measurement entry point. Like schedulePageFlip(), but returns
+     * the kernel errno directly and does NOT fall back to SetCrtc on EBUSY/
+     * ENOSPC, and does NOT touch the production failCount strike counter.
+     * Returns -ENOTSUP if the surface is still in warmup or SetCrtc-only
+     * mode (the measurement caller is expected to drive warmup via
+     * schedulePageFlip first).
+     *
+     * @return 0 on success, positive EBUSY/ENOSPC if the GBM pool is full
+     *         (caller should waitForFlip then retry), negative -<errno> on
+     *         other errors.
+     */
+    int tryAsyncFlip();
+
     /**
      * Wait for pending page flip to complete
      * Blocks until flip is done (vsync)
@@ -271,9 +288,15 @@ private:
     
     // Create a DRM framebuffer from GBM buffer
     bool createFramebuffer(gbm_bo* bo, Framebuffer& fb);
-    
+
     // Destroy framebuffer
     void destroyFramebuffer(Framebuffer& fb);
+
+    // Internal page-flip implementation shared by schedulePageFlip and
+    // tryAsyncFlip. allowSetCrtcFallback=true gives production behaviour
+    // (EBUSY → setCrtc fallback, failCount strikeout); =false is the
+    // measurement path (no setCrtc, no failCount touched, raw errno).
+    int doPageFlip(bool allowSetCrtcFallback);
     
     // Page flip handler callback (version 2 — used for non-atomic per-surface flips)
     static void pageFlipHandler(int fd, unsigned int frame,

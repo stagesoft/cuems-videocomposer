@@ -890,11 +890,13 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestConfigurationManager.cpp
         src/cuems_videocomposer/cpp/test/TestIntegration.cpp
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
+        src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
     )
     
     # C++ implementation files needed by tests
     set(TEST_CPP_SOURCES
         src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
+        src/cuems_videocomposer/cpp/display/drm/PresentationTiming.cpp
         src/cuems_videocomposer/cpp/layer/VideoLayer.cpp
         src/cuems_videocomposer/cpp/layer/LayerPlayback.cpp
         src/cuems_videocomposer/cpp/layer/LayerDisplay.cpp

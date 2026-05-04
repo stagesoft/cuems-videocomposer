@@ -141,6 +141,10 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
             if (i + 1 < argc) {
                 setInt("offset", std::atoi(argv[++i]));
             }
+        } else if (arg == "--output-latency-ms") {
+            if (i + 1 < argc) {
+                setInt("output_latency_ms", std::atoi(argv[++i]));
+            }
         } else if (arg == "--midi" || arg == "-m") {
             if (i + 1 < argc) {
                 setString("midi_port", argv[++i]);

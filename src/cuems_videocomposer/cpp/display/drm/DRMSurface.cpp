@@ -824,104 +824,110 @@ void DRMSurface::destroyFramebuffer(Framebuffer& fb) {
     fb.bo = nullptr;
 }
 
-bool DRMSurface::schedulePageFlip() {
+// Internal page-flip implementation shared by schedulePageFlip (production)
+// and tryAsyncFlip (measurement).
+//
+// Returns 0 on success.
+// Returns positive EBUSY/ENOSPC when the GBM pool is full (the kernel-level
+// cause). When allowSetCrtcFallback=true the production caller will instead
+// see this as success-via-setCrtc; when false the measurement caller gets
+// the raw errno.
+// Returns -<errno> for other failures (lock/createFB/modeset/page-flip).
+//
+// IMPORTANT — failCount strike counter at the EBUSY branch is only touched
+// when allowSetCrtcFallback=true. Async measurement intentionally provokes
+// EBUSY on every iteration past the GBM pool depth; if those EBUSYs were
+// counted, after 10 measurement-time strikes a production surface would
+// silently flip to useSetCrtcOnly_=true, breaking page-flip rendering for
+// real cues.
+int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
     if (!initialized_ || !outputManager_ || flipPending_) {
-        return false;
+        return -EINVAL;
     }
-    
-    // Lock front buffer from GBM surface
-    // Note: glFinish() is called before swapBuffers to ensure rendering is complete
+
     gbm_bo* bo = gbm_surface_lock_front_buffer(gbmSurface_);
     if (!bo) {
         LOG_ERROR << "DRMSurface: Failed to lock front buffer";
-        return false;
+        return -ENOBUFS;
     }
-    
-    // Check if we need to create a new framebuffer
+
     if (nextFb_.bo != bo) {
         destroyFramebuffer(nextFb_);
         if (!createFramebuffer(bo, nextFb_)) {
             gbm_surface_release_buffer(gbmSurface_, bo);
-            return false;
+            return -ENOMEM;
         }
     }
-    
+
     int ret;
-    
-    // First frame: use drmModeSetCrtc to set the mode and initial framebuffer
-    // Subsequent frames: use drmModePageFlip for vsync'd updates
+
+    // First frame: drmModeSetCrtc to set the mode and initial framebuffer.
+    // Subsequent frames: drmModePageFlip for vsync'd updates.
     if (!modeSet_) {
         const DRMConnector* conn = outputManager_->getConnectorByName(outputName_);
         if (!conn) {
             LOG_ERROR << "DRMSurface: No connector info for initial modeset";
             gbm_surface_release_buffer(gbmSurface_, bo);
-            return false;
+            return -ENODEV;
         }
-        
-        // Use currentMode if available (set after mode change), otherwise use savedCrtc
+
         drmModeModeInfo* mode = nullptr;
         if (conn->hasCurrentMode) {
             mode = const_cast<drmModeModeInfo*>(&conn->currentMode);
         } else if (conn->savedCrtc) {
             mode = &conn->savedCrtc->mode;
         }
-        
+
         if (!mode) {
             LOG_ERROR << "DRMSurface: No mode available for modeset";
             gbm_surface_release_buffer(gbmSurface_, bo);
-            return false;
+            return -ENODEV;
         }
-        
-        LOG_INFO << "DRMSurface: Setting mode for " << conn->info.name 
+
+        LOG_INFO << "DRMSurface: Setting mode for " << conn->info.name
                  << " (" << mode->hdisplay << "x" << mode->vdisplay << ")";
         ret = drmModeSetCrtc(outputManager_->getFd(), crtcId_,
                             nextFb_.fbId, 0, 0, &connectorId_, 1, mode);
-        
+
         if (ret != 0) {
             LOG_ERROR << "DRMSurface: Modeset failed: " << strerror(-ret);
             gbm_surface_release_buffer(gbmSurface_, bo);
-            return false;
+            return ret;  // already negative
         }
-        
+
         modeSet_ = true;
         warmupFrames_ = 5;  // Use SetCrtc for next 5 frames (Intel driver quirk)
         LOG_DEBUG << "DRMSurface: Modeset successful, framebuffer displayed";
-        
-        // Release previous buffer if any
+
         if (currentBo_) {
             gbm_surface_release_buffer(gbmSurface_, currentBo_);
         }
         currentBo_ = bo;
-        
-        // Swap framebuffers
         std::swap(currentFb_, nextFb_);
-        
-        // No flip pending for modeset
-        return true;
+        return 0;  // No flip pending for modeset
     }
-    
-    // Helper lambda for SetCrtc path (used during warmup and as fallback)
+
+    // Helper lambda for SetCrtc path (production-only fallback)
     auto doSetCrtc = [&]() -> bool {
         const DRMConnector* conn = outputManager_->getConnectorByName(outputName_);
         if (!conn) return false;
-        
+
         drmModeModeInfo* mode = nullptr;
         if (conn->hasCurrentMode) {
             mode = const_cast<drmModeModeInfo*>(&conn->currentMode);
         } else if (conn->savedCrtc) {
             mode = &conn->savedCrtc->mode;
         }
-        
+
         if (!mode) return false;
-        
+
         int r = drmModeSetCrtc(outputManager_->getFd(), crtcId_,
                                nextFb_.fbId, 0, 0, &connectorId_, 1, mode);
         if (r != 0) {
             LOG_ERROR << "DRMSurface: SetCrtc failed: " << strerror(-r);
             return false;
         }
-        
-        // SetCrtc succeeded - update buffer tracking
+
         if (currentBo_) {
             gbm_surface_release_buffer(gbmSurface_, currentBo_);
         }
@@ -929,73 +935,82 @@ bool DRMSurface::schedulePageFlip() {
         std::swap(currentFb_, nextFb_);
         return true;
     };
-    
-    // During warmup period or if page flip is broken, use SetCrtc
-    // This is needed for Intel iGPUs (N100, etc.) that need time after modeset
+
+    // During warmup or if page flip is broken, route through SetCrtc.
+    // Measurement caller (allowSetCrtcFallback=false) gets ENOTSUP and
+    // is expected to drive warmup synchronously via schedulePageFlip first.
     if (warmupFrames_ > 0 || useSetCrtcOnly_) {
+        if (!allowSetCrtcFallback) {
+            gbm_surface_release_buffer(gbmSurface_, bo);
+            return -ENOTSUP;
+        }
         if (warmupFrames_ > 0) {
             warmupFrames_--;
             if (warmupFrames_ == 0) {
                 LOG_DEBUG << "DRMSurface: Warmup complete, switching to page flip";
             }
         }
-        
         if (doSetCrtc()) {
-            return true;
+            return 0;
         }
         gbm_surface_release_buffer(gbmSurface_, bo);
-        return false;
+        return -EIO;
     }
-    
+
     // Normal path: use page flip for vsync
     ret = drmModePageFlip(outputManager_->getFd(), crtcId_,
                               nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
-    
+
     if (ret != 0) {
         // EBUSY (16) = flip already pending, ENOSPC (28) = no buffer slots
         if (-ret == EBUSY || -ret == ENOSPC) {
-            static int failCount = 0;
-            failCount++;
-
-            // If page flip consistently fails, switch to SetCrtc-only mode
-            if (failCount >= 10 && !useSetCrtcOnly_) {
-                LOG_WARNING << "DRMSurface: Page flip consistently failing, switching to SetCrtc mode";
-                useSetCrtcOnly_ = true;
+            if (allowSetCrtcFallback) {
+                static int failCount = 0;
+                failCount++;
+                if (failCount >= 10 && !useSetCrtcOnly_) {
+                    LOG_WARNING << "DRMSurface: Page flip consistently failing, switching to SetCrtc mode";
+                    useSetCrtcOnly_ = true;
+                }
+                if (doSetCrtc()) {
+                    return 0;
+                }
+                gbm_surface_release_buffer(gbmSurface_, bo);
+                return -ret;
             }
-            
-            // Try SetCrtc as fallback for this frame
-            if (doSetCrtc()) {
-                return true;
-            }
-            
+            // Measurement path: pool full — return raw errno, no failCount,
+            // no setCrtc fallback. Caller (the orchestrator) will waitForFlip
+            // then retry, OR treat as "pre-fill done" and move to steady state.
             gbm_surface_release_buffer(gbmSurface_, bo);
-            return false;
+            return -ret;  // positive EBUSY (16) or ENOSPC (28)
         }
-        
+
         LOG_ERROR << "DRMSurface: Page flip failed: " << strerror(-ret) << " (errno=" << -ret << ")";
-        
-        // Fallback to SetCrtc
-        if (doSetCrtc()) {
-            return true;
+
+        if (allowSetCrtcFallback && doSetCrtc()) {
+            return 0;
         }
-        
         gbm_surface_release_buffer(gbmSurface_, bo);
-        return false;
+        return ret;  // already negative
     }
-    
+
     flipPending_ = true;
-    
-    // DON'T release previous buffer yet - it's still being displayed!
-    // Store it for release after the flip completes (in pageFlipHandler)
-    // This is critical for render-ahead: if we release immediately,
-    // hasFreeBuffers() returns true and we render to the displayed buffer = corruption
+    presentationTiming_.recordSubmit();
+
+    // DON'T release previous buffer yet — it's still being displayed.
+    // pageFlipHandler will release it after the flip completes.
     previousBo_ = currentBo_;
     currentBo_ = bo;
-    
-    // Swap framebuffers
     std::swap(currentFb_, nextFb_);
-    
-    return true;
+
+    return 0;
+}
+
+bool DRMSurface::schedulePageFlip() {
+    return doPageFlip(/*allowSetCrtcFallback=*/true) == 0;
+}
+
+int DRMSurface::tryAsyncFlip() {
+    return doPageFlip(/*allowSetCrtcFallback=*/false);
 }
 
 uint32_t DRMSurface::prepareAtomicFlip() {
@@ -1107,6 +1122,9 @@ void DRMSurface::waitForFlip() {
 
         if (ret == 0) {
             LOG_WARNING << "DRMSurface: Page flip timeout";
+            // Drop the orphaned submit timestamp so it cannot mispair with a
+            // later flip event (FIFO would otherwise drift by one).
+            presentationTiming_.discardPendingSubmit();
             break;
         }
 
