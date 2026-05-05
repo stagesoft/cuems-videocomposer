@@ -557,6 +557,15 @@ size_t DRMBackend::getOutputCount() const {
     return surfaces_.size();
 }
 
+bool DRMBackend::hasFatalError() const {
+    for (const auto& [name, surface] : surfaces_) {
+        if (surface && surface->hasFatalModesetError()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool DRMBackend::configureOutputRegion(const std::string& outputName, 
                                         int canvasX, int canvasY,
                                         int canvasWidth, int canvasHeight) {

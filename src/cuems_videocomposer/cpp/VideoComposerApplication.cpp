@@ -378,6 +378,16 @@ int VideoComposerApplication::run() {
     while (running_ && shouldContinue()) {
         processEvents();
 
+        // Bail out if a backend has surfaced a fatal error (e.g. DRM cold-boot
+        // modeset verifier failed even after the in-process retry). Without
+        // this, the loop would call schedulePageFlip every frame against a
+        // broken modeset forever; instead we exit non-zero so systemd
+        // Restart=on-failure brings up a fresh process.
+        if (displayBackend_ && displayBackend_->hasFatalError()) {
+            LOG_ERROR << "Display backend reports fatal error — exiting for systemd restart";
+            return 1;
+        }
+
         // Make OpenGL context current before updating layers
         // Required for VAAPI: EGL image creation needs current EGL context
         if (displayBackend_ && displayBackend_->isWindowOpen()) {
