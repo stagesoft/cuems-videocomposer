@@ -370,6 +370,28 @@ private:
     // order so operators can see what's driving modeset/render iteration.
     void computeIterationOrder();
 
+    // Sort outputRegions_ in place by canvasX ascending (name as tiebreak) so
+    // the vector is canonically left-to-right. Without this, MultiOutputRenderer
+    // (which iterates the vector by index) and other downstream paths that
+    // iterate outputRegions_ directly (rather than via orderedSurfaceNames())
+    // end up using kernel discovery order — e.g. HDMI-A-1 lands at index 1
+    // even when canvasX puts it on the right.
+    //
+    // Call sites that DO call this (anything that may set canvasX from a
+    // source other than monotonic-by-construction):
+    //   - openWindow() after the display.conf load swap
+    //   - configureOutputRegion(name, x, y, w, h) — first overload
+    //   - configureOutputRegion(name, OutputRegion) — second overload
+    //
+    // Call sites that intentionally do NOT (canvasX monotonic by construction;
+    // sort would be a no-op AND inviting it would mask the construction-order
+    // dependency some local logic relies on, e.g. blend zones in
+    // autoConfigureOutputs assume outputRegions_.back() is the physical
+    // predecessor):
+    //   - buildOutputRegions()
+    //   - autoConfigureOutputs()
+    void sortOutputRegionsByCanvas();
+
     // Returns iterationOrder_ if populated, else falls back to alphabetical
     // (std::map iteration order over surfaces_) so any iteration site is safe
     // even if computeIterationOrder hasn't run yet.
