@@ -303,6 +303,13 @@ private:
                                                // Drives modeset, render, flip, and cleanup
                                                // iteration so they happen in operator-intuitive
                                                // left-to-right physical order.
+    bool regionsFromUserConfig_ = false;       // True when outputRegions_ reflects operator intent
+                                               // (display.conf load, configureOutputRegion edit,
+                                               // or autoConfigureOutputs). False when filled by
+                                               // buildOutputRegions auto-defaults — in which case
+                                               // the canvas-x values are kernel-order, not
+                                               // operator-chosen, and computeIterationOrder must
+                                               // ignore them and fall back to alphabetical.
     
     // Rendering - Legacy mode (per-output)
     std::unique_ptr<OpenGLRenderer> renderer_;

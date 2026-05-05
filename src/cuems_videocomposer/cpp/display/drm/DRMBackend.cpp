@@ -640,6 +640,7 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
 
     // Region geometry just changed — re-derive iteration order so renders
     // continue to follow the operator's intended physical layout.
+    regionsFromUserConfig_ = true;  // explicit per-output configuration
     computeIterationOrder();
 
     return true;
@@ -1078,6 +1079,7 @@ bool DRMBackend::initVirtualCanvas() {
             auto loadedRegions = configManager_->generateOutputRegions(outputInfos);
             if (!loadedRegions.empty()) {
                 outputRegions_ = loadedRegions;
+                regionsFromUserConfig_ = true;  // operator intent applied
                 LOG_INFO << "DRMBackend: Applied startup display config from " << startupConfPath;
             }
         }
@@ -1136,12 +1138,35 @@ std::vector<std::string> DRMBackend::getSortedOutputNames() const {
 void DRMBackend::computeIterationOrder() {
     iterationOrder_.clear();
 
-    // Map output name -> canvas-x. For outputs covered by a valid OutputRegion,
-    // use its canvasX; otherwise sentinel (INT_MAX) so they sort last and then
-    // fall back to alphabetical tiebreak.
+    std::vector<std::string> names;
+    names.reserve(surfaces_.size());
+    for (const auto& [name, _] : surfaces_) names.push_back(name);
+
+    if (!regionsFromUserConfig_) {
+        // No operator intent recorded — outputRegions_ either is empty or
+        // holds buildOutputRegions auto-defaults whose canvas-x values track
+        // kernel enumeration order rather than the physical layout. Fall back
+        // to alphabetical so the order is stable, predictable, and independent
+        // of i915 DDI registration quirks.
+        std::sort(names.begin(), names.end());
+        iterationOrder_ = std::move(names);
+
+        std::ostringstream oss;
+        for (size_t i = 0; i < iterationOrder_.size(); ++i) {
+            if (i) oss << ", ";
+            oss << iterationOrder_[i];
+        }
+        LOG_INFO << "DRMBackend: surface iteration order (alphabetical fallback —"
+                 << " no operator-configured regions): " << oss.str();
+        return;
+    }
+
+    // Operator intent present. Map each surface to its canvas-x. Outputs
+    // missing from outputRegions_ (partial coverage) get sentinel INT_MAX so
+    // they sort to the end, then alphabetically among themselves.
     std::map<std::string, int> nameToCanvasX;
     std::vector<std::string> uncovered;
-    for (const auto& [name, _] : surfaces_) {
+    for (const auto& name : names) {
         bool found = false;
         for (const auto& reg : outputRegions_) {
             if (reg.name == name && reg.canvasWidth > 0) {
@@ -1155,10 +1180,6 @@ void DRMBackend::computeIterationOrder() {
             uncovered.push_back(name);
         }
     }
-
-    std::vector<std::string> names;
-    names.reserve(surfaces_.size());
-    for (const auto& [name, _] : surfaces_) names.push_back(name);
 
     std::sort(names.begin(), names.end(), [&](const std::string& a, const std::string& b) {
         int xa = nameToCanvasX[a];
@@ -1206,7 +1227,7 @@ std::vector<std::string> DRMBackend::orderedSurfaceNames() const {
 
 void DRMBackend::buildOutputRegions() {
     outputRegions_.clear();
-    
+    regionsFromUserConfig_ = false;  // auto-defaults are not operator intent
     int canvasX = 0;
     
     for (const auto& outputName : getSortedOutputNames()) {
@@ -1296,6 +1317,7 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
     LOG_INFO << "DRMBackend: Auto-configured " << outputRegions_.size()
              << " outputs (" << arrangement << ", overlap=" << overlap << ")";
 
+    regionsFromUserConfig_ = true;  // explicit auto-arrange counts as user intent
     computeIterationOrder();
 }
 
