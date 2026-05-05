@@ -554,15 +554,33 @@ include_directories(${CMAKE_SOURCE_DIR}/external/stb)
 # cuems-mediadecoder includes (also propagated via PUBLIC interface)
 include_directories(${CMAKE_SOURCE_DIR}/src/cuems-mediadecoder/include)
 
-# Embed splash.png at build time (resources/splash.png -> generated/splash_png.h)
+# Embed splash.png at build time (resources/splash.png -> generated/splash_png.h).
+#
+# CUEMS_PROBE_SPLASH (default OFF): when ON, embed resources/probe-1080p.png
+# instead of the brand splash. Used for cold-boot mode-verification testing —
+# the probe image (red border, four colored corners, "1920x1080" label) makes
+# it visually unambiguous from a panel photograph whether the cold-boot
+# 1080p modeset actually landed at 1080p (PASS) or got pinned to the top-left
+# quadrant of a 4K signal (FAIL — i915 cold-boot race fired). The same
+# splash_png[] symbol is generated, so StartupSplash needs no code change.
+# Revert with -DCUEMS_PROBE_SPLASH=OFF and rebuild.
+option(CUEMS_PROBE_SPLASH "Embed cold-boot probe image instead of brand splash" OFF)
+
+if(CUEMS_PROBE_SPLASH)
+    set(_SPLASH_SOURCE ${CMAKE_SOURCE_DIR}/resources/probe-1080p.png)
+    message(STATUS "CUEMS_PROBE_SPLASH=ON — embedding cold-boot probe image (resources/probe-1080p.png)")
+else()
+    set(_SPLASH_SOURCE ${CMAKE_SOURCE_DIR}/resources/splash.png)
+endif()
+
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/generated/splash_png.h
     COMMAND python3 ${CMAKE_SOURCE_DIR}/cmake/embed_splash.py
-        ${CMAKE_SOURCE_DIR}/resources/splash.png
+        ${_SPLASH_SOURCE}
         ${CMAKE_BINARY_DIR}/generated/splash_png.h
-    DEPENDS ${CMAKE_SOURCE_DIR}/resources/splash.png ${CMAKE_SOURCE_DIR}/cmake/embed_splash.py
-    COMMENT "Embedding splash.png into splash_png.h"
+    DEPENDS ${_SPLASH_SOURCE} ${CMAKE_SOURCE_DIR}/cmake/embed_splash.py
+    COMMENT "Embedding ${_SPLASH_SOURCE} into splash_png.h"
 )
 add_custom_target(splash_png_embed ALL DEPENDS ${CMAKE_BINARY_DIR}/generated/splash_png.h)
 include_directories(${CMAKE_BINARY_DIR}/generated)
