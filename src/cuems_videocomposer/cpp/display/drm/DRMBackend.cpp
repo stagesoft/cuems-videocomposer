@@ -294,44 +294,12 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
         // All outputs flip on same vsync = 60fps for any number of outputs
         atomicPageFlip();
     } else {
-        // LEGACY PATH: Sequential page flips. Order = physical layout
-        // (display.conf canvas-x ascending, alphabetical fallback). This is
-        // the user-visible "monitor initialization order" — first frame on
-        // each surface goes through doPageFlip which performs the cold-boot
-        // modeset. Predictable left-to-right flow makes tests, photos, and
-        // operator observations match the physical setup.
-        //
-        // Optional inter-modeset settle: between back-to-back FIRST-FRAME
-        // modesets (e.g. on Intel TC-port DPs where consecutive link
-        // training stages can race / starve the last in the sequence),
-        // sleeping a few hundred ms gives the previous DDI's training a
-        // chance to complete before we kick off the next. The sleep ONLY
-        // fires on the first frame for a given surface; once all surfaces
-        // are mode-set the steady-state render loop runs at full rate.
-        // Disabled by default. Set CUEMS_VC_INTER_MODESET_DELAY_MS=200
-        // (or larger) to enable.
-        static const int interModesetDelayMs = []() {
-            const char* env = std::getenv("CUEMS_VC_INTER_MODESET_DELAY_MS");
-            if (!env || !*env) return 0;
-            int n = std::atoi(env);
-            if (n < 0) n = 0;
-            if (n > 5000) n = 5000;  // sanity cap
-            if (n > 0) {
-                LOG_INFO << "DRMBackend: CUEMS_VC_INTER_MODESET_DELAY_MS="
-                         << n << " — sleeping " << n << "ms after first-frame"
-                         << " modeset on each surface";
-            }
-            return n;
-        }();
-
+        // LEGACY PATH: Sequential page flips in physical layout order
+        // (display.conf canvas-x ascending, alphabetical fallback). The
+        // first frame on each surface goes through doPageFlip which
+        // performs the cold-boot modeset.
         for (const auto& name : orderedSurfaceNames()) {
-            auto& surface = surfaces_.at(name);
-            const bool wasFirstFrame = !surface->isModeSet();
-            surface->schedulePageFlip();
-            if (wasFirstFrame && interModesetDelayMs > 0) {
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(interModesetDelayMs));
-            }
+            surfaces_.at(name)->schedulePageFlip();
         }
     }
 }
