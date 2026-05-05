@@ -33,7 +33,9 @@
 #include "../../utils/Logger.h"
 #include <cerrno>
 #include <cmath>
+#include <limits>
 #include <set>
+#include <sstream>
 
 #include <algorithm>
 #include <chrono>
@@ -245,7 +247,8 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     }
     
     // Process any completed flips (non-blocking)
-    for (auto& [name, surface] : surfaces_) {
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
         surface->processFlipEvents();
     }
 
@@ -260,7 +263,8 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     primary->releaseCurrent();
 
     // Wait for all pending flips to complete first
-    for (auto& [name, surface] : surfaces_) {
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
         if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
@@ -272,7 +276,8 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     bool allModesSet = true;
 
     if (useAtomic) {
-        for (auto& [name, surface] : surfaces_) {
+        for (const auto& name : orderedSurfaceNames()) {
+            auto& surface = surfaces_.at(name);
             if (!surface->getPlane()) {
                 allHavePlanes = false;
             }
@@ -288,8 +293,14 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
         // All outputs flip on same vsync = 60fps for any number of outputs
         atomicPageFlip();
     } else {
-        // LEGACY PATH: Sequential page flips (single output or no atomic/planes)
-        for (auto& [name, surface] : surfaces_) {
+        // LEGACY PATH: Sequential page flips. Order = physical layout
+        // (display.conf canvas-x ascending, alphabetical fallback). This is
+        // the user-visible "monitor initialization order" — first frame on
+        // each surface goes through doPageFlip which performs the cold-boot
+        // modeset. Predictable left-to-right flow makes tests, photos, and
+        // operator observations match the physical setup.
+        for (const auto& name : orderedSurfaceNames()) {
+            auto& surface = surfaces_.at(name);
             surface->schedulePageFlip();
         }
     }
@@ -304,9 +315,12 @@ bool DRMBackend::atomicPageFlip() {
     
     std::vector<DRMSurface*> preparedSurfaces;
     bool success = true;
-    
-    // Prepare each surface and add to atomic request
-    for (auto& [name, surface] : surfaces_) {
+
+    // Prepare each surface and add to atomic request — physical layout order
+    // so the atomic request, the per-surface logs, and the cold-boot modeset
+    // sequence all reflect the operator's intended left-to-right monitor order.
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
         uint32_t fbId = surface->prepareAtomicFlip();
         if (fbId == 0) {
             LOG_WARNING << "DRMBackend: Failed to prepare surface " << name;
@@ -377,7 +391,8 @@ bool DRMBackend::atomicPageFlip() {
         for (auto* surface : preparedSurfaces) {
             surface->cancelAtomicFlip();
         }
-        for (auto& [name, surface] : surfaces_) {
+        for (const auto& name : orderedSurfaceNames()) {
+            auto& surface = surfaces_.at(name);
             surface->schedulePageFlip();
         }
     }
@@ -388,14 +403,20 @@ bool DRMBackend::atomicPageFlip() {
     
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately
-    
-    // MPV-STYLE: Process flip events first (non-blocking), render, THEN wait
-    for (auto& [name, surface] : surfaces_) {
+
+    // MPV-STYLE: Process flip events first (non-blocking), render, THEN wait.
+    // Iterate in physical layout order so first-frame modeset (which lives
+    // inside doPageFlip via schedulePageFlip below) follows the operator's
+    // expected left-to-right sequence.
+    auto names = orderedSurfaceNames();
+    for (const auto& name : names) {
+        auto& surface = surfaces_.at(name);
         surface->processFlipEvents();
     }
-    
+
     // Render to each output
-    for (auto& [name, surface] : surfaces_) {
+    for (const auto& name : names) {
+        auto& surface = surfaces_.at(name);
         if (!surface->isInitialized()) {
             continue;
         }
@@ -616,7 +637,11 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
-    
+
+    // Region geometry just changed — re-derive iteration order so renders
+    // continue to follow the operator's intended physical layout.
+    computeIterationOrder();
+
     return true;
 }
 
@@ -1087,10 +1112,15 @@ bool DRMBackend::initVirtualCanvas() {
     }
 
     multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
-    
-    LOG_INFO << "DRMBackend: Virtual Canvas initialized with " 
+
+    LOG_INFO << "DRMBackend: Virtual Canvas initialized with "
              << outputRegions_.size() << " output(s)";
-    
+
+    // outputRegions_ is finalized — derive the operator-intuitive iteration
+    // order (physical canvas-x ascending, alphabetical fallback) so all
+    // subsequent modeset / render / cleanup loops follow it.
+    computeIterationOrder();
+
     return true;
 }
 
@@ -1101,6 +1131,77 @@ std::vector<std::string> DRMBackend::getSortedOutputNames() const {
     // the mappings file mapped_to fields can then be adjusted when connector
     // names differ between machines.
     return outputOrder_;
+}
+
+void DRMBackend::computeIterationOrder() {
+    iterationOrder_.clear();
+
+    // Map output name -> canvas-x. For outputs covered by a valid OutputRegion,
+    // use its canvasX; otherwise sentinel (INT_MAX) so they sort last and then
+    // fall back to alphabetical tiebreak.
+    std::map<std::string, int> nameToCanvasX;
+    std::vector<std::string> uncovered;
+    for (const auto& [name, _] : surfaces_) {
+        bool found = false;
+        for (const auto& reg : outputRegions_) {
+            if (reg.name == name && reg.canvasWidth > 0) {
+                nameToCanvasX[name] = reg.canvasX;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            nameToCanvasX[name] = std::numeric_limits<int>::max();
+            uncovered.push_back(name);
+        }
+    }
+
+    std::vector<std::string> names;
+    names.reserve(surfaces_.size());
+    for (const auto& [name, _] : surfaces_) names.push_back(name);
+
+    std::sort(names.begin(), names.end(), [&](const std::string& a, const std::string& b) {
+        int xa = nameToCanvasX[a];
+        int xb = nameToCanvasX[b];
+        if (xa != xb) return xa < xb;
+        return a < b;  // alphabetical tiebreak (and full ordering for uncovered group)
+    });
+
+    iterationOrder_ = std::move(names);
+
+    if (!uncovered.empty()) {
+        std::ostringstream oss;
+        for (size_t i = 0; i < uncovered.size(); ++i) {
+            if (i) oss << ", ";
+            oss << uncovered[i];
+        }
+        LOG_WARNING << "DRMBackend: " << uncovered.size() << " output(s) not covered by"
+                    << " display.conf, falling back to alphabetical for those: "
+                    << oss.str();
+    }
+
+    std::ostringstream oss;
+    for (size_t i = 0; i < iterationOrder_.size(); ++i) {
+        if (i) oss << ", ";
+        oss << iterationOrder_[i];
+        int x = nameToCanvasX[iterationOrder_[i]];
+        if (x != std::numeric_limits<int>::max()) {
+            oss << "@x=" << x;
+        } else {
+            oss << "@alpha";
+        }
+    }
+    LOG_INFO << "DRMBackend: surface iteration order (modeset/render/cleanup): " << oss.str();
+}
+
+std::vector<std::string> DRMBackend::orderedSurfaceNames() const {
+    if (!iterationOrder_.empty()) return iterationOrder_;
+    // Fallback: alphabetical (std::map iteration order). Used before
+    // computeIterationOrder has run, e.g. during early openWindow stages.
+    std::vector<std::string> names;
+    names.reserve(surfaces_.size());
+    for (const auto& [name, _] : surfaces_) names.push_back(name);
+    return names;
 }
 
 void DRMBackend::buildOutputRegions() {
@@ -1192,8 +1293,10 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
     
-    LOG_INFO << "DRMBackend: Auto-configured " << outputRegions_.size() 
+    LOG_INFO << "DRMBackend: Auto-configured " << outputRegions_.size()
              << " outputs (" << arrangement << ", overlap=" << overlap << ")";
+
+    computeIterationOrder();
 }
 
 bool DRMBackend::configureOutputRegion(const std::string& outputName, const OutputRegion& region) {

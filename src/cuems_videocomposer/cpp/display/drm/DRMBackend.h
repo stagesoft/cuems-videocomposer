@@ -296,7 +296,13 @@ private:
     std::unique_ptr<DRMOutputManager> outputManager_;
     std::unique_ptr<DisplayConfigurationManager> configManager_;
     std::map<std::string, std::unique_ptr<DRMSurface>> surfaces_;  // key = output name
-    std::vector<std::string> outputOrder_;  // kernel enumeration order
+    std::vector<std::string> outputOrder_;     // kernel enumeration order (DDI hardware order)
+    std::vector<std::string> iterationOrder_;  // physical layout order: by display.conf canvas-x
+                                               // ascending, alphabetical fallback for outputs not
+                                               // covered or when display.conf is missing/invalid.
+                                               // Drives modeset, render, flip, and cleanup
+                                               // iteration so they happen in operator-intuitive
+                                               // left-to-right physical order.
     
     // Rendering - Legacy mode (per-output)
     std::unique_ptr<OpenGLRenderer> renderer_;
@@ -350,6 +356,17 @@ private:
 
     // Get surface names sorted by physical CRTC position (left-to-right, top-to-bottom)
     std::vector<std::string> getSortedOutputNames() const;
+
+    // (Re)compute iterationOrder_ from outputRegions_ + surfaces_. Called after
+    // outputRegions_ is finalized (after openWindow finishes loading display.conf,
+    // and after configureOutputRegion / autoConfigureOutputs). Logs the resulting
+    // order so operators can see what's driving modeset/render iteration.
+    void computeIterationOrder();
+
+    // Returns iterationOrder_ if populated, else falls back to alphabetical
+    // (std::map iteration order over surfaces_) so any iteration site is safe
+    // even if computeIterationOrder hasn't run yet.
+    std::vector<std::string> orderedSurfaceNames() const;
 };
 
 } // namespace videocomposer
