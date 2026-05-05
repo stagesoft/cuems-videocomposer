@@ -953,7 +953,15 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
                         << " first-frame verify failure on " << conn->info.name;
             first_verified = false;
         } else {
-            first_verified = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
+            // Two signals must both succeed: kernel-side CRTC mode matches what
+            // we asked for, AND the connector's link-status is not BAD (the
+            // latter catches DP/HDMI link training failures that the modeset
+            // ioctl reports as success — exactly the i915 TC-port DP race
+            // we've seen in production where verifyCrtcMode passes but the
+            // panel sees no signal).
+            const bool mode_ok = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
+            const int link_ok = DRMOutputManager::readConnectorLinkStatus(fd, connectorId_);
+            first_verified = mode_ok && (link_ok != 0);
         }
         if (!first_verified) {
             LOG_WARNING << "DRMSurface: cold-boot verify mismatch on " << conn->info.name
@@ -1023,7 +1031,9 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
                             << " retry verify failure on " << conn->info.name;
                 retry_verified = false;
             } else {
-                retry_verified = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
+                const bool mode_ok = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
+                const int link_ok = DRMOutputManager::readConnectorLinkStatus(fd, connectorId_);
+                retry_verified = mode_ok && (link_ok != 0);
             }
             if (!retry_verified) {
                 LOG_ERROR << "DRMSurface: cold-boot retry still mismatched on "
