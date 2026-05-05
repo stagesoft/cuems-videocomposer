@@ -924,6 +924,13 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
         LOG_INFO << "DRMSurface: Setting mode for " << conn->info.name
                  << " (" << mode->hdisplay << "x" << mode->vdisplay << ")";
         const int fd = outputManager_->getFd();
+
+        // Clamp 'max bpc' to 8 before modeset. On Intel TC-port DP, the
+        // kernel auto-selects 12 bpc when EDID advertises it, and link
+        // training at 12 bpc is racy (silent intermittent failures).
+        // Our framebuffers are 8-bit so 12 bpc only adds dither.
+        DRMOutputManager::setConnectorMaxBpc(fd, connectorId_, 8);
+
         ret = drmModeSetCrtc(fd, crtcId_,
                             nextFb_.fbId, 0, 0, &connectorId_, 1, mode);
 
