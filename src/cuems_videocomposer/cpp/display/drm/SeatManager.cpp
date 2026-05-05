@@ -36,10 +36,7 @@
 #include <libseat.h>
 #endif
 
-#ifndef HAVE_LIBSEAT
-// Fallback: use libdrm directly
 #include <xf86drm.h>
-#endif
 
 namespace videocomposer {
 
@@ -211,17 +208,28 @@ bool SeatManager::enableDevice(int fd) {
     if (!seat_) {
         return false;
     }
-    
-    // With libseat, devices opened via libseat_open_device() automatically
-    // have the right permissions. The seat itself is enabled when opened.
-    // We just need to verify the device is tracked.
+
     auto it = devices_.find(fd);
     if (it == devices_.end()) {
         LOG_ERROR << "SeatManager: Device fd=" << fd << " not tracked";
         return false;
     }
-    
-    LOG_INFO << "SeatManager: Device enabled (fd=" << fd << ", device_id=" << it->second.deviceId << ")";
+
+    // libseat opens the device with the right permissions, but DRM master is
+    // a separate kernel concept that must be claimed explicitly. Under seatd
+    // the fd usually already holds master via the seat session, in which case
+    // drmSetMaster is a no-op that returns 0. Any non-zero return (including
+    // EBUSY, which means a foreign userspace process holds master) is a real
+    // configuration problem we want surfaced, not silently swallowed.
+    if (drmSetMaster(fd) != 0) {
+        LOG_ERROR << "SeatManager: drmSetMaster failed (fd=" << fd
+                  << ", device_id=" << it->second.deviceId
+                  << "): " << strerror(errno);
+        return false;
+    }
+
+    LOG_INFO << "SeatManager: Device enabled with DRM master (fd=" << fd
+             << ", device_id=" << it->second.deviceId << ")";
     return true;
 #else
     // Fallback: try drmSetMaster()
