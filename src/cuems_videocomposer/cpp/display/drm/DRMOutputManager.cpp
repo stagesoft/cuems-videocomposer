@@ -868,12 +868,16 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
     LOG_INFO << "  Calling drmModeSetCrtc...";
     int ret = drmModeSetCrtc(drmFd_, conn->crtcId, 0, 0, 0,
                              &conn->connectorId, 1, mode);
-    
+
     if (ret != 0) {
         LOG_ERROR << "DRMOutputManager: drmModeSetCrtc failed: " << strerror(-ret);
         return false;
     }
-    
+
+    if (!verifyCrtcMode(drmFd_, conn->crtcId, *mode)) {
+        return false;
+    }
+
     // Save the new current mode (for use in schedulePageFlip after resize)
     conn->currentMode = *mode;
     conn->hasCurrentMode = true;
@@ -1107,14 +1111,52 @@ const drmModeModeInfo* DRMOutputManager::findBestMode(const DRMConnector& connec
 void DRMOutputManager::restoreOriginalModes() {
     for (auto& conn : connectors_) {
         if (conn.savedCrtc && conn.crtcId) {
-            drmModeSetCrtc(drmFd_,
+            int ret = drmModeSetCrtc(drmFd_,
                           conn.savedCrtc->crtc_id,
                           conn.savedCrtc->buffer_id,
                           conn.savedCrtc->x, conn.savedCrtc->y,
                           &conn.connectorId, 1,
                           &conn.savedCrtc->mode);
+            if (ret != 0) {
+                LOG_WARNING << "DRMOutputManager: restoreOriginalModes drmModeSetCrtc"
+                            << " failed for " << conn.info.name
+                            << ": " << strerror(-ret);
+                continue;
+            }
+            // Cleanup path: verify but do not block teardown on mismatch.
+            (void)verifyCrtcMode(drmFd_, conn.crtcId, conn.savedCrtc->mode);
         }
     }
+}
+
+bool DRMOutputManager::verifyCrtcMode(int fd, uint32_t crtcId,
+                                      const drmModeModeInfo& requested) {
+    drmModeCrtc* actual = drmModeGetCrtc(fd, crtcId);
+    if (!actual) {
+        LOG_ERROR << "DRMOutputManager: verifyCrtcMode: drmModeGetCrtc failed for"
+                  << " crtcId=" << crtcId << ": " << strerror(errno);
+        return false;
+    }
+
+    const bool ok = (actual->mode.hdisplay == requested.hdisplay) &&
+                    (actual->mode.vdisplay == requested.vdisplay);
+
+    if (!ok) {
+        LOG_ERROR << "DRMOutputManager: verifyCrtcMode MISMATCH on crtcId=" << crtcId
+                  << " — requested " << requested.hdisplay << "x" << requested.vdisplay
+                  << " (clock=" << requested.clock << " htotal=" << requested.htotal
+                  << " vtotal=" << requested.vtotal << ")"
+                  << " actual " << actual->mode.hdisplay << "x" << actual->mode.vdisplay
+                  << " (clock=" << actual->mode.clock << " htotal=" << actual->mode.htotal
+                  << " vtotal=" << actual->mode.vtotal
+                  << " mode_valid=" << (actual->mode_valid ? 1 : 0) << ")";
+    } else {
+        LOG_INFO << "DRMOutputManager: verifyCrtcMode OK on crtcId=" << crtcId
+                 << " — " << actual->mode.hdisplay << "x" << actual->mode.vdisplay;
+    }
+
+    drmModeFreeCrtc(actual);
+    return ok;
 }
 
 void DRMOutputManager::harmonizeRefreshRates() {
