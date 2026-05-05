@@ -51,39 +51,6 @@ namespace videocomposer {
 // Static map for atomic flip: maps crtc_id → DRMSurface* for pageFlipHandler2
 std::map<uint32_t, DRMSurface*> DRMSurface::s_crtcSurfaceMap_;
 
-namespace {
-    // Debug knob: when CUEMS_VC_FORCE_VERIFY_FAIL is set to a positive integer N,
-    // the next N calls to the cold-boot verifier are forced to return false.
-    // This exercises the retry / fatal-flag / systemd-restart plumbing without
-    // needing the actual i915 cold-boot race to fire.
-    //
-    // For 3 outputs (the typical config): N=3 forces all three first verifies
-    // to fail (each surface enters the retry path; retry uses a real verify
-    // which passes — observe "cold-boot retry succeeded"). N=6 forces both the
-    // first AND retry verify on each surface (observe fatalModeset_ fires and
-    // the run loop exits). The env var is consumed once per process — restart
-    // the process to re-arm.
-    //
-    // Default (env var unset, empty, or 0): no forcing. Real verifier runs.
-    std::atomic<int> g_force_verify_fail_remaining{-1};
-
-    bool consume_forced_verify_fail() {
-        int val = g_force_verify_fail_remaining.load(std::memory_order_acquire);
-        if (val < 0) {
-            const char* env = std::getenv("CUEMS_VC_FORCE_VERIFY_FAIL");
-            int n = (env && *env) ? std::atoi(env) : 0;
-            if (n < 0) n = 0;
-            int expected = -1;
-            g_force_verify_fail_remaining.compare_exchange_strong(
-                expected, n, std::memory_order_acq_rel);
-            val = g_force_verify_fail_remaining.load(std::memory_order_acquire);
-        }
-        if (val <= 0) return false;
-        int prev = g_force_verify_fail_remaining.fetch_sub(1, std::memory_order_acq_rel);
-        return prev > 0;
-    }
-}
-
 DRMSurface::DRMSurface(DRMOutputManager* outputManager, const std::string& outputName)
     : outputManager_(outputManager)
     , outputName_(outputName)
@@ -947,22 +914,15 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
         // drmSetMaster — that's a userspace permission shuffle and does not
         // re-run pipe config or link training. A disable->re-enable cycle
         // gives the kernel a chance to re-run intel_modeset_pipe_config.
-        bool first_verified;
-        if (consume_forced_verify_fail()) {
-            LOG_WARNING << "DRMSurface: CUEMS_VC_FORCE_VERIFY_FAIL — forcing"
-                        << " first-frame verify failure on " << conn->info.name;
-            first_verified = false;
-        } else {
-            // Two signals must both succeed: kernel-side CRTC mode matches what
-            // we asked for, AND the connector's link-status is not BAD (the
-            // latter catches DP/HDMI link training failures that the modeset
-            // ioctl reports as success — exactly the i915 TC-port DP race
-            // we've seen in production where verifyCrtcMode passes but the
-            // panel sees no signal).
-            const bool mode_ok = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
-            const int link_ok = DRMOutputManager::readConnectorLinkStatus(fd, connectorId_);
-            first_verified = mode_ok && (link_ok != 0);
-        }
+        // Two signals must both succeed: kernel-side CRTC mode matches what
+        // we asked for, AND the connector's link-status is not BAD (the
+        // latter catches DP/HDMI link training failures that the modeset
+        // ioctl reports as success — exactly the i915 TC-port DP race
+        // we've seen in production where verifyCrtcMode passes but the
+        // panel sees no signal).
+        const bool mode_ok = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
+        const int link_ok = DRMOutputManager::readConnectorLinkStatus(fd, connectorId_);
+        const bool first_verified = mode_ok && (link_ok != 0);
         if (!first_verified) {
             LOG_WARNING << "DRMSurface: cold-boot verify mismatch on " << conn->info.name
                         << ", attempting in-process recovery";
@@ -1025,16 +985,9 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
             //    (likely the i915 PHY rebind class of cold-boot bug). Mark
             //    fatal so the run loop exits and systemd Restart=on-failure
             //    re-runs the whole modeset path with a fresh process.
-            bool retry_verified;
-            if (consume_forced_verify_fail()) {
-                LOG_WARNING << "DRMSurface: CUEMS_VC_FORCE_VERIFY_FAIL — forcing"
-                            << " retry verify failure on " << conn->info.name;
-                retry_verified = false;
-            } else {
-                const bool mode_ok = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
-                const int link_ok = DRMOutputManager::readConnectorLinkStatus(fd, connectorId_);
-                retry_verified = mode_ok && (link_ok != 0);
-            }
+            const bool retry_mode_ok = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
+            const int retry_link_ok = DRMOutputManager::readConnectorLinkStatus(fd, connectorId_);
+            const bool retry_verified = retry_mode_ok && (retry_link_ok != 0);
             if (!retry_verified) {
                 LOG_ERROR << "DRMSurface: cold-boot retry still mismatched on "
                           << conn->info.name << " — marking fatal for systemd restart";
