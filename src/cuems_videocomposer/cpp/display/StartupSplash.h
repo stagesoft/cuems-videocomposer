@@ -45,7 +45,14 @@ class DisplayManager;
  */
 class StartupSplash {
 public:
+#ifdef CUEMS_PROBE_SPLASH
+    // Test build: long window so the operator has time to inspect the panel,
+    // photograph it, and observe link-training delays (which on some HDMI
+    // monitors can take several seconds to settle after a modeset).
+    static constexpr double SPLASH_DURATION_SECONDS = 60.0;
+#else
     static constexpr double SPLASH_DURATION_SECONDS = 10.0;
+#endif
 
     StartupSplash();
     ~StartupSplash();
