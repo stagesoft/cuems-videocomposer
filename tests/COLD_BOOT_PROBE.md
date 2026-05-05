@@ -153,6 +153,37 @@ verifier alone is insufficient and the rebind workaround stays — gate it
 on the per-node config flag and treat the verifier as in-band telemetry,
 not a self-heal mechanism.
 
+## Plumbing test (no real cold-boot needed)
+
+Before the 20-boot campaign, you can verify the verify → retry → fatal →
+systemd-restart chain end-to-end without waiting for the actual race to
+fire. The binary honours an env var **`CUEMS_VC_FORCE_VERIFY_FAIL=N`** that
+makes the next *N* calls to the cold-boot verifier return `false`. The env
+var is consumed once per process — restart re-arms.
+
+For the typical 3-output config:
+
+| `N` | Expected result | What you should see in `journalctl -u cuems-videocomposer` |
+|---|---|---|
+| **3** | All three surfaces' first verify forced false → all three trigger retry → retry uses real verify which passes. | Three `CUEMS_VC_FORCE_VERIFY_FAIL — forcing first-frame verify failure` lines, three `cold-boot retry succeeded` lines. Service stays up. |
+| **6** | First AND retry verify forced false on every surface → `fatalModeset_` set on all → run loop exits → `Restart=on-failure` brings up a fresh process (where the env var fires again under systemd → infinite loop unless you remove it). | `marking fatal for systemd restart`, `Display backend reports fatal error — exiting for systemd restart`, then a *second* unit start in the journal. |
+
+Because `=6` causes a restart loop under systemd if the env var stays set,
+**do the plumbing tests with the service stopped and run the binary directly
+as the `cuems` user** (a wrapper is included):
+
+```sh
+sudo systemctl stop cuems-videocomposer.service
+tests/cold-boot-probe-plumbing-test.sh 3      # retry-success path
+tests/cold-boot-probe-plumbing-test.sh 6      # fatal-exit path (process exits non-zero)
+sudo systemctl start cuems-videocomposer.service
+```
+
+The script runs the binary inline (no daemonisation, foreground stdout/stderr),
+captures the output to `tests/cold-boot-captures/<ts>_plumbing_N<n>.txt`, and
+reports the exit code. With `N=6` the binary should exit non-zero within a
+second; with `N=3` you'll need to Ctrl-C after you see the retry log lines.
+
 ## Files this campaign produces
 
 - `tests/cold-boot-results.csv` — one row per boot, with verdict and
