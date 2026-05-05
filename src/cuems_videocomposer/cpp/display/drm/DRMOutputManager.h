@@ -149,7 +149,13 @@ public:
      * Get device path
      */
     const std::string& getDevicePath() const { return devicePath_; }
-    
+
+    /**
+     * Get the SeatManager (for pre-flight checks before in-process modeset retries).
+     * Returns nullptr if init() has not run.
+     */
+    SeatManager* getSeatManager() const { return seatManager_.get(); }
+
     // ===== Output Enumeration =====
     
     /**

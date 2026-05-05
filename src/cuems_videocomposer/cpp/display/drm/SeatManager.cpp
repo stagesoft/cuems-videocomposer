@@ -270,6 +270,17 @@ void SeatManager::disableDevice(int fd) {
 #endif
 }
 
+bool SeatManager::isDeviceTracked(int fd) const {
+    if (fd < 0) {
+        return false;
+    }
+#ifdef HAVE_LIBSEAT
+    return devices_.find(fd) != devices_.end();
+#else
+    return true;  // No tracking under fallback path; trust the fd.
+#endif
+}
+
 bool SeatManager::isAvailable() {
 #ifdef HAVE_LIBSEAT
     return true;

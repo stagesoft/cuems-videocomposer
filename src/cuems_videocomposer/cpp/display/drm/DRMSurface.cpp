@@ -31,6 +31,8 @@
 #include <cstring>
 #include <string>
 #include <cerrno>
+#include <fcntl.h>
+#include <thread>
 #include <unistd.h>
 #include <poll.h>
 #include <iomanip>
@@ -886,13 +888,94 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
 
         LOG_INFO << "DRMSurface: Setting mode for " << conn->info.name
                  << " (" << mode->hdisplay << "x" << mode->vdisplay << ")";
-        ret = drmModeSetCrtc(outputManager_->getFd(), crtcId_,
+        const int fd = outputManager_->getFd();
+        ret = drmModeSetCrtc(fd, crtcId_,
                             nextFb_.fbId, 0, 0, &connectorId_, 1, mode);
 
         if (ret != 0) {
             LOG_ERROR << "DRMSurface: Modeset failed: " << strerror(-ret);
             gbm_surface_release_buffer(gbmSurface_, bo);
             return ret;  // already negative
+        }
+
+        // Cold-boot path: drmModeSetCrtc returns 0 even when the kernel
+        // silently fails to land the requested mode (i915 HDMI PHY race).
+        // Verify via drmModeGetCrtc; on mismatch try one in-process recovery
+        // (CRTC disable -> short settle -> re-enable). NOT drmDropMaster +
+        // drmSetMaster — that's a userspace permission shuffle and does not
+        // re-run pipe config or link training. A disable->re-enable cycle
+        // gives the kernel a chance to re-run intel_modeset_pipe_config.
+        if (!DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode)) {
+            LOG_WARNING << "DRMSurface: cold-boot verify mismatch on " << conn->info.name
+                        << ", attempting in-process recovery";
+
+            // 1. Drain any pending DRM events so other surfaces' page-flip
+            //    completions don't get lost during the retry window.
+            drmEventContext evctx = {};
+            evctx.version = 3;
+            evctx.page_flip_handler = pageFlipHandler;
+            evctx.page_flip_handler2 = pageFlipHandler2;
+            for (int drained = 0; drained < 16; ++drained) {
+                pollfd pfd = {fd, POLLIN, 0};
+                int pr = poll(&pfd, 1, 0);  // non-blocking
+                if (pr <= 0 || !(pfd.revents & POLLIN)) {
+                    break;
+                }
+                drmHandleEvent(fd, &evctx);
+            }
+
+            // 2. Pre-flight: a VT switch / seat-disable callback can fire
+            //    asynchronously between the original modeset and the retry.
+            //    If that revoked our master or invalidated the fd, retry is
+            //    futile and we should go straight to fatal.
+            SeatManager* sm = outputManager_->getSeatManager();
+            const bool seatOk = (!sm) || sm->isDeviceTracked(fd);
+            const bool fdOk = (fcntl(fd, F_GETFD) != -1);
+            if (!seatOk || !fdOk) {
+                LOG_ERROR << "DRMSurface: cold-boot retry pre-flight failed (seatOk="
+                          << seatOk << " fdOk=" << fdOk << ") on " << conn->info.name
+                          << " — marking fatal";
+                fatalModeset_ = true;
+                gbm_surface_release_buffer(gbmSurface_, bo);
+                return -EIO;
+            }
+
+            // 3. Force-disable the CRTC. This detaches all connectors —
+            //    the next enable must re-attach by passing &connectorId_, 1.
+            int dret = drmModeSetCrtc(fd, crtcId_, 0, 0, 0, nullptr, 0, nullptr);
+            if (dret != 0) {
+                LOG_WARNING << "DRMSurface: cold-boot retry: CRTC disable returned "
+                            << strerror(-dret) << " (continuing)";
+            }
+
+            // 4. Brief settle for the kernel teardown.
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+            // 5. Re-attempt the modeset with the original target + connector.
+            int rret = drmModeSetCrtc(fd, crtcId_, nextFb_.fbId, 0, 0,
+                                      &connectorId_, 1, mode);
+            if (rret != 0) {
+                LOG_ERROR << "DRMSurface: cold-boot retry SetCrtc failed: "
+                          << strerror(-rret) << " on " << conn->info.name
+                          << " — marking fatal";
+                fatalModeset_ = true;
+                gbm_surface_release_buffer(gbmSurface_, bo);
+                return rret;
+            }
+
+            // 6. Re-verify. If still wrong, the in-process retry isn't enough
+            //    (likely the i915 PHY rebind class of cold-boot bug). Mark
+            //    fatal so the run loop exits and systemd Restart=on-failure
+            //    re-runs the whole modeset path with a fresh process.
+            if (!DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode)) {
+                LOG_ERROR << "DRMSurface: cold-boot retry still mismatched on "
+                          << conn->info.name << " — marking fatal for systemd restart";
+                fatalModeset_ = true;
+                gbm_surface_release_buffer(gbmSurface_, bo);
+                return -EIO;
+            }
+
+            LOG_INFO << "DRMSurface: cold-boot retry succeeded on " << conn->info.name;
         }
 
         modeSet_ = true;

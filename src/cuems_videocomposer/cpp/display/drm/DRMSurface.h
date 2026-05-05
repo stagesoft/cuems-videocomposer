@@ -278,7 +278,15 @@ public:
      * Get GBM surface
      */
     gbm_surface* getGbmSurface() const { return gbmSurface_; }
-    
+
+    /**
+     * True iff the cold-boot first-frame modeset verifier failed even after
+     * the in-process disable->re-enable retry. The render loop checks this
+     * across all surfaces and exits the process so systemd Restart=on-failure
+     * recovers (instead of looping forever on a broken modeset).
+     */
+    bool hasFatalModesetError() const { return fatalModeset_; }
+
 private:
     // Framebuffer info
     struct Framebuffer {
@@ -341,6 +349,7 @@ private:
     bool modeSet_ = false;           // True if CRTC mode has been set (initial modeset done)
     int warmupFrames_ = 0;           // Frames remaining before trying page flip (Intel quirk)
     bool useSetCrtcOnly_ = false;    // Fall back to SetCrtc if page flip consistently fails
+    bool fatalModeset_ = false;      // Cold-boot first-frame verifier failed even after retry
     
     // Ownership flags (for cleanup)
     bool ownGbmDevice_ = false;      // True if we created the GBM device
