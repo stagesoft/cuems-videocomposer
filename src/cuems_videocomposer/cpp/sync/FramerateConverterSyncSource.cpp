@@ -199,5 +199,12 @@ long FramerateConverterSyncSource::getTimeMs() const {
     return -1;
 }
 
+long FramerateConverterSyncSource::getDisplayLatencyMs() const {
+    if (wrappedSyncSource_) {
+        return wrappedSyncSource_->getDisplayLatencyMs();
+    }
+    return 0;
+}
+
 } // namespace videocomposer
 

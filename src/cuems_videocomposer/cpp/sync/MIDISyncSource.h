@@ -25,6 +25,7 @@
 #include "SyncSource.h"
 #include "MIDIDriver.h"
 #include "MTCDecoder.h"
+#include <atomic>
 #include <string>
 #include <memory>
 #include <cstdint>
@@ -100,10 +101,24 @@ public:
     bool wasFullFrameReceived() override;
     
     /**
-     * Get MTC timecode position in milliseconds (from mtcreceiver).
+     * Get MTC timecode position in ms, with display-pipeline latency
+     * compensation applied (returns wire-MTC + displayLatencyMs_ so the
+     * frame chosen at wall-clock T is the one visible at MTC = T).
      */
     long getTimeMs() const override;
-    
+
+    /**
+     * Set the display-pipeline latency compensation in ms. Values outside
+     * [0, 200] are clamped. Thread-safe (atomic).
+     */
+    void setDisplayLatencyMs(long ms);
+
+    /**
+     * Get the display-pipeline latency compensation in ms.
+     * Thread-safe (atomic read).
+     */
+    long getDisplayLatencyMs() const override { return displayLatencyMs_.load(); }
+
 private:
     std::unique_ptr<MIDIDriver> driver_;
     MTCDecoder mtcDecoder_;
@@ -111,6 +126,7 @@ private:
     double framerate_;
     int64_t currentFrame_;
     bool connected_;
+    std::atomic<long> displayLatencyMs_;
 };
 
 } // namespace videocomposer

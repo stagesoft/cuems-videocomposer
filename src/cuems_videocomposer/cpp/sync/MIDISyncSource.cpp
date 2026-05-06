@@ -22,11 +22,13 @@
 #include "MIDISyncSource.h"
 #include "NullMIDIDriver.h"
 #include "ALSASeqMIDIDriver.h"
+#include "../utils/Logger.h"
 #ifdef HAVE_MTCRECEIVER
 #include "MtcReceiverMIDIDriver.h"
 #endif
-#include "../utils/Logger.h"
+#include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 
@@ -36,13 +38,24 @@ MIDISyncSource::MIDISyncSource()
     : framerate_(25.0)
     , currentFrame_(-1)
     , connected_(false)
+    , displayLatencyMs_(33)
 {
     // Start with null driver (will be replaced when driver is chosen)
     driver_ = std::make_unique<NullMIDIDriver>();
+    LOG_INFO << "MIDISyncSource: display latency compensation = "
+             << displayLatencyMs_.load() << " ms";
 }
 
 MIDISyncSource::~MIDISyncSource() {
     disconnect();
+}
+
+void MIDISyncSource::setDisplayLatencyMs(long ms) {
+    if (ms < 0) ms = 0;
+    if (ms > 200) ms = 200;
+    displayLatencyMs_.store(ms);
+    LOG_INFO << "MIDISyncSource: display latency compensation updated to "
+             << ms << " ms";
 }
 
 bool MIDISyncSource::connect(const char* param) {
@@ -135,8 +148,18 @@ int64_t MIDISyncSource::pollFrame(uint8_t* rolling) {
 
     // Poll driver for frame (driver handles MIDI message parsing)
     int64_t frame = driver_->pollFrame();
-    
+
     if (frame >= 0) {
+        // Display-pipeline latency compensation: advance the chosen frame so
+        // the buffer submitted now is the one visible at MTC = current wall
+        // clock when the GPU/scanout pipeline actually presents it on screen.
+        // Conversion is at MTC framerate; FramerateConverterSyncSource may
+        // re-compute downstream from getTimeMs() for non-matching video fps.
+        long latencyCompMs = displayLatencyMs_.load();
+        if (latencyCompMs > 0 && framerate_ > 0.0) {
+            frame += static_cast<int64_t>(std::round(
+                static_cast<double>(latencyCompMs) * framerate_ / 1000.0));
+        }
         currentFrame_ = frame;
     }
 
@@ -155,6 +178,30 @@ int64_t MIDISyncSource::pollFrame(uint8_t* rolling) {
             *rolling = (frame >= 0) ? 1 : 0;
         }
     }
+
+    // #region DEBUG
+    {
+        static long long s_lastTickNs = 0;
+        struct timespec _ts;
+        clock_gettime(CLOCK_MONOTONIC, &_ts);
+        long long _nowNs = (long long)_ts.tv_sec * 1000000000LL + _ts.tv_nsec;
+        if (_nowNs - s_lastTickNs >= 1000000000LL) {
+            s_lastTickNs = _nowNs;
+#ifdef HAVE_MTCRECEIVER
+            long _mtcMs = (long)MtcReceiver::mtcHead.load();
+#else
+            long _mtcMs = -1;
+#endif
+            FILE* _f = fopen("/tmp/.claude/debug.log", "a");
+            if (_f) {
+                long _gtm = getTimeMs();
+                fprintf(_f, "[DEBUG H3/H4] VIDEO_TICK wall_ns=%lld mtc_ms=%ld getTimeMs=%ld frame=%lld\n",
+                        (long long)_nowNs, _mtcMs, _gtm, (long long)frame);
+                fclose(_f);
+            }
+        }
+    }
+    // #endregion DEBUG
 
     return frame;
 }
@@ -239,7 +286,7 @@ long MIDISyncSource::getTimeMs() const {
         s_rate       = 1.0;
         s_prevMtcMs  = baseMtcMs;
         s_prevMtcWcUs = nowUs;
-        return baseMtcMs;
+        return baseMtcMs + displayLatencyMs_.load();
     }
 
     // Detect mtcHead change → update rate estimate
@@ -259,6 +306,14 @@ long MIDISyncSource::getTimeMs() const {
         // Large jump (seek / cue change): snap and reset
         if (mtcStepMs > 200 || mtcStepMs < -10) {
             s_smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
+            // Reset wall-clock anchor so the unconditional advance below
+            // contributes 0 µs on this call. Without this, sparse callers
+            // (e.g. 1 Hz instrumentation polls) re-add up to the 100 ms
+            // wallDelta cap on top of the just-snapped baseMtc, and
+            // justSnapped suppresses the anti-drift correction — yielding
+            // a steady-state +100 ms bias visible to FramerateConverter
+            // when video fps differs from MTC fps.
+            s_lastWcUs = nowUs;
             s_rate = 1.0;
             justSnapped = true;
         }
@@ -311,7 +366,7 @@ long MIDISyncSource::getTimeMs() const {
         }
     }
 
-    return static_cast<long>(s_smoothUs / 1000LL);
+    return static_cast<long>(s_smoothUs / 1000LL) + displayLatencyMs_.load();
 #else
     return -1;
 #endif

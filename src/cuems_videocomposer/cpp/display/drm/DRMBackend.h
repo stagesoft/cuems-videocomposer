@@ -57,6 +57,7 @@ class VirtualCanvas;
 class OutputBlitShader;
 class OutputSinkManager;
 class DisplayConfigurationManager;
+class StartupSplash;
 
 /**
  * DRMBackend - DRM/KMS display backend for direct rendering
@@ -238,6 +239,29 @@ public:
      * Get total dropped frames across all outputs (frame pacing stats)
      */
     int64_t getTotalDroppedFrames() const;
+
+    /**
+     * Measure end-to-end display latency at startup.
+     *
+     * Drives `warmupFrames + sampleFrames` full-screen presents through the
+     * cue render path on every connected surface, measures the median
+     * submit→flip latency, and returns the max-across-surfaces total
+     * (swap_chain + 1 vsync scanout + 5 ms panel response) in ms.
+     *
+     * Returns the refresh-rate-derived 2 × vsync fallback (max across
+     * surfaces) on measurement failure; returns the constructor 33 ms
+     * default if no surfaces are available.
+     *
+     * @param warmupFrames frames to discard before sampling (covers
+     *                     setCrtc warmup + GBM swap-chain ramp)
+     * @param sampleFrames frames to capture for median + p95 stats
+     * @param splash       optional StartupSplash for the palette-pulse
+     *                     render path; nullptr falls back to a clear-only
+     *                     measurement (still full-screen / forces buffer
+     *                     rotation but skips the logo composite)
+     */
+    int measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
+                                StartupSplash* splash);
     
     /**
      * Configure output region in the virtual canvas

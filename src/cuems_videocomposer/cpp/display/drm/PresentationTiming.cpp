@@ -25,6 +25,7 @@
 
 #include "PresentationTiming.h"
 #include "../../utils/Logger.h"
+#include <algorithm>
 #include <ctime>
 
 namespace videocomposer {
@@ -35,22 +36,22 @@ PresentationTiming::PresentationTiming() {
 
 void PresentationTiming::init(double refreshHz) {
     reset();
-    
+
     if (refreshHz > 0) {
         // Calculate expected vsync duration in nanoseconds
         // e.g., 60Hz -> 16,666,667 ns
         expectedVsyncNs_ = static_cast<int64_t>(1e9 / refreshHz);
         displayHz_ = refreshHz;
         initialized_ = true;
-        
-        LOG_INFO << "PresentationTiming: Initialized for " << refreshHz 
+
+        LOG_INFO << "PresentationTiming: Initialized for " << refreshHz
                  << "Hz (vsync=" << (expectedVsyncNs_ / 1000000.0) << "ms)";
     }
 }
 
 void PresentationTiming::setVideoFramerate(double videoFps) {
     videoFps_ = videoFps;
-    
+
     // Calculate expected vsyncs between flips
     // e.g., 60Hz display / 25fps video = 2.4 vsyncs per video frame
     if (videoFps > 0 && displayHz_ > 0) {
@@ -60,8 +61,8 @@ void PresentationTiming::setVideoFramerate(double videoFps) {
         if (expectedVsyncsPerFrame_ < 1) {
             expectedVsyncsPerFrame_ = 1;
         }
-        
-        LOG_INFO << "PresentationTiming: Video framerate set to " << videoFps 
+
+        LOG_INFO << "PresentationTiming: Video framerate set to " << videoFps
                  << " fps (expecting ~" << expectedVsyncsPerFrame_ << " vsyncs per frame)";
     } else {
         expectedVsyncsPerFrame_ = 1;
@@ -71,43 +72,43 @@ void PresentationTiming::setVideoFramerate(double videoFps) {
 void PresentationTiming::recordFlip(unsigned int sec, unsigned int usec, unsigned int msc) {
     // Store previous entry
     previous_ = current_;
-    
+
     // Record new timing
     current_.ust = toNanoseconds(sec, usec);
     current_.msc = static_cast<int64_t>(msc);
     current_.display_time = getCurrentTimeNs();
     current_.valid = true;
-    
+
     // Calculate vsync duration and skipped frames if we have a previous entry
     if (previous_.valid && previous_.ust > 0 && current_.ust > previous_.ust) {
         int64_t ust_delta = current_.ust - previous_.ust;
         int64_t msc_delta = current_.msc - previous_.msc;
-        
+
         // Avoid division by zero
         if (msc_delta > 0) {
             // Calculate actual vsync duration
             current_.vsync_duration = ust_delta / msc_delta;
-            
+
             // Detect skipped vsyncs (msc_delta > 1 means we missed frames)
             // msc_delta of 1 = perfect, 2 = 1 skipped, etc.
             current_.skipped_vsyncs = msc_delta - 1;
-            
+
             if (current_.skipped_vsyncs > 0) {
                 totalDroppedFrames_ += current_.skipped_vsyncs;
-                
+
                 // With xjadeo-style timing (video fps < display fps), some skips are expected
                 // Only count as "unexpected" if we skip more than expected
                 // e.g., 25fps on 60Hz: expected msc_delta = 2-3, skips = 1-2
                 int64_t expectedSkips = expectedVsyncsPerFrame_ - 1;  // e.g., 2-1=1 or 3-1=2
                 int64_t unexpectedSkips = current_.skipped_vsyncs - expectedSkips;
-                
+
                 // Allow 1 vsync tolerance for timing jitter
                 if (unexpectedSkips > 1) {
                     totalUnexpectedDrops_ += unexpectedSkips;
                     // Only log actual problems, not expected timing
                     if (totalUnexpectedDrops_ <= 5 || totalUnexpectedDrops_ % 60 == 0) {
-                        LOG_WARNING << "PresentationTiming: Dropped " << unexpectedSkips 
-                                   << " frame(s) beyond expected (total unexpected: " 
+                        LOG_WARNING << "PresentationTiming: Dropped " << unexpectedSkips
+                                   << " frame(s) beyond expected (total unexpected: "
                                    << totalUnexpectedDrops_ << ")";
                     }
                 }
@@ -127,6 +128,85 @@ void PresentationTiming::recordFlip(unsigned int sec, unsigned int usec, unsigne
         current_.vsync_duration = expectedVsyncNs_;
         current_.skipped_vsyncs = 0;
     }
+
+    // Pair with the front pending submit (FIFO per surface) and record the
+    // submit→flip latency sample. Capture-disabled = pendingSubmits_ stays
+    // empty, so this branch is also a no-op on the production hot path.
+    //
+    // The flip side of the pair uses current_.ust — the kernel's hardware
+    // vsync timestamp (CLOCK_MONOTONIC, same domain as recordSubmit's
+    // getCurrentTimeNs). This measures userspace-submit → actual hardware
+    // flip; using current_.display_time instead would add the kernel-to-
+    // userspace event-delivery latency (~100-500 µs of jitter).
+    //
+    // Skip the sample if the kernel didn't supply a usable timestamp
+    // (current_.ust == 0) — rare, but seen on some atomic-only drivers.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (captureEnabled_ && !pendingSubmits_.empty()) {
+            int64_t submit_ns = pendingSubmits_.front();
+            pendingSubmits_.pop_front();
+            if (current_.ust > 0) {
+                int64_t delta = current_.ust - submit_ns;
+                if (delta > 0) {
+                    if (latencySamples_.size() >= maxSamples_ && maxSamples_ > 0) {
+                        latencySamples_.erase(latencySamples_.begin());
+                    }
+                    latencySamples_.push_back(delta);
+                }
+            }
+        }
+    }
+}
+
+void PresentationTiming::recordSubmit() {
+    // Hot-path early-return when capture is off — no allocation, no lock
+    // contention with the render loop.
+    if (!captureEnabled_) {
+        return;
+    }
+    int64_t now = getCurrentTimeNs();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!captureEnabled_) {
+        return;
+    }
+    pendingSubmits_.push_back(now);
+}
+
+void PresentationTiming::discardPendingSubmit() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!pendingSubmits_.empty()) {
+        pendingSubmits_.pop_front();
+    }
+}
+
+void PresentationTiming::enableLatencyCapture(size_t maxSamples) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    captureEnabled_ = true;
+    maxSamples_ = (maxSamples == 0) ? 256 : maxSamples;
+}
+
+void PresentationTiming::disableLatencyCapture() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    captureEnabled_ = false;
+    pendingSubmits_.clear();
+}
+
+LatencyStats PresentationTiming::getSwapChainLatencyStats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    LatencyStats stats;
+    stats.expectedVsyncNs = expectedVsyncNs_;
+    stats.sampleCount = latencySamples_.size();
+    if (latencySamples_.empty()) {
+        return stats;
+    }
+    std::vector<int64_t> sorted(latencySamples_);
+    std::sort(sorted.begin(), sorted.end());
+    stats.medianNs = sorted[sorted.size() / 2];
+    size_t p95idx = static_cast<size_t>(0.95 * (sorted.size() - 1));
+    stats.p95Ns = sorted[p95idx];
+    stats.valid = true;
+    return stats;
 }
 
 PresentationEntry PresentationTiming::getInfo() const {
@@ -139,11 +219,16 @@ void PresentationTiming::reset() {
     totalDroppedFrames_ = 0;
     totalUnexpectedDrops_ = 0;
     // Keep expectedVsyncNs_, displayHz_, videoFps_, expectedVsyncsPerFrame_, initialized_ - they're set by init()/setVideoFramerate()
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    pendingSubmits_.clear();
+    latencySamples_.clear();
+    // captureEnabled_ / maxSamples_ preserved across reset() — caller controls them via enable/disable.
 }
 
 int64_t PresentationTiming::toNanoseconds(unsigned int sec, unsigned int usec) {
     // Convert seconds + microseconds to nanoseconds
-    return static_cast<int64_t>(sec) * 1000000000LL + 
+    return static_cast<int64_t>(sec) * 1000000000LL +
            static_cast<int64_t>(usec) * 1000LL;
 }
 

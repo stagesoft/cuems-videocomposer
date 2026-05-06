@@ -281,11 +281,13 @@ void VideoComposerApplication::showStartupSplash() {
     if (!displayBackend_ || !displayBackend_->isWindowOpen()) {
         return;
     }
-    StartupSplash splash;
-    if (!splash.loadFromEmbedded()) {
+    splash_ = std::make_unique<StartupSplash>();
+    if (!splash_->loadFromEmbedded()) {
+        splash_.reset();
         return;
     }
-    splash.show(displayBackend_.get(), displayManager_.get(), StartupSplash::SPLASH_DURATION_SECONDS);
+    splash_->show(displayBackend_.get(), displayManager_.get(),
+                  StartupSplash::SPLASH_DURATION_SECONDS);
 }
 
 bool VideoComposerApplication::initializeRemoteControl() {
@@ -422,13 +424,23 @@ void VideoComposerApplication::updateLayers() {
         if (syncFrame >= 0) {
             // Get framerate from sync source (MTC framerate)
             double syncFps = globalSyncSource_->getFramerate();
+            // Undo the display-latency advance: pollFrame() returns the
+            // GPU-pipeline-compensated frame, but the OSD must show wire MTC
+            // so operators can compare against an external SMPTE reference.
+            long latencyCompMs = globalSyncSource_->getDisplayLatencyMs();
+            int64_t osdFrame = syncFrame;
+            if (latencyCompMs > 0 && syncFps > 0.0) {
+                int64_t latencyFrames = static_cast<int64_t>(
+                    std::round(static_cast<double>(latencyCompMs) * syncFps / 1000.0));
+                osdFrame = std::max(int64_t(0), syncFrame - latencyFrames);
+            }
             if (syncFps > 0.0) {
                 // Display sync source timecode (MTC) - this is monotonic and won't jump backwards
-                std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, syncFps);
+                std::string smpte = SMPTEUtils::frameToSmpteString(osdFrame, syncFps);
                 osdManager_->setSMPTETimecode(smpte);
-                
+
                 // Also set frame number from sync source
-                osdManager_->setFrameNumber(syncFrame);
+                osdManager_->setFrameNumber(osdFrame);
             } else {
                 // Fallback: use first layer's frame if sync source framerate not available
                 auto layers = layerManager_->getLayers();
@@ -437,9 +449,9 @@ void VideoComposerApplication::updateLayers() {
                     if (layer->isReady()) {
                         FrameInfo info = layer->getFrameInfo();
                         if (info.framerate > 0.0) {
-                            std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
+                            std::string smpte = SMPTEUtils::frameToSmpteString(osdFrame, info.framerate);
                             osdManager_->setSMPTETimecode(smpte);
-                            osdManager_->setFrameNumber(syncFrame);
+                            osdManager_->setFrameNumber(osdFrame);
                         } else {
                             osdManager_->setSMPTETimecode("00:00:00:00");
                         }
@@ -580,28 +592,57 @@ void VideoComposerApplication::shutdown() {
     initialized_ = false;
 }
 
-void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync) {
+void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync,
+                                                       DisplayBackend* displayBackend) {
     if (!midiSync) {
         return;
     }
-    
+
     // Configure MIDI sync source from config
     bool verbose = config_->getBool("want_verbose", false);
     bool midiClkAdj = config_->getBool("midi_clkadj", false);
     double delay = config_->getDouble("delay", -1.0);
-    
+
     // Set configuration before connecting
     midiSync->setVerbose(verbose);
     midiSync->setClockAdjustment(midiClkAdj);
     midiSync->setDelay(delay);
+
+    // Display-pipeline latency compensation. Three-way decision:
+    //   1. CLI passed --output-latency-ms <N>  (operator override)  → use N, skip measurement.
+    //   2. CLI did not pass; backend is DRM    (auto)                 → measure on real surfaces.
+    //   3. CLI did not pass; backend is X11/headless                  → leave constructor default 33 ms.
+    int outputLatencyMs = config_->getInt("output_latency_ms", -1);
+    if (outputLatencyMs >= 0) {
+        midiSync->setDisplayLatencyMs(static_cast<long>(outputLatencyMs));
+        LOG_INFO << "DisplayLatency: applied = " << outputLatencyMs
+                 << "ms (operator override via --output-latency-ms)";
+        LOG_INFO << "MIDISyncSource: display latency compensation = "
+                 << outputLatencyMs << " ms";
+        return;
+    }
+
+    DRMBackend* drmBackend = dynamic_cast<DRMBackend*>(displayBackend);
+    if (!drmBackend) {
+        LOG_INFO << "DisplayLatency: backend is not DRM, skipping measurement (X11 / headless)";
+        LOG_INFO << "DisplayLatency: applied = 33ms (constructor default)";
+        return;
+    }
+
+    // 30 warmup + 120 sample = 2.0 s of visible aura pulse on a 60 Hz display,
+    // plus the orchestrator's own pre-fill (≤6 frames) and 1 s fade-out tail.
+    int measured = drmBackend->measureDisplayLatencyMs(30, 120, splash_.get());
+    midiSync->setDisplayLatencyMs(static_cast<long>(measured));
+    LOG_INFO << "MIDISyncSource: display latency compensation = " << measured << " ms";
 }
 
 bool VideoComposerApplication::initializeGlobalSyncSource() {
     // Always create and enable global MIDI sync source by default
     auto midiSync = std::make_unique<MIDISyncSource>();
     
-    // Configure MIDI sync source
-    configureMIDISyncSource(midiSync.get());
+    // Configure MIDI sync source (also runs the auto display-latency measurement
+    // when --output-latency-ms is unset and the backend is DRM)
+    configureMIDISyncSource(midiSync.get(), displayBackend_.get());
     
     // Get MIDI port (default: "-1" for autodetect, can be disabled with "none" or "off")
     std::string midiPort = config_->getString("midi_port", "-1");
