@@ -95,6 +95,13 @@ public:
     bool getOnTop() const override;
     
     bool supportsMultiDisplay() const override { return true; }
+
+    /**
+     * Aggregate of DRMSurface::hasFatalModesetError across all surfaces.
+     * Returns true if any surface failed cold-boot verification + retry —
+     * the run loop must exit so systemd Restart=on-failure recovers.
+     */
+    bool hasFatalError() const override;
     
     void* getContext() override;
     void makeCurrent() override;

@@ -251,6 +251,16 @@ public:
         (void)mode;
         return false;
     }
+
+    /**
+     * True iff the backend has hit an unrecoverable error that the run loop
+     * should treat as a process-exit signal. Currently used for the DRM
+     * cold-boot modeset verifier: when even the in-process retry can't make
+     * the panel scan the requested mode, we want the process to exit so
+     * systemd Restart=on-failure brings up a fresh one. Backends without a
+     * fatal-state concept can keep the default (false).
+     */
+    virtual bool hasFatalError() const { return false; }
     
     /**
      * Save display configuration to file

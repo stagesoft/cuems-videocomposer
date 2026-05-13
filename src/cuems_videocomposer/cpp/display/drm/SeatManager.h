@@ -101,7 +101,19 @@ public:
      * @param fd Device file descriptor
      */
     void disableDevice(int fd);
-    
+
+    /**
+     * Pre-flight check used before in-process modeset retries: returns true
+     * iff the fd is still tracked by the seat. Under libseat this consults
+     * the device map; without libseat there is nothing to track, so it
+     * returns true unconditionally for any non-negative fd.
+     *
+     * Catches the case where a VT switch / seat-disable callback fired
+     * asynchronously between the original modeset and a retry, leaving
+     * the fd no longer ours to drive.
+     */
+    bool isDeviceTracked(int fd) const;
+
     /**
      * Check if libseat is available
      */

@@ -149,7 +149,13 @@ public:
      * Get device path
      */
     const std::string& getDevicePath() const { return devicePath_; }
-    
+
+    /**
+     * Get the SeatManager (for pre-flight checks before in-process modeset retries).
+     * Returns nullptr if init() has not run.
+     */
+    SeatManager* getSeatManager() const { return seatManager_.get(); }
+
     // ===== Output Enumeration =====
     
     /**
@@ -206,7 +212,27 @@ public:
      * @return true if mode is valid and available
      */
     bool prepareMode(int index, int width, int height, double refreshRate = 0.0);
-    
+
+    /**
+     * Verify that drmModeGetCrtc reports a CRTC whose mode hdisplay/vdisplay
+     * matches the requested mode. Compares resolution only — tolerant of kernel
+     * timing normalization (clock/htotal/vtotal/flags differences).
+     *
+     * Caveat: the kernel's own readback can disagree with what the panel is
+     * actually scanning out (e.g. cold-boot HDMI PHY race where SetCrtc returns
+     * 0 and GetCrtc reports the requested mode but the link is still in 4K).
+     * A "true" return means the kernel agrees with us, not that the sink does.
+     *
+     * @param fd        Open DRM fd (must be DRM master).
+     * @param crtcId    The CRTC to read back.
+     * @param requested The mode we asked drmModeSetCrtc to apply.
+     * @return true iff drmModeGetCrtc succeeds AND actual.hdisplay == requested.hdisplay
+     *         AND actual.vdisplay == requested.vdisplay. Returns false (and logs
+     *         at LOG_ERROR) if drmModeGetCrtc returns nullptr or the comparison
+     *         fails.
+     */
+    static bool verifyCrtcMode(int fd, uint32_t crtcId, const drmModeModeInfo& requested);
+
     // ===== Resolution Mode Selection =====
     
     /**
