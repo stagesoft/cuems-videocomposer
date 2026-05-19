@@ -47,8 +47,12 @@ int main(int argc, char* argv[]) {
         auto t0 = std::chrono::steady_clock::now();
 
         videocomposer::VideoFileInput vfi;
+        // Default to AUTO so the standalone matches the inline VC path (which lets
+        // openHardwareCodec() try VAAPI first). Pass 2 of indexFrames() short-circuits
+        // on hardware decode — see VideoFileInput.cpp:935-940 — making the standalone
+        // ~8x faster end-to-end on a long-GOP H.264 (ClickUp 869dbywj2).
         vfi.setHardwareDecodePreference(
-            videocomposer::VideoFileInput::HardwareDecodePreference::SOFTWARE_ONLY);
+            videocomposer::VideoFileInput::HardwareDecodePreference::AUTO);
 
         if (!vfi.open(path)) {
             std::cerr << "ERROR: Failed to index " << path << "\n";
