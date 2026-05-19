@@ -1,3 +1,17 @@
+cuems-videocomposer (0.1.2-1) unstable; urgency=medium
+
+  * cuems-videoindexer: default to HardwareDecodePreference::AUTO so the
+    standalone CLI matches the inline VC path (~8x faster end-to-end on
+    long-GOP H.264; Pass 2 short-circuits on VAAPI hosts and uses the
+    existing timestamp fallback for frame_pts). ClickUp 869dbywj2.
+  * Packaging: drop stale install(contrib/cuems-generate-display-conf)
+    rule from CMakeLists.txt. The script was removed when videocomposer
+    took over display.conf generate+load; the orphan install rule made
+    cmake --install (and therefore dh_auto_install) abort before the
+    full bin/ tree was written, so the .deb was missing files.
+
+ -- Ion Reguera <ion@stagelab.coop>  Tue, 19 May 2026 14:25:00 +0200
+
 cuems-videocomposer (0.1.1-1) unstable; urgency=medium
 
   * Fix AsyncDecodeQueue stuck after cue loop: detect backward jump
