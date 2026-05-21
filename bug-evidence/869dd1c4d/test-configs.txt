@@ -1,0 +1,109 @@
+Test configuration snapshots for ticket 869dd1c4d
+==================================================
+
+These are the /etc/cuems/display.conf + /etc/cuems/videocomposer-flags.env
+states for each test phase. Note: only the operator-managed parts are
+shown; runtime-generated files like /run/cuems/videocomposer.env are
+not included.
+
+------------------------------------------------------------
+PHASE: Baseline + Test A + Test B
+       (single output 1080p, then 1080p+2x4K with 1 or 3 decodes)
+       Time window: pre-12:54 today
+------------------------------------------------------------
+
+/etc/cuems/display.conf:
+
+  # Authored by cuems-display-setup on 2026-05-15T20:50:54
+  canvas_layout=custom
+
+  [output:HDMI-A-1]
+  canvas_region=0,0,3840,2160
+  resolution=3840x2160
+
+  [output:HDMI-A-2]
+  canvas_region=3840,0,3840,2160
+  resolution=3840x2160
+
+  [output:HDMI-A-3]
+  canvas_region=7680,0,1920,1080
+  resolution=1920x1080
+
+/etc/cuems/videocomposer-flags.env:
+
+  OPERATOR_FLAGS=--verbose --resolution native
+
+Effect: --resolution native forces DRM mode to EDID native (4K on 4K
+panels, 1080p on the 1080p panel), overriding any per-output
+resolution= in display.conf. Confirmed by journal WARNING line:
+"DRMBackend: Ignoring per-output resolutions from display.conf —
+overridden by explicit -r flag".
+
+------------------------------------------------------------
+PHASE: Test C (and the post-test permanent state)
+       (3x 1080p with 4K panels downscaled)
+       Time window: 12:54:55 onwards
+------------------------------------------------------------
+
+/etc/cuems/display.conf  (active config; saved with "Test C" header
+during the test, then re-saved with a "Permanent config" header
+explaining the rationale — content is identical):
+
+  canvas_layout=custom
+
+  [output:HDMI-A-1]
+  canvas_region=0,0,1920,1080
+  resolution=1920x1080
+
+  [output:HDMI-A-2]
+  canvas_region=1920,0,1920,1080
+  resolution=1920x1080
+
+  [output:HDMI-A-3]
+  canvas_region=3840,0,1920,1080
+  resolution=1920x1080
+
+/etc/cuems/videocomposer-flags.env:
+
+  OPERATOR_FLAGS=--verbose --resolution 1080p
+
+Effect: --resolution 1080p forces the DRM mode on every connector to
+1920x1080 regardless of EDID native. Verified in journal at restart:
+
+  [INFO] DRMSurface: Setting mode for HDMI-A-1 (1920x1080)
+  [INFO] DRMSurface: Setting mode for HDMI-A-2 (1920x1080)
+  [INFO] DRMSurface: Setting mode for HDMI-A-3 (1920x1080)
+
+Virtual canvas: 5760 x 1080.
+
+Backups left on slave for future rollback:
+  /etc/cuems/display.conf.bak-test-c            (the pre-test 4K config)
+  /etc/cuems/videocomposer-flags.env.bak-test-c (the --resolution native env)
+
+------------------------------------------------------------
+NOTE on /run/cuems/videocomposer.env
+------------------------------------------------------------
+
+Generated at videocomposer service startup by the ExecStartPre hook
+/usr/lib/cuems/bin/cuems-generate-display-conf. Contents observed
+in both test phases:
+
+  OUTPUT_LATENCY_FLAG=
+
+So the latency flag was empty in all our tests (auto-detected display
+latency was the relevant code path; see DisplayLatency journal lines).
+
+------------------------------------------------------------
+HOSTS
+------------------------------------------------------------
+
+slave_dev: node01 / UUID 000000000005
+  CPU: Intel N97 (Alder Lake-N, 4 cores)
+  GPU: UHD Graphics 16 EU, max boost ~1.1 GHz, 12 W TDP
+  RAM: 16 GB LPDDR5
+  Display: HDMI-A-1 (4K), HDMI-A-2 (4K), HDMI-A-3 (1080p)
+
+controller: node 000000000002 (this dev box)
+  Same hardware. Currently NOT downgraded to 1080p (runs native EDID).
+  Master smooth at 60 fps for the workloads tested (smaller render load
+  because it was driving fewer concurrent decodes during the session).
