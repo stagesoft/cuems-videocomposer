@@ -230,10 +230,12 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
     // Allocate texture storage (empty for now, will be filled by upload methods)
     if (isHAP) {
         // For HAP, we'll upload compressed data later
-        // Just allocate the texture object
+        // Just allocate the texture object — uploadCompressedData will allocate
+        // storage on the first call (and reuse it via glCompressedTexSubImage2D
+        // on subsequent calls).
     } else {
         // For uncompressed, allocate empty texture
-        glTexImage2D(GL_TEXTURE_2D, 0, textureFormat_, 
+        glTexImage2D(GL_TEXTURE_2D, 0, textureFormat_,
                      info.width, info.height, 0,
                      GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         if (!checkGLError("glTexImage2D")) {
@@ -242,6 +244,12 @@ bool GPUTextureFrameBuffer::allocate(const FrameInfo& info, GLenum textureFormat
             textureIds_[0] = 0;
             return false;
         }
+        // Record the storage allocation so uploadUncompressedData uses
+        // glTexSubImage2D instead of reallocating on every frame.
+        hasStorage_ = true;
+        storageWidth_ = info.width;
+        storageHeight_ = info.height;
+        storageFormat_ = textureFormat_;
     }
 
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -268,6 +276,10 @@ void GPUTextureFrameBuffer::release() {
     isHAP_ = false;
     ownsTexture_ = false;
     hapVariant_ = HapVariant::NONE;
+    hasStorage_ = false;
+    storageWidth_ = 0;
+    storageHeight_ = 0;
+    storageFormat_ = 0;
 }
 
 GLuint GPUTextureFrameBuffer::getTextureId(int plane) const {
@@ -289,14 +301,36 @@ bool GPUTextureFrameBuffer::uploadCompressedData(const uint8_t* data, size_t siz
     if (!checkGLError("glBindTexture(upload)")) {
         return false;
     }
-    
-    // Upload compressed texture data (DXT1/DXT5 for HAP)
-    glCompressedTexImage2D(GL_TEXTURE_2D, 0, format,
-                           width, height, 0,
-                           static_cast<GLsizei>(size), data);
-    if (!checkGLError("glCompressedTexImage2D")) {
-        glBindTexture(GL_TEXTURE_2D, 0);
-        return false;
+
+    // Prefer glCompressedTexSubImage2D when storage already matches.
+    // glCompressedTexImage2D *reallocates* the texture image storage every
+    // call, which on Intel iGPUs (and most drivers) triggers texture-cache
+    // invalidation, memory-allocator work, and pipeline stalls that leak
+    // into subsequent GL phases. At 3 streams × 30 fps that's 90 reallocs/s
+    // of pure GPU-side cost. The Sub variant skips all of that and just
+    // streams the new compressed payload into existing storage.
+    if (hasStorage_ && storageWidth_ == width && storageHeight_ == height
+        && storageFormat_ == format) {
+        glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                                  width, height, format,
+                                  static_cast<GLsizei>(size), data);
+        if (!checkGLError("glCompressedTexSubImage2D")) {
+            glBindTexture(GL_TEXTURE_2D, 0);
+            return false;
+        }
+    } else {
+        // First upload, or size/format changed → (re)allocate + upload.
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, format,
+                               width, height, 0,
+                               static_cast<GLsizei>(size), data);
+        if (!checkGLError("glCompressedTexImage2D")) {
+            glBindTexture(GL_TEXTURE_2D, 0);
+            return false;
+        }
+        hasStorage_ = true;
+        storageWidth_ = width;
+        storageHeight_ = height;
+        storageFormat_ = format;
     }
 
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -326,17 +360,38 @@ bool GPUTextureFrameBuffer::uploadUncompressedData(const uint8_t* data, size_t s
         }
     }
 
-    // Upload uncompressed texture data
-    glTexImage2D(GL_TEXTURE_2D, 0, format,
-                 width, height, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, data);
-    if (!checkGLError("glTexImage2D")) {
-        // Reset pixel store before returning
-        if (stride > 0 && stride != width * 4) {
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    // Prefer glTexSubImage2D when storage already matches (see comment in
+    // uploadCompressedData — same reason: glTexImage2D reallocates storage
+    // and stalls the GPU; the Sub variant just streams pixels).
+    if (hasStorage_ && storageWidth_ == width && storageHeight_ == height
+        && storageFormat_ == format) {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                        width, height,
+                        GL_RGBA, GL_UNSIGNED_BYTE, data);
+        if (!checkGLError("glTexSubImage2D")) {
+            if (stride > 0 && stride != width * 4) {
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            }
+            glBindTexture(GL_TEXTURE_2D, 0);
+            return false;
         }
-        glBindTexture(GL_TEXTURE_2D, 0);
-        return false;
+    } else {
+        // First upload, or size/format changed → (re)allocate + upload.
+        glTexImage2D(GL_TEXTURE_2D, 0, format,
+                     width, height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, data);
+        if (!checkGLError("glTexImage2D")) {
+            // Reset pixel store before returning
+            if (stride > 0 && stride != width * 4) {
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            }
+            glBindTexture(GL_TEXTURE_2D, 0);
+            return false;
+        }
+        hasStorage_ = true;
+        storageWidth_ = width;
+        storageHeight_ = height;
+        storageFormat_ = format;
     }
 
     // Reset pixel store

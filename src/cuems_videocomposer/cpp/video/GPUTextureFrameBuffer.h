@@ -168,6 +168,16 @@ private:
     bool isHAP_;                     // True if this is a HAP texture (DXT1/DXT5)
     bool ownsTexture_;               // True if this instance owns the texture (should delete on destruction)
     HapVariant hapVariant_;          // HAP variant (if isHAP_ is true)
+
+    // Per-frame upload state — used by uploadCompressedData/uploadUncompressedData
+    // to pick between glCompressed/TexImage2D (reallocates storage) and the Sub
+    // variant (data-only). Reallocating on every frame triggers GPU-side
+    // memory-management work + texture cache invalidations that stall the
+    // pipeline; the Sub variant skips all that. Reset to false in release().
+    bool hasStorage_ = false;        // True once storage has been allocated by an upload
+    int  storageWidth_ = 0;          // Width that storage was allocated at
+    int  storageHeight_ = 0;         // Height that storage was allocated at
+    GLenum storageFormat_ = 0;       // Format that storage was allocated with
 };
 
 } // namespace videocomposer
