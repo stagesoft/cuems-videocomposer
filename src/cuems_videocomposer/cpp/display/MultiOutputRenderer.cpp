@@ -191,15 +191,15 @@ void MultiOutputRenderer::renderToCanvas(LayerManager* layerManager, OSDManager*
     // Get all layers sorted by z-order
     auto layers = layerManager->getLayersSortedByZOrder();
     
-    // Convert to const vector
-    std::vector<const VideoLayer*> constLayers;
-    constLayers.reserve(layers.size());
+    // Convert to const vector (reuse scratch buffer to avoid per-frame alloc)
+    constLayersScratch_.clear();
+    constLayersScratch_.reserve(layers.size());
     for (auto* layer : layers) {
-        constLayers.push_back(layer);
+        constLayersScratch_.push_back(layer);
     }
 
     // Composite all layers
-    renderer_->compositeLayers(constLayers);
+    renderer_->compositeLayers(constLayersScratch_);
     
     // Render OSD if available
     // TODO: OSD rendering to canvas
