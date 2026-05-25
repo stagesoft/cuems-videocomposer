@@ -24,6 +24,7 @@
 #include "../utils/SMPTEUtils.h"
 #include "../sync/MIDISyncSource.h"
 #include "../input/VideoFileInput.h"
+#include "../input/HAPVideoInput.h"
 #include <algorithm>
 #include <cmath>
 
@@ -70,6 +71,8 @@ void VideoLayer::setInputSource(std::unique_ptr<InputSource> input) {
             if (videoInput) {
                 FrameInfo info = src->getFrameInfo();
                 videoInput->setLoopMode(true, info.totalFrames);
+            } else if (HAPVideoInput* hapInput = dynamic_cast<HAPVideoInput*>(src)) {
+                hapInput->setLoopMode(true);
             }
         }
     }
@@ -261,6 +264,8 @@ void VideoLayer::setWraparound(bool enabled) {
         if (videoInput) {
             FrameInfo info = src->getFrameInfo();
             videoInput->setLoopMode(enabled, info.totalFrames);
+        } else if (HAPVideoInput* hapInput = dynamic_cast<HAPVideoInput*>(src)) {
+            hapInput->setLoopMode(enabled);
         }
     }
 }
