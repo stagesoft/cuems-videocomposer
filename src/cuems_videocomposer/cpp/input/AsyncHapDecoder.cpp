@@ -372,6 +372,7 @@ bool AsyncHapDecoder::decodeNextFrame() {
     AVPacket* packet = av_packet_alloc();
     if (!packet) return false;
 
+    bool gotVideo = false;
     int bailout = 100;  // skip non-video packets
     while (bailout-- > 0 && !threadStop_) {
         av_packet_unref(packet);
@@ -407,10 +408,15 @@ bool AsyncHapDecoder::decodeNextFrame() {
         }
 
         // Got a video packet — decode it
+        gotVideo = true;
         break;
     }
 
-    if (packet->size == 0 || !packet->data) {
+    // If bailout exhausted without finding a video packet, `packet` still
+    // holds the last non-video packet's data — `packet->size` is non-zero
+    // and would slip past the next guard, causing us to feed audio bytes
+    // into HapDecoder::getVariant(). Bail explicitly.
+    if (!gotVideo || packet->size == 0 || !packet->data) {
         av_packet_free(&packet);
         return false;
     }
