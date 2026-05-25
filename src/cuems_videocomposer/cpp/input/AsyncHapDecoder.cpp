@@ -153,10 +153,7 @@ const HapDecodedFrame* AsyncHapDecoder::borrowFrame(const HapDecodedFrame& src) 
     // Caller holds queueMutex_. Deep-copy the DXT blobs into borrowedFrame_;
     // the queue slot can then be trimmed or replaced without affecting the
     // render thread's upload.
-    borrowedFrame_.frameNumber = src.frameNumber;
-    borrowedFrame_.variant = src.variant;
-    borrowedFrame_.ready = src.ready;
-    borrowedFrame_.textures = src.textures;  // vector copy: includes the inner std::vector<uint8_t> data
+    borrowedFrame_ = src;
     return &borrowedFrame_;
 }
 

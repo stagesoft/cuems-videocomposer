@@ -65,10 +65,10 @@ struct HapDecodedFrame {
     bool ready;
 
     HapDecodedFrame() : frameNumber(-1), variant(HapVariant::NONE), ready(false) {}
-    HapDecodedFrame(HapDecodedFrame&&) noexcept = default;
-    HapDecodedFrame& operator=(HapDecodedFrame&&) noexcept = default;
-    HapDecodedFrame(const HapDecodedFrame&) = delete;
-    HapDecodedFrame& operator=(const HapDecodedFrame&) = delete;
+    // Copyable + movable. Queue insertion uses std::move so copies only happen
+    // where intentional (borrowFrame copies into the borrowed-slot for the
+    // render thread). If a non-copyable field is added in the future, that's
+    // when to revisit; today the explicit deep copy is the desired behaviour.
 };
 
 class AsyncHapDecoder {
