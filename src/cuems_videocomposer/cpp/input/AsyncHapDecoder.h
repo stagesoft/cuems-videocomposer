@@ -155,6 +155,12 @@ private:
 
     std::atomic<bool> loopMode_{false};
     std::atomic<bool> eofReached_{false};
+    // Set when the worker does an EOF-loop seek and the render thread hasn't
+    // observed the wrap yet. Suppresses the forward-jump check during that
+    // race window (current=high, lastDec=low — looks like a giant forward
+    // jump but is actually a benign wrap-skew). Cleared once render's
+    // current value drops to the new loop's early portion.
+    std::atomic<bool> justEofLooped_{false};
 
     // Borrow slot: held under queueMutex_ during copy; render-thread-only consumer
     HapDecodedFrame borrowedFrame_;

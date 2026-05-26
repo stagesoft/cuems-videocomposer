@@ -308,10 +308,24 @@ void AsyncHapDecoder::decodeThreadFunc() {
                 continue;
             }
 
-            if (lastDecodedFrame_.load() >= 0 &&
-                current > lastDecodedFrame_.load() + FORWARD_JUMP_THRESHOLD) {
+            // Forward jump: render target has skipped ahead of what we've decoded.
+            // Suppressed during the post-EOF-loop wrap-skew window — see the
+            // justEofLooped_ comment in the header. The window opens when the
+            // worker does an EOF-loop seek and closes when the render thread
+            // observes its own wrap (current drops to the new loop's early
+            // portion). frameCount_ is set once in open() before the worker
+            // thread starts; safe to read here without atomic.
+            int64_t lastDec = lastDecodedFrame_.load();
+            int64_t tf = frameCount_;
+            if (justEofLooped_.load() && loopMode_.load() && tf > 0 &&
+                current < tf / 4) {
+                justEofLooped_ = false;
+            }
+            bool isForwardJump = (lastDec >= 0)
+                              && (current > lastDec + FORWARD_JUMP_THRESHOLD);
+            if (!justEofLooped_.load() && isForwardJump) {
                 LOG_INFO << "AsyncHapDecoder: [HAP-DECODE] forward jump target=" << current
-                         << " lastDecoded=" << lastDecodedFrame_.load() << " — seeking";
+                         << " lastDecoded=" << lastDec << " — seeking";
                 frameQueue_.clear();
                 seekTarget_ = current;
                 seekRequested_ = true;
@@ -388,6 +402,7 @@ bool AsyncHapDecoder::decodeNextFrame() {
                     }
                     if (codecCtx_) avcodec_flush_buffers(codecCtx_);
                     lastDecodedFrame_ = -1;
+                    justEofLooped_ = true;
                     LOG_INFO << "AsyncHapDecoder: [HAP-DECODE] EOF in loop, seeking to 0";
                     continue;  // re-read from start
                 } else {
