@@ -151,6 +151,7 @@ private:
     bool fallbackWarningShown_;
     std::unique_ptr<AsyncHapDecoder> asyncHapDecoder_;
     bool useAsyncHapDecode_ = false;
+    int asyncMissCount_ = 0;
 #endif
 };
 

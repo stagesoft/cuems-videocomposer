@@ -560,8 +560,7 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
             }
             LOG_WARNING << "HAPVideoInput: [HAP-DECODE] GPU upload failed frame=" << frameNumber;
         } else {
-            static int missCount = 0;
-            if (++missCount % 30 == 1) {
+            if (++asyncMissCount_ % 30 == 1) {
                 LOG_WARNING << "HAPVideoInput: [HAP-DECODE] miss frame=" << frameNumber
                             << " oldest=" << asyncHapDecoder_->getOldestFrame()
                             << " newest=" << asyncHapDecoder_->getNewestFrame();
