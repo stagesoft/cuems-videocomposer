@@ -216,6 +216,13 @@ private:
     std::atomic<int64_t> lastDecodedFrame_{-1};
     std::atomic<bool> seekRequested_{false};
     std::atomic<int64_t> seekTarget_{0};
+    // Post-seek catch-up goal: set to the requested target whenever the
+    // worker processes a seek, cleared once lastDecodedFrame_ catches up.
+    // While >=0, the forward-jump check is suppressed so the decoder can
+    // walk from the keyframe-≤-target landing point up to the target
+    // without re-triggering clear+seek on every iteration.
+    // -1 means "not in post-seek catch-up window".
+    std::atomic<int64_t> seekGoal_{-1};
     
     // Seamless loop pre-buffering
     // When loopMode_ is true, the decode thread uses virtual frame numbers
