@@ -49,6 +49,12 @@
 
 namespace videocomposer {
 
+namespace {
+// Single source of truth for the runtime display-config path
+// (consumed by openWindow() and initVirtualCanvas()).
+constexpr const char* kStartupDisplayConf = "/run/cuems/display.conf";
+}
+
 DRMBackend::DRMBackend() {
     outputManager_ = std::make_unique<DRMOutputManager>();
     configManager_ = std::make_unique<DisplayConfigurationManager>();
@@ -72,6 +78,23 @@ bool DRMBackend::openWindow() {
         return false;
     }
     
+    // Load the startup display config once, here, so its resolution_policy can inform
+    // the global modeset below and its per-output/region data is reused by
+    // initVirtualCanvas() without a second parse. Global-mode precedence:
+    //   CLI --resolution  >  display.conf resolution_policy  >  prior (app config / default)
+    if (configManager_) {
+        ResolutionPolicy priorPolicy = configManager_->getResolutionPolicy();
+        if (configManager_->loadFromFile(kStartupDisplayConf)) {
+            if (resolutionExplicit_) {
+                configManager_->setResolutionPolicy(priorPolicy);            // CLI wins
+            } else if (!configManager_->wasResolutionPolicySpecified()) {
+                configManager_->setResolutionPolicy(priorPolicy);            // file set none — keep prior
+            } else {
+                LOG_INFO << "DRMBackend: applying resolution_policy from display.conf";
+            }
+        }
+    }
+
     // Apply resolution mode before creating surfaces
     // This modifies the output dimensions in outputManager_
     if (configManager_) {
@@ -1038,31 +1061,28 @@ bool DRMBackend::initVirtualCanvas() {
     // reading it as pixels became incorrect). Operators can still hand-
     // author the file for custom arrangements.
     //
-    // FUTURE (PHASE A — urgent): this try-load block should become a
-    // try-load-or-generate-and-save block so videocomposer itself owns
-    // display.conf generation on first boot and preserves operator
-    // edits on subsequent boots. See memory project_videocomposer_
-    // display_conf_phases for the plan.
-    static const std::string startupConfPath = "/run/cuems/display.conf";
-    if (configManager_ && configManager_->loadFromFile(startupConfPath)) {
-        if (configManager_->getCanvasLayout() == CanvasLayout::CUSTOM) {
-            std::vector<OutputInfo> outputInfos;
-            for (const auto& name : getSortedOutputNames()) {
-                outputInfos.push_back(surfaces_.at(name)->getOutputInfo());
-            }
-            auto loadedRegions = configManager_->generateOutputRegions(outputInfos);
-            if (!loadedRegions.empty()) {
-                outputRegions_ = loadedRegions;
-                LOG_INFO << "DRMBackend: Applied startup display config from " << startupConfPath;
-            }
+    // FUTURE (PHASE A — urgent): the load in openWindow() should become a
+    // load-or-generate-and-save so videocomposer itself owns display.conf
+    // generation on first boot and preserves operator edits on subsequent
+    // boots. See memory project_videocomposer_display_conf_phases for the plan.
+    // display.conf was already parsed once in openWindow(); reuse that state here
+    // (regions need surfaces, which exist now) instead of re-parsing the file.
+    static const std::string startupConfPath = kStartupDisplayConf;
+    if (configManager_ && configManager_->getCanvasLayout() == CanvasLayout::CUSTOM) {
+        std::vector<OutputInfo> outputInfos;
+        for (const auto& name : getSortedOutputNames()) {
+            outputInfos.push_back(surfaces_.at(name)->getOutputInfo());
+        }
+        auto loadedRegions = configManager_->generateOutputRegions(outputInfos);
+        if (!loadedRegions.empty()) {
+            outputRegions_ = loadedRegions;
+            LOG_INFO << "DRMBackend: Applied startup display config from " << startupConfPath;
         }
     }
     
-    // Apply per-output resolutions from display.conf (if -r was not explicitly passed)
-    if (resolutionExplicit_) {
-        LOG_WARNING << "DRMBackend: Ignoring per-output resolutions from display.conf"
-                    << " — overridden by explicit -r flag";
-    } else if (configManager_) {
+    // Apply per-output resolution overrides from display.conf on top of the global
+    // policy (applies whether the global came from --resolution or resolution_policy).
+    if (configManager_) {
         for (const auto& name : getSortedOutputNames()) {
             const auto* outConf = configManager_->getOutputConfig(name);
             if (outConf && outConf->width > 0 && outConf->height > 0) {

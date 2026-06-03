@@ -157,6 +157,8 @@ public:
      */
     void setResolutionPolicy(ResolutionPolicy policy);
     ResolutionPolicy getResolutionPolicy() const { return config_.resolutionPolicy; }
+    // True if the most recent loadFromFile() parsed an explicit resolution_policy= line.
+    bool wasResolutionPolicySpecified() const { return resolutionPolicySpecified_; }
     
     /**
      * Set resolution policy from string
@@ -281,6 +283,7 @@ private:
     DisplayConfiguration config_;
     std::map<int, ConfigChangeCallback> changeListeners_;
     int nextListenerId_ = 0;
+    bool resolutionPolicySpecified_ = false;  // set by loadFromFile() when resolution_policy= is present
     
     void notifyListeners();
     void updateTimestamp();

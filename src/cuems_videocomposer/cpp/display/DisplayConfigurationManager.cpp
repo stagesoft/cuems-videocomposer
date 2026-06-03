@@ -53,6 +53,7 @@ void DisplayConfigurationManager::resetToDefaults() {
     config_.resolutionPolicy = ResolutionPolicy::HD_1080P;
     config_.canvasLayout = CanvasLayout::AUTO_HORIZONTAL;
     config_.outputs.clear();
+    resolutionPolicySpecified_ = false;
     updateTimestamp();
 }
 
@@ -462,7 +463,9 @@ bool DisplayConfigurationManager::loadFromFile(const std::string& path) {
             if (key == "name") {
                 config_.name = value;
             } else if (key == "resolution_policy") {
-                setResolutionPolicyFromString(value);
+                if (setResolutionPolicyFromString(value)) {
+                    resolutionPolicySpecified_ = true;
+                }
             } else if (key == "canvas_layout") {
                 if (value == "horizontal") setCanvasLayout(CanvasLayout::AUTO_HORIZONTAL);
                 else if (value == "vertical") setCanvasLayout(CanvasLayout::AUTO_VERTICAL);
