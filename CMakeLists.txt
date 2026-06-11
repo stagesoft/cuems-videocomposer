@@ -910,6 +910,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestIntegration.cpp
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
         src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
+        src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
     )
     
     # C++ implementation files needed by tests

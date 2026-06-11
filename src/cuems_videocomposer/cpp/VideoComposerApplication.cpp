@@ -38,6 +38,7 @@
 #endif
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
+#include "sync/MtcReceiverMIDIDriver.h"  // MtcReceiver::resetWrapOffset() in resetAll()
 #include "layer/LayerManager.h"
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
@@ -1030,6 +1031,16 @@ void VideoComposerApplication::resetAll() {
 
     // Reset master properties (position, scale, rotation, opacity, color, warp)
     renderer().masterProperties().reset();
+
+    // Clear the >24h wrap accumulator on project reset. MtcReceiver keeps it in a
+    // process-global static; this long-running compositor would otherwise carry a
+    // stale +86_400_000 ms offset into the next project after a >24h run (the
+    // wire-driven reset can't catch a graceful reload's small backward delta).
+    // NOTE: the driver's pollFrame() static lastReportedFrame is intentionally
+    // NOT reset here — on the first full frame of the next project the large
+    // frameDiff correctly classifies a seek-to-0, which is the desired behaviour.
+    // (Plan 3a)
+    MtcReceiver::resetWrapOffset();
 }
 
 bool VideoComposerApplication::unloadFileFromLayer(const std::string& cueId) {

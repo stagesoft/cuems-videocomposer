@@ -212,11 +212,14 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
         if (lastReportedFrame < 0 || frameDiff > 2) {
             // Position jump or first full frame - this is a SEEK
             isSeekFullFrame = true;
-            printf("MTC: Full frame SEEK - frame=%lld (was %lld), timecode=%s\n", 
-                   (long long)frame, (long long)lastReportedFrame, curFrame.toString().c_str());
-            fflush(stdout);
+            // Gate the raw stdout print behind verbose_ (m3): this runs at vsync
+            // rate, and the 24h boundary / periodic resync would otherwise flood
+            // stdout. The LOG_INFO already carried the same info under verbose_.
             if (verbose_) {
-                LOG_INFO << "MTC: Full frame SEEK to frame " << frame 
+                printf("MTC: Full frame SEEK - frame=%lld (was %lld), timecode=%s\n",
+                       (long long)frame, (long long)lastReportedFrame, curFrame.toString().c_str());
+                fflush(stdout);
+                LOG_INFO << "MTC: Full frame SEEK to frame " << frame
                          << " (" << curFrame.toString() << ")";
             }
         } else {

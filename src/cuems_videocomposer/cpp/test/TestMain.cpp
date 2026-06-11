@@ -53,6 +53,8 @@ extern bool test_Integration_MIDISyncSource_NoJumpSnapBias();
 
 extern bool test_MTCDecoder();
 
+extern bool test_SMPTEUtils_Overflow24h();
+
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
 extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
@@ -95,6 +97,7 @@ int main() {
 #endif
 
     TestFramework::instance().addTest("MTCDecoder", test_MTCDecoder);
+    TestFramework::instance().addTest("SMPTEUtils_Overflow24h", test_SMPTEUtils_Overflow24h);
 
     TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);
