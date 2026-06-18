@@ -38,6 +38,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>  // for getenv
+
+// #region DEBUG
+#include <fstream>
+#include <iomanip>
+#include <sys/stat.h>
+// #endregion DEBUG
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <xf86drmMode.h>  // for atomic modesetting
@@ -244,16 +250,72 @@ bool DRMBackend::isWindowOpen() const {
     return initialized_ && !surfaces_.empty();
 }
 
+// #region DEBUG: sub-phase timer accumulators for render-budget diagnosis
+// (ClickUp 869dd1c4d / fix/render-budget-instrumented).
+// File-scope so renderVirtualCanvas, atomicPageFlip and renderLegacy can all
+// contribute. Reset every 1 s in the [RENDER] flush block in render() below.
+namespace {
+    int64_t dbg_total_composite_us = 0;
+    int64_t dbg_total_flipdrain_us = 0;
+    int64_t dbg_total_commit_us = 0;
+    int     dbg_commit_count = 0;
+}
+// #endregion DEBUG
+
 void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
     if (!initialized_ || surfaces_.empty()) {
         return;
     }
+
+    // #region DEBUG
+    static int dbg_render_count = 0;
+    static auto dbg_render_last = std::chrono::steady_clock::now();
+    static int64_t dbg_total_render_us = 0;
+    auto dbg_render_start = std::chrono::steady_clock::now();
+    // #endregion DEBUG
 
     if (useVirtualCanvas_ && multiRenderer_) {
         renderVirtualCanvas(layerManager, osdManager);
     } else {
         renderLegacy(layerManager, osdManager);
     }
+
+    // #region DEBUG
+    dbg_render_count++;
+    auto dbg_render_end = std::chrono::steady_clock::now();
+    dbg_total_render_us += std::chrono::duration_cast<std::chrono::microseconds>(dbg_render_end - dbg_render_start).count();
+    auto dbg_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(dbg_render_end - dbg_render_last).count();
+    if (dbg_elapsed_ms >= 1000) {
+        try {
+            mkdir("/tmp/.claude", 0755);
+            auto now = std::chrono::system_clock::now();
+            auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) % 1000000;
+            auto t = std::chrono::system_clock::to_time_t(now);
+            std::tm tm_buf{};
+            localtime_r(&t, &tm_buf);
+            std::ofstream f("/tmp/.claude/debug.log", std::ios::app);
+            f << "[" << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%S")
+              << "." << std::setw(6) << std::setfill('0') << us.count()
+              << "] [RENDER] [DEBUG H3 H4 H6 H7] RATE rendered_frames=" << dbg_render_count
+              << " elapsed_ms=" << dbg_elapsed_ms
+              << " effective_fps=" << ((double)dbg_render_count * 1000.0 / dbg_elapsed_ms)
+              << " avg_render_us=" << (dbg_render_count > 0 ? dbg_total_render_us / dbg_render_count : 0)
+              << " avg_composite_us=" << (dbg_render_count > 0 ? dbg_total_composite_us / dbg_render_count : 0)
+              << " avg_prev_flip_drain_us=" << (dbg_render_count > 0 ? dbg_total_flipdrain_us / dbg_render_count : 0)
+              << " avg_atomic_commit_us=" << (dbg_commit_count > 0 ? dbg_total_commit_us / dbg_commit_count : 0)
+              << " commit_count=" << dbg_commit_count
+              << " dropped_frames=" << getTotalDroppedFrames()
+              << "\n";
+        } catch (...) {}
+        dbg_render_count = 0;
+        dbg_total_render_us = 0;
+        dbg_total_composite_us = 0;
+        dbg_total_flipdrain_us = 0;
+        dbg_total_commit_us = 0;
+        dbg_commit_count = 0;
+        dbg_render_last = dbg_render_end;
+    }
+    // #endregion DEBUG
 }
 
 void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osdManager) {
@@ -278,16 +340,32 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     // 1. Rendering all layers to VirtualCanvas
     // 2. Blitting regions to each output surface (with blend/warp)
     // 3. Swapping buffers on each surface
+    // #region DEBUG
+    auto _dbg_composite_t0 = std::chrono::steady_clock::now();
+    // #endregion DEBUG
     multiRenderer_->render(layerManager, osdManager);
+    // #region DEBUG
+    dbg_total_composite_us += std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - _dbg_composite_t0).count();
+    // #endregion DEBUG
 
     primary->releaseCurrent();
 
-    // Wait for all pending flips to complete first
+    // Wait for all pending flips to complete first. Note: this measures the
+    // *previous* frame's vsync drain — the wait at the top of this frame for
+    // the prior frame's flip event. Not current-commit latency.
+    // #region DEBUG
+    auto _dbg_flipdrain_t0 = std::chrono::steady_clock::now();
+    // #endregion DEBUG
     for (auto& [name, surface] : surfaces_) {
         if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
     }
+    // #region DEBUG
+    dbg_total_flipdrain_us += std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - _dbg_flipdrain_t0).count();
+    // #endregion DEBUG
 
     // Check if we can use atomic modesetting with planes
     bool useAtomic = outputManager_->supportsAtomic() && surfaces_.size() > 1;
@@ -383,7 +461,14 @@ bool DRMBackend::atomicPageFlip() {
         // Do NOT use ALLOW_MODESET — it forces full modeset (link training,
         // DPMS) which takes 2+ vsyncs. Only needed for initial modeset.
         uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
-        if (outputManager_->commitAtomic(request, flags)) {
+        // #region DEBUG
+        auto _dbg_commit_t0 = std::chrono::steady_clock::now();
+        bool _dbg_commit_ok = outputManager_->commitAtomic(request, flags);
+        dbg_total_commit_us += std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - _dbg_commit_t0).count();
+        dbg_commit_count++;
+        if (_dbg_commit_ok) {
+        // #endregion DEBUG
             // Success — mark surfaces as flip-pending; buffer release is
             // deferred to pageFlipHandler2 when flip event fires
             for (auto* surface : preparedSurfaces) {
@@ -460,9 +545,16 @@ void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager
         // Wait for pending flip before scheduling a new one
         // (can only have one flip pending at a time)
         if (surface->isFlipPending()) {
+            // #region DEBUG
+            auto _dbg_flipdrain_t0 = std::chrono::steady_clock::now();
+            // #endregion DEBUG
             surface->waitForFlip();
+            // #region DEBUG
+            dbg_total_flipdrain_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - _dbg_flipdrain_t0).count();
+            // #endregion DEBUG
         }
-        
+
         // Schedule page flip (non-blocking)
         surface->schedulePageFlip();
     }

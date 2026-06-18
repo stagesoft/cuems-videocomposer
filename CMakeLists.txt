@@ -566,6 +566,19 @@ include_directories(${CMAKE_SOURCE_DIR}/src/cuems-mediadecoder/include)
 # Revert with -DCUEMS_PROBE_SPLASH=OFF and rebuild.
 option(CUEMS_PROBE_SPLASH "Embed cold-boot probe image instead of brand splash" OFF)
 
+# CUEMS_FINE_TIMERS (default OFF): when ON, enable per-frame fine-grained
+# sub-phase timers in the render path (e.g. composite vs. blit vs. swap
+# separately, using glClientWaitSync / glFinish to force GPU completion
+# between phases). Diagnostic-only — adds GPU stalls that perturb the
+# very thing being measured. Used together with fix/render-budget-instrumented
+# branch for ClickUp 869dd1c4d. Production builds must leave this OFF.
+option(CUEMS_FINE_TIMERS "Enable fine-grained per-frame sub-phase GPU timers (diagnostic-only)" OFF)
+
+if(CUEMS_FINE_TIMERS)
+    add_compile_definitions(CUEMS_FINE_TIMERS)
+    message(STATUS "CUEMS_FINE_TIMERS=ON — fine GPU timers enabled (diagnostic build; DO NOT ship)")
+endif()
+
 if(CUEMS_PROBE_SPLASH)
     set(_SPLASH_SOURCE ${CMAKE_SOURCE_DIR}/resources/probe-1080p.png)
     message(STATUS "CUEMS_PROBE_SPLASH=ON — embedding cold-boot probe image (resources/probe-1080p.png)")

@@ -36,6 +36,56 @@
 #include <cstring>
 #include <algorithm>
 
+// #region DEBUG: fine GPU-fence sub-phase timers
+// ClickUp 869dd1c4d / fix/render-budget-instrumented. Forces GPU completion
+// between renderToCanvas and blitToOutputs via glClientWaitSync so the
+// timings reflect GPU work, not command submission. Has observable perf
+// cost — present only on debug/instrumented branches; never reach main.
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+#include <sys/stat.h>
+#include <ctime>
+namespace {
+int64_t dbg_total_canvas_us = 0;
+int64_t dbg_total_blits_us = 0;
+int64_t dbg_total_render_body_us = 0;
+int     dbg_fine_count = 0;
+std::chrono::steady_clock::time_point dbg_fine_window_start = std::chrono::steady_clock::now();
+
+#ifdef CUEMS_FENCES
+inline void dbg_gpu_fence_wait() {
+    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (fence) {
+        glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+        glDeleteSync(fence);
+    }
+}
+#endif
+
+void dbg_emit_fine_render_log(int64_t elapsed_ms) {
+    try {
+        mkdir("/tmp/.claude", 0755);
+        auto now = std::chrono::system_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+            now.time_since_epoch()) % 1000000;
+        auto t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_buf{};
+        localtime_r(&t, &tm_buf);
+        std::ofstream f("/tmp/.claude/debug.log", std::ios::app);
+        f << "[" << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%S")
+          << "." << std::setw(6) << std::setfill('0') << us.count()
+          << "] [RENDER-FINE] [DEBUG H3 H4 H6 H7] RATE frames=" << dbg_fine_count
+          << " elapsed_ms=" << elapsed_ms
+          << " avg_canvas_us=" << (dbg_fine_count > 0 ? dbg_total_canvas_us / dbg_fine_count : 0)
+          << " avg_blits_us=" << (dbg_fine_count > 0 ? dbg_total_blits_us / dbg_fine_count : 0)
+          << " avg_render_body_us=" << (dbg_fine_count > 0 ? dbg_total_render_body_us / dbg_fine_count : 0)
+          << "\n";
+    } catch (...) {}
+}
+}
+// #endregion DEBUG
+
 namespace videocomposer {
 
 MultiOutputRenderer::MultiOutputRenderer() {
@@ -164,13 +214,49 @@ void MultiOutputRenderer::render(LayerManager* layerManager, OSDManager* osdMana
     if (!initialized_ || outputs_.empty() || !canvas_) {
         return;
     }
-    
+
+    // #region DEBUG: fine GPU-fence sub-phase timers
+    auto _dbg_body_t0 = std::chrono::steady_clock::now();
+    auto _dbg_canvas_t0 = _dbg_body_t0;
+    // #endregion DEBUG
+
     // Step 1: Render all layers to virtual canvas
     renderToCanvas(layerManager, osdManager);
-    
+
+    // #region DEBUG
+#ifdef CUEMS_FENCES
+    dbg_gpu_fence_wait();
+#endif
+    auto _dbg_canvas_t1 = std::chrono::steady_clock::now();
+    dbg_total_canvas_us += std::chrono::duration_cast<std::chrono::microseconds>(
+        _dbg_canvas_t1 - _dbg_canvas_t0).count();
+    // #endregion DEBUG
+
     // Step 2: Blit canvas regions to each output
     blitToOutputs();
-    
+
+    // #region DEBUG
+#ifdef CUEMS_FENCES
+    dbg_gpu_fence_wait();
+#endif
+    auto _dbg_blits_t1 = std::chrono::steady_clock::now();
+    dbg_total_blits_us += std::chrono::duration_cast<std::chrono::microseconds>(
+        _dbg_blits_t1 - _dbg_canvas_t1).count();
+    dbg_total_render_body_us += std::chrono::duration_cast<std::chrono::microseconds>(
+        _dbg_blits_t1 - _dbg_body_t0).count();
+    dbg_fine_count++;
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        _dbg_blits_t1 - dbg_fine_window_start).count();
+    if (elapsed_ms >= 1000) {
+        dbg_emit_fine_render_log(elapsed_ms);
+        dbg_total_canvas_us = 0;
+        dbg_total_blits_us = 0;
+        dbg_total_render_body_us = 0;
+        dbg_fine_count = 0;
+        dbg_fine_window_start = _dbg_blits_t1;
+    }
+    // #endregion DEBUG
+
     // Step 3: Capture for virtual outputs (sinks)
     if (captureEnabled_ && outputSinkManager_) {
         captureForVirtualOutputs();
