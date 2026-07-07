@@ -38,6 +38,7 @@
 #endif
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
+#include "sync/MtcReceiverMIDIDriver.h"  // for MtcReceiver::resetWrapOffset()
 #include "layer/LayerManager.h"
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
@@ -1030,6 +1031,12 @@ void VideoComposerApplication::resetAll() {
 
     // Reset master properties (position, scale, rotation, opacity, color, warp)
     renderer().masterProperties().reset();
+
+    // Clear the >24h MTC wrap accumulator on project-clear. MtcReceiver keeps it
+    // in a process-global static; this long-running daemon would otherwise carry
+    // a stale +86_400_000 ms offset into the next project after a >24h run.
+    // Mirrors dmxplayer's /blackout handler (dmxplayer.cpp resetWrapOffset()).
+    MtcReceiver::resetWrapOffset();
 }
 
 bool VideoComposerApplication::unloadFileFromLayer(const std::string& cueId) {
