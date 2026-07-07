@@ -318,6 +318,11 @@ long MIDISyncSource::getTimeMs() const {
         constexpr long long SNAP_THRESHOLD_MS  = 10;
         constexpr int       CORRECTION_DIVISOR = 10;
         if (std::abs(errorMs) > SNAP_THRESHOLD_MS) {
+            // Evidence channel for the MTC resync-snap fix: pre-fix this fired
+            // ~0.5 Hz (the ~120 ms full-frame resync step surviving smoothing);
+            // post-fix it must fire only on genuine seeks (GO / loop / scrub).
+            LOG_INFO << "MIDISync: anti-drift SNAP errorMs=" << errorMs
+                     << " (base=" << baseMtcMs << " smooth=" << smoothMs << ")";
             s_smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
             s_rate = 1.0;
         } else if (errorMs != 0) {
