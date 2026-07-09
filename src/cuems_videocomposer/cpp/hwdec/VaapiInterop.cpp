@@ -304,11 +304,17 @@ bool VaapiInterop::importFrame(AVFrame* vaapiFrame,
     // NOTE: Post-export sync removed - pre-export sync is sufficient
     // EGL image import provides implicit synchronization
     
+    // desc reports the coded/aligned surface size (e.g. 1088 for 1080p);
+    // rows beyond the frame's display height are uninitialized decoder
+    // padding that renders bright green (NV12 zeros). Clamp so the EGL
+    // images never expose them.
     width = desc.width;
     height = desc.height;
+    if (vaapiFrame->width > 0 && vaapiFrame->width < width) width = vaapiFrame->width;
+    if (vaapiFrame->height > 0 && vaapiFrame->height < height) height = vaapiFrame->height;
     frameWidth_ = width;
     frameHeight_ = height;
-    
+
     // Verify we have NV12 format (expected from VAAPI H.264 decoding)
     if (desc.fourcc != VA_FOURCC_NV12 && desc.fourcc != VA_FOURCC('N','V','1','2')) {
         LOG_WARNING << "VaapiInterop: Unexpected fourcc: " << std::hex << desc.fourcc 
@@ -509,8 +515,14 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height,
     // mpv only syncs once before export, not after
     // The EGL image import provides implicit synchronization
 
+    // desc reports the coded/aligned surface size (e.g. 1088 for 1080p);
+    // rows beyond the frame's display height are uninitialized decoder
+    // padding that renders bright green (NV12 zeros). Clamp so the EGL
+    // images never expose them.
     width = desc.width;
     height = desc.height;
+    if (vaapiFrame->width > 0 && vaapiFrame->width < width) width = vaapiFrame->width;
+    if (vaapiFrame->height > 0 && vaapiFrame->height < height) height = vaapiFrame->height;
 
     // DEBUG: Read back VAAPI surface to verify decoded content
     if (debugSurfaceReadbackEnabled_) {
