@@ -632,6 +632,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
     src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
     src/cuems_videocomposer/cpp/input/AsyncDecodeQueue.cpp
+    src/cuems_videocomposer/cpp/input/AsyncHapDecoder.cpp
     src/cuems_videocomposer/cpp/input/AsyncVideoLoader.cpp
     src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
     src/cuems_videocomposer/cpp/input/LiveInputSource.cpp
@@ -931,6 +932,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/display/CPUImageProcessor.cpp
         src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
         src/cuems_videocomposer/cpp/input/AsyncDecodeQueue.cpp
+        src/cuems_videocomposer/cpp/input/AsyncHapDecoder.cpp
         src/cuems_videocomposer/cpp/input/AsyncVideoLoader.cpp
         src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
         src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
@@ -1130,7 +1132,6 @@ endif()
 # Install
 install(TARGETS cuems-videocomposer DESTINATION bin)
 install(FILES src/cuems_videocomposer/fonts/ArdourMono.ttf DESTINATION share/cuems-videocomposer)
-install(PROGRAMS contrib/cuems-generate-display-conf DESTINATION lib/cuems/bin)
 
 # Clean targets
 # Standard CMake clean: 'make clean' removes build artifacts (objects, executables) but keeps CMake cache

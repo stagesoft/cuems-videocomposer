@@ -438,10 +438,17 @@ void AsyncDecodeQueue::decodeThreadFunc() {
             if (!seekInternal(seekFrame)) {
                 LOG_WARNING << "AsyncDecodeQueue: Seek to frame " << seekFrame << " failed";
             }
-            
+
             // Flush decoder
             avcodec_flush_buffers(codecCtx_);
             lastDecodedFrame_ = seekFrame - 1;
+            // Arm post-seek catch-up: seekInternal positions the demuxer at
+            // the keyframe K <= seekFrame, so the first frame produced by
+            // decodeNextFrame() will be K, not seekFrame. The decoder then
+            // walks K, K+1, ... up to seekFrame across subsequent worker
+            // iterations. seekGoal_ suppresses the forward-jump check
+            // during that climb (see the check below).
+            seekGoal_ = seekFrame;
         }
         
         // Detect backward jump (e.g. cue loop): if the oldest queued frame is more than
@@ -524,8 +531,26 @@ void AsyncDecodeQueue::decodeThreadFunc() {
             // EOF pre-buffer window, where lastDecodedFrame_ lives in the
             // virtual range (totalFrames + N) and a low target would otherwise
             // look like a forward jump.
+            //
+            // The seekGoal_ guard suppresses re-firing while the decoder is
+            // climbing from a just-landed keyframe up to a previous seek's
+            // target. Without it, a seek to T whose nearest preceding
+            // keyframe K satisfies T - K > FORWARD_JUMP_THRESHOLD would
+            // trap the queue in a clear+seek loop: every iteration decodes
+            // frame K, the check fires (T - K > threshold), clears, seeks
+            // back to T, lands at K again. Common at GOP sizes >= 16 (e.g.
+            // long-GOP H.264 with 30-frame keyframe interval).
+            int64_t goal = seekGoal_.load();
+            if (goal >= 0 && lastDecodedFrame_.load() >= goal) {
+                // Caught up to the post-seek goal — re-arm the check.
+                seekGoal_ = -1;
+                goal = -1;
+            }
+            bool inPostSeekCatchUp = (goal >= 0);
+
             if (lastDecodedFrame_.load() >= 0 &&
                 virtualOffset_.load() == 0 &&
+                !inPostSeekCatchUp &&
                 current > lastDecodedFrame_.load() + FORWARD_JUMP_THRESHOLD) {
                 LOG_INFO << "AsyncDecodeQueue: Forward jump detected (target=" << current
                          << ", lastDecoded=" << lastDecodedFrame_.load() << ") - clearing and seeking";

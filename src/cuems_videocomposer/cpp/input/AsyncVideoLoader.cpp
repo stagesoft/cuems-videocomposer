@@ -41,7 +41,7 @@ namespace videocomposer {
 AsyncVideoLoader::AsyncVideoLoader()
     : config_(nullptr)
     , displayBackend_(nullptr)
-    , numWorkers_(2)
+    , numWorkers_(4)
     , running_(false)
 {
 }

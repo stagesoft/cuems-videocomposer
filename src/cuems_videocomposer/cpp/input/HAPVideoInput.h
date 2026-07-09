@@ -32,6 +32,7 @@
 
 #ifdef ENABLE_HAP_DIRECT
 #include "../hap/HapDecoder.h"
+#include "AsyncHapDecoder.h"
 #endif
 
 extern "C" {
@@ -85,6 +86,12 @@ public:
      */
     CodecType getHAPVariant() const;
 
+    /**
+     * Enable seamless loop wraparound on the async worker.
+     * No-op when ENABLE_HAP_DIRECT is off or the worker failed to initialize.
+     */
+    void setLoopMode(bool enabled);
+
 
 private:
     enum class HAPVariant {
@@ -105,6 +112,8 @@ private:
     // Direct HAP decoding methods (Vidvox SDK)
     bool decodeHapDirectToTexture(AVPacket* packet, GPUTextureFrameBuffer& textureBuffer);
     bool readRawPacket(int64_t frameNumber, AVPacket* packet);
+    // Render-thread GPU upload of a pre-decoded HAP frame from the async worker
+    bool uploadHapFrameToTexture(const HapDecodedFrame& qf, GPUTextureFrameBuffer& textureBuffer);
 #endif
     
     // FFmpeg fallback methods
@@ -140,6 +149,9 @@ private:
     // HAP direct decoding
     HapDecoder hapDecoder_;
     bool fallbackWarningShown_;
+    std::unique_ptr<AsyncHapDecoder> asyncHapDecoder_;
+    bool useAsyncHapDecode_ = false;
+    int asyncMissCount_ = 0;
 #endif
 };
 

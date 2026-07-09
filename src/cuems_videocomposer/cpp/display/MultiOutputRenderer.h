@@ -261,7 +261,11 @@ private:
     std::vector<OutputState> outputs_;
     std::vector<OutputRegion> outputRegions_;     // Output regions in canvas
     std::unique_ptr<OpenGLRenderer> renderer_;
-    
+
+    // Scratch buffer reused by renderToCanvas() to avoid per-frame heap
+    // allocation when materializing the const VideoLayer* list for compositing.
+    std::vector<const VideoLayer*> constLayersScratch_;
+
     // Virtual output capture
     OutputSinkManager* outputSinkManager_ = nullptr;  // Not owned
     int captureWidth_ = 0;
