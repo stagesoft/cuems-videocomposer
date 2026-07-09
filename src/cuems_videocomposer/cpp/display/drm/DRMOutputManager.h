@@ -233,6 +233,42 @@ public:
      */
     static bool verifyCrtcMode(int fd, uint32_t crtcId, const drmModeModeInfo& requested);
 
+    /**
+     * Read the connector's "link-status" DRM property. Kernels >=4.10 set this
+     * to BAD when DP/HDMI link training failed after a successful modeset
+     * ioctl (i.e. the kernel programmed the pipe but the actual link never
+     * came up). Userspace is expected to either retry the modeset or surface
+     * the failure.
+     *
+     * Returns:
+     *   1  -> link-status property reads GOOD (the link trained successfully,
+     *         or the property is absent — older kernel, treat as GOOD).
+     *   0  -> link-status reads BAD (link training failed; caller should
+     *         retry or escalate).
+     *  -1  -> property API call failed (errno set). Treat as inconclusive.
+     */
+    static int readConnectorLinkStatus(int fd, uint32_t connectorId);
+
+    /**
+     * Clamp the connector's "max bpc" DRM property to maxBpc. No-op if the
+     * connector doesn't expose that property (older kernels / non-i915
+     * drivers don't always have it).
+     *
+     * Why this exists: on Intel TC-port DP connectors (Tiger/Alder Lake +
+     * USB-C/Thunderbolt DDIs), the kernel auto-selects 12 bpc whenever the
+     * monitor advertises max_bpc=12. Link training at 12 bpc is racy on
+     * these ports — the modeset ioctl reports success, but the link drops
+     * silently and the panel goes dark intermittently (one good restart,
+     * one bad, with streaks). Our framebuffers are 8-bit (DRM_FORMAT_AR24
+     * etc.), so 12 bpc only adds dither — it doesn't gain us color depth
+     * but it does cost link reliability.
+     *
+     * Clamping to 8 bpc before drmModeSetCrtc removes the failure surface.
+     * Returns true on success or when the property is absent (treated as
+     * not applicable); false on a real error.
+     */
+    static bool setConnectorMaxBpc(int fd, uint32_t connectorId, uint64_t maxBpc);
+
     // ===== Resolution Mode Selection =====
     
     /**

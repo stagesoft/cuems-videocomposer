@@ -1,3 +1,11 @@
+cuems-videocomposer (0.1.2-2) unstable; urgency=medium
+
+  * Bump mtcreceiver to rc_1 aa44894: hold QF timebase on the ~2s
+    libmtcmaster full-frame resync (fixes the periodic 120ms video
+    snap). Add resetWrapOffset on project-clear; log anti-drift snaps.
+
+ -- Ion Reguera <ion@stagelab.coop>  Tue, 07 Jul 2026 16:19:15 +0200
+
 cuems-videocomposer (0.1.2-1) unstable; urgency=medium
 
   * cuems-videoindexer: default to HardwareDecodePreference::AUTO so the

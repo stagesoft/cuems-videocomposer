@@ -27,7 +27,9 @@
 #include "DRMOutputManager.h"
 #include "../../utils/Logger.h"
 
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <cerrno>
@@ -889,6 +891,13 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
         LOG_INFO << "DRMSurface: Setting mode for " << conn->info.name
                  << " (" << mode->hdisplay << "x" << mode->vdisplay << ")";
         const int fd = outputManager_->getFd();
+
+        // Clamp 'max bpc' to 8 before modeset. On Intel TC-port DP, the
+        // kernel auto-selects 12 bpc when EDID advertises it, and link
+        // training at 12 bpc is racy (silent intermittent failures).
+        // Our framebuffers are 8-bit so 12 bpc only adds dither.
+        DRMOutputManager::setConnectorMaxBpc(fd, connectorId_, 8);
+
         ret = drmModeSetCrtc(fd, crtcId_,
                             nextFb_.fbId, 0, 0, &connectorId_, 1, mode);
 
@@ -905,7 +914,16 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
         // drmSetMaster — that's a userspace permission shuffle and does not
         // re-run pipe config or link training. A disable->re-enable cycle
         // gives the kernel a chance to re-run intel_modeset_pipe_config.
-        if (!DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode)) {
+        // Two signals must both succeed: kernel-side CRTC mode matches what
+        // we asked for, AND the connector's link-status is not BAD (the
+        // latter catches DP/HDMI link training failures that the modeset
+        // ioctl reports as success — exactly the i915 TC-port DP race
+        // we've seen in production where verifyCrtcMode passes but the
+        // panel sees no signal).
+        const bool mode_ok = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
+        const int link_ok = DRMOutputManager::readConnectorLinkStatus(fd, connectorId_);
+        const bool first_verified = mode_ok && (link_ok != 0);
+        if (!first_verified) {
             LOG_WARNING << "DRMSurface: cold-boot verify mismatch on " << conn->info.name
                         << ", attempting in-process recovery";
 
@@ -967,7 +985,10 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
             //    (likely the i915 PHY rebind class of cold-boot bug). Mark
             //    fatal so the run loop exits and systemd Restart=on-failure
             //    re-runs the whole modeset path with a fresh process.
-            if (!DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode)) {
+            const bool retry_mode_ok = DRMOutputManager::verifyCrtcMode(fd, crtcId_, *mode);
+            const int retry_link_ok = DRMOutputManager::readConnectorLinkStatus(fd, connectorId_);
+            const bool retry_verified = retry_mode_ok && (retry_link_ok != 0);
+            if (!retry_verified) {
                 LOG_ERROR << "DRMSurface: cold-boot retry still mismatched on "
                           << conn->info.name << " — marking fatal for systemd restart";
                 fatalModeset_ = true;

@@ -568,7 +568,8 @@ option(CUEMS_PROBE_SPLASH "Embed cold-boot probe image instead of brand splash" 
 
 if(CUEMS_PROBE_SPLASH)
     set(_SPLASH_SOURCE ${CMAKE_SOURCE_DIR}/resources/probe-1080p.png)
-    message(STATUS "CUEMS_PROBE_SPLASH=ON — embedding cold-boot probe image (resources/probe-1080p.png)")
+    add_compile_definitions(CUEMS_PROBE_SPLASH=1)
+    message(STATUS "CUEMS_PROBE_SPLASH=ON — embedding cold-boot probe image (resources/probe-1080p.png), splash extended to 60s")
 else()
     set(_SPLASH_SOURCE ${CMAKE_SOURCE_DIR}/resources/splash.png)
 endif()

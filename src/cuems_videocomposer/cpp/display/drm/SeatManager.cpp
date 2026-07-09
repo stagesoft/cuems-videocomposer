@@ -216,21 +216,45 @@ bool SeatManager::enableDevice(int fd) {
     }
 
     // libseat opens the device with the right permissions, but DRM master is
-    // a separate kernel concept that must be claimed explicitly. Under seatd
-    // the fd usually already holds master via the seat session, in which case
-    // drmSetMaster is a no-op that returns 0. Any non-zero return (including
-    // EBUSY, which means a foreign userspace process holds master) is a real
-    // configuration problem we want surfaced, not silently swallowed.
-    if (drmSetMaster(fd) != 0) {
-        LOG_ERROR << "SeatManager: drmSetMaster failed (fd=" << fd
-                  << ", device_id=" << it->second.deviceId
-                  << "): " << strerror(errno);
+    // a separate kernel concept. Under seatd the seat itself holds master and
+    // passes us a usable fd via SCM_RIGHTS — modeset ioctls work, but a
+    // direct drmSetMaster from us returns EACCES because the kernel requires
+    // CAP_SYS_ADMIN for any process that wasn't the original master-acquirer
+    // (drm_master_check_perm). That EACCES is the EXPECTED outcome here, not
+    // an error: we're not master in the kernel sense, but the seat is, and
+    // modesetting works through the seat session.
+    //
+    // We still call drmSetMaster as a hygiene probe so the logs make the
+    // master state observable. The classification:
+    //   0      -> we have CAP_SYS_ADMIN (root build, dev tooling) and got
+    //             master directly. Log INFO.
+    //   EACCES -> libseat path holding master via the seat. Expected. DEBUG.
+    //   EBUSY  -> a foreign userspace process holds master. Real conflict.
+    //             Log ERROR and fail; modeset would fight with that process.
+    //   other  -> unknown; log ERROR and fail.
+    int sm_ret = drmSetMaster(fd);
+    int sm_errno = errno;
+    if (sm_ret == 0) {
+        LOG_INFO << "SeatManager: Acquired DRM master directly (fd=" << fd
+                 << ", device_id=" << it->second.deviceId << ")";
+        return true;
+    }
+    if (sm_errno == EACCES) {
+        LOG_DEBUG << "SeatManager: drmSetMaster returned EACCES (expected under"
+                  << " libseat; seat session holds master) fd=" << fd
+                  << " device_id=" << it->second.deviceId;
+        return true;
+    }
+    if (sm_errno == EBUSY) {
+        LOG_ERROR << "SeatManager: drmSetMaster=EBUSY — another userspace"
+                  << " process holds DRM master (fd=" << fd
+                  << ", device_id=" << it->second.deviceId << ")";
         return false;
     }
-
-    LOG_INFO << "SeatManager: Device enabled with DRM master (fd=" << fd
-             << ", device_id=" << it->second.deviceId << ")";
-    return true;
+    LOG_ERROR << "SeatManager: drmSetMaster failed (fd=" << fd
+              << ", device_id=" << it->second.deviceId
+              << "): " << strerror(sm_errno);
+    return false;
 #else
     // Fallback: try drmSetMaster()
     if (drmSetMaster(fd) != 0) {

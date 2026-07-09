@@ -205,11 +205,11 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     bool isSeekFullFrame = false;
     if (fullFrameReceived) {
         // Check if the full frame position matches where we expect to be
-        // Allow tolerance of 2 frames as a network-MTC jitter budget.
+        // Allow tolerance of 5 frames: full-frame is exact but QF interpolation lags a constant ~3 frames (measured diff==3 every resync); 5 gives node01 rtpmidid jitter margin while staying far below any real seek.
         // Not related to any implicit MTC bias — mtcreceiver returns
         // raw wire-MTC post-Phase-2.
         int64_t frameDiff = std::abs(frame - lastReportedFrame);
-        if (lastReportedFrame < 0 || frameDiff > 2) {
+        if (lastReportedFrame < 0 || frameDiff > 5) {
             // Position jump or first full frame - this is a SEEK
             isSeekFullFrame = true;
             // Gate the raw stdout print behind verbose_ (m3): this runs at vsync

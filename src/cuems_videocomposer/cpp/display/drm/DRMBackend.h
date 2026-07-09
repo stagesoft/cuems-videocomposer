@@ -296,7 +296,20 @@ private:
     std::unique_ptr<DRMOutputManager> outputManager_;
     std::unique_ptr<DisplayConfigurationManager> configManager_;
     std::map<std::string, std::unique_ptr<DRMSurface>> surfaces_;  // key = output name
-    std::vector<std::string> outputOrder_;  // kernel enumeration order
+    std::vector<std::string> outputOrder_;     // kernel enumeration order (DDI hardware order)
+    std::vector<std::string> iterationOrder_;  // physical layout order: by display.conf canvas-x
+                                               // ascending, alphabetical fallback for outputs not
+                                               // covered or when display.conf is missing/invalid.
+                                               // Drives modeset, render, flip, and cleanup
+                                               // iteration so they happen in operator-intuitive
+                                               // left-to-right physical order.
+    bool regionsFromUserConfig_ = false;       // True when outputRegions_ reflects operator intent
+                                               // (display.conf load, configureOutputRegion edit,
+                                               // or autoConfigureOutputs). False when filled by
+                                               // buildOutputRegions auto-defaults — in which case
+                                               // the canvas-x values are kernel-order, not
+                                               // operator-chosen, and computeIterationOrder must
+                                               // ignore them and fall back to alphabetical.
     
     // Rendering - Legacy mode (per-output)
     std::unique_ptr<OpenGLRenderer> renderer_;
@@ -350,6 +363,39 @@ private:
 
     // Get surface names sorted by physical CRTC position (left-to-right, top-to-bottom)
     std::vector<std::string> getSortedOutputNames() const;
+
+    // (Re)compute iterationOrder_ from outputRegions_ + surfaces_. Called after
+    // outputRegions_ is finalized (after openWindow finishes loading display.conf,
+    // and after configureOutputRegion / autoConfigureOutputs). Logs the resulting
+    // order so operators can see what's driving modeset/render iteration.
+    void computeIterationOrder();
+
+    // Sort outputRegions_ in place by canvasX ascending (name as tiebreak) so
+    // the vector is canonically left-to-right. Without this, MultiOutputRenderer
+    // (which iterates the vector by index) and other downstream paths that
+    // iterate outputRegions_ directly (rather than via orderedSurfaceNames())
+    // end up using kernel discovery order — e.g. HDMI-A-1 lands at index 1
+    // even when canvasX puts it on the right.
+    //
+    // Call sites that DO call this (anything that may set canvasX from a
+    // source other than monotonic-by-construction):
+    //   - openWindow() after the display.conf load swap
+    //   - configureOutputRegion(name, x, y, w, h) — first overload
+    //   - configureOutputRegion(name, OutputRegion) — second overload
+    //
+    // Call sites that intentionally do NOT (canvasX monotonic by construction;
+    // sort would be a no-op AND inviting it would mask the construction-order
+    // dependency some local logic relies on, e.g. blend zones in
+    // autoConfigureOutputs assume outputRegions_.back() is the physical
+    // predecessor):
+    //   - buildOutputRegions()
+    //   - autoConfigureOutputs()
+    void sortOutputRegionsByCanvas();
+
+    // Returns iterationOrder_ if populated, else falls back to alphabetical
+    // (std::map iteration order over surfaces_) so any iteration site is safe
+    // even if computeIterationOrder hasn't run yet.
+    std::vector<std::string> orderedSurfaceNames() const;
 };
 
 } // namespace videocomposer

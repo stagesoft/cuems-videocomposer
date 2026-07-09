@@ -33,11 +33,14 @@
 #include "../../utils/Logger.h"
 #include <cerrno>
 #include <cmath>
+#include <limits>
 #include <set>
+#include <sstream>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>  // for getenv
+#include <thread>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <xf86drmMode.h>  // for atomic modesetting
@@ -268,7 +271,8 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     }
     
     // Process any completed flips (non-blocking)
-    for (auto& [name, surface] : surfaces_) {
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
         surface->processFlipEvents();
     }
 
@@ -283,7 +287,8 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     primary->releaseCurrent();
 
     // Wait for all pending flips to complete first
-    for (auto& [name, surface] : surfaces_) {
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
         if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
@@ -295,7 +300,8 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     bool allModesSet = true;
 
     if (useAtomic) {
-        for (auto& [name, surface] : surfaces_) {
+        for (const auto& name : orderedSurfaceNames()) {
+            auto& surface = surfaces_.at(name);
             if (!surface->getPlane()) {
                 allHavePlanes = false;
             }
@@ -311,9 +317,12 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
         // All outputs flip on same vsync = 60fps for any number of outputs
         atomicPageFlip();
     } else {
-        // LEGACY PATH: Sequential page flips (single output or no atomic/planes)
-        for (auto& [name, surface] : surfaces_) {
-            surface->schedulePageFlip();
+        // LEGACY PATH: Sequential page flips in physical layout order
+        // (display.conf canvas-x ascending, alphabetical fallback). The
+        // first frame on each surface goes through doPageFlip which
+        // performs the cold-boot modeset.
+        for (const auto& name : orderedSurfaceNames()) {
+            surfaces_.at(name)->schedulePageFlip();
         }
     }
 }
@@ -327,9 +336,12 @@ bool DRMBackend::atomicPageFlip() {
     
     std::vector<DRMSurface*> preparedSurfaces;
     bool success = true;
-    
-    // Prepare each surface and add to atomic request
-    for (auto& [name, surface] : surfaces_) {
+
+    // Prepare each surface and add to atomic request — physical layout order
+    // so the atomic request, the per-surface logs, and the cold-boot modeset
+    // sequence all reflect the operator's intended left-to-right monitor order.
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
         uint32_t fbId = surface->prepareAtomicFlip();
         if (fbId == 0) {
             LOG_WARNING << "DRMBackend: Failed to prepare surface " << name;
@@ -400,7 +412,8 @@ bool DRMBackend::atomicPageFlip() {
         for (auto* surface : preparedSurfaces) {
             surface->cancelAtomicFlip();
         }
-        for (auto& [name, surface] : surfaces_) {
+        for (const auto& name : orderedSurfaceNames()) {
+            auto& surface = surfaces_.at(name);
             surface->schedulePageFlip();
         }
     }
@@ -411,14 +424,20 @@ bool DRMBackend::atomicPageFlip() {
     
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately
-    
-    // MPV-STYLE: Process flip events first (non-blocking), render, THEN wait
-    for (auto& [name, surface] : surfaces_) {
+
+    // MPV-STYLE: Process flip events first (non-blocking), render, THEN wait.
+    // Iterate in physical layout order so first-frame modeset (which lives
+    // inside doPageFlip via schedulePageFlip below) follows the operator's
+    // expected left-to-right sequence.
+    auto names = orderedSurfaceNames();
+    for (const auto& name : names) {
+        auto& surface = surfaces_.at(name);
         surface->processFlipEvents();
     }
-    
+
     // Render to each output
-    for (auto& [name, surface] : surfaces_) {
+    for (const auto& name : names) {
+        auto& surface = surfaces_.at(name);
         if (!surface->isInitialized()) {
             continue;
         }
@@ -622,9 +641,14 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
     region->canvasWidth = canvasWidth;
     region->canvasHeight = canvasHeight;
     
-    LOG_INFO << "DRMBackend: Configured " << outputName 
+    LOG_INFO << "DRMBackend: Configured " << outputName
              << " region: " << canvasX << "," << canvasY
              << " " << canvasWidth << "x" << canvasHeight;
+
+    // canvasX may have changed — restore canonical left-to-right ordering
+    // before any downstream iterator (MultiOutputRenderer, computeIterationOrder)
+    // reads the vector.
+    sortOutputRegionsByCanvas();
 
     // Update MultiOutputRenderer if initialized
     if (multiRenderer_) {
@@ -639,7 +663,12 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
-    
+
+    // Region geometry just changed — re-derive iteration order so renders
+    // continue to follow the operator's intended physical layout.
+    regionsFromUserConfig_ = true;  // explicit per-output configuration
+    computeIterationOrder();
+
     return true;
 }
 
@@ -1076,6 +1105,8 @@ bool DRMBackend::initVirtualCanvas() {
         auto loadedRegions = configManager_->generateOutputRegions(outputInfos);
         if (!loadedRegions.empty()) {
             outputRegions_ = loadedRegions;
+            regionsFromUserConfig_ = true;  // operator intent applied
+            sortOutputRegionsByCanvas();
             LOG_INFO << "DRMBackend: Applied startup display config from " << startupConfPath;
         }
     }
@@ -1107,10 +1138,15 @@ bool DRMBackend::initVirtualCanvas() {
     }
 
     multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
-    
-    LOG_INFO << "DRMBackend: Virtual Canvas initialized with " 
+
+    LOG_INFO << "DRMBackend: Virtual Canvas initialized with "
              << outputRegions_.size() << " output(s)";
-    
+
+    // outputRegions_ is finalized — derive the operator-intuitive iteration
+    // order (physical canvas-x ascending, alphabetical fallback) so all
+    // subsequent modeset / render / cleanup loops follow it.
+    computeIterationOrder();
+
     return true;
 }
 
@@ -1123,9 +1159,107 @@ std::vector<std::string> DRMBackend::getSortedOutputNames() const {
     return outputOrder_;
 }
 
+void DRMBackend::sortOutputRegionsByCanvas() {
+    std::sort(outputRegions_.begin(), outputRegions_.end(),
+              [](const OutputRegion& a, const OutputRegion& b) {
+                  if (a.canvasX != b.canvasX) return a.canvasX < b.canvasX;
+                  return a.name < b.name;
+              });
+}
+
+void DRMBackend::computeIterationOrder() {
+    iterationOrder_.clear();
+
+    std::vector<std::string> names;
+    names.reserve(surfaces_.size());
+    for (const auto& [name, _] : surfaces_) names.push_back(name);
+
+    if (!regionsFromUserConfig_) {
+        // No operator intent recorded — outputRegions_ either is empty or
+        // holds buildOutputRegions auto-defaults whose canvas-x values track
+        // kernel enumeration order rather than the physical layout. Fall back
+        // to alphabetical so the order is stable, predictable, and independent
+        // of i915 DDI registration quirks.
+        std::sort(names.begin(), names.end());
+        iterationOrder_ = std::move(names);
+
+        std::ostringstream oss;
+        for (size_t i = 0; i < iterationOrder_.size(); ++i) {
+            if (i) oss << ", ";
+            oss << iterationOrder_[i];
+        }
+        LOG_INFO << "DRMBackend: surface iteration order (alphabetical fallback —"
+                 << " no operator-configured regions): " << oss.str();
+        return;
+    }
+
+    // Operator intent present. Map each surface to its canvas-x. Outputs
+    // missing from outputRegions_ (partial coverage) get sentinel INT_MAX so
+    // they sort to the end, then alphabetically among themselves.
+    std::map<std::string, int> nameToCanvasX;
+    std::vector<std::string> uncovered;
+    for (const auto& name : names) {
+        bool found = false;
+        for (const auto& reg : outputRegions_) {
+            if (reg.name == name && reg.canvasWidth > 0) {
+                nameToCanvasX[name] = reg.canvasX;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            nameToCanvasX[name] = std::numeric_limits<int>::max();
+            uncovered.push_back(name);
+        }
+    }
+
+    std::sort(names.begin(), names.end(), [&](const std::string& a, const std::string& b) {
+        int xa = nameToCanvasX[a];
+        int xb = nameToCanvasX[b];
+        if (xa != xb) return xa < xb;
+        return a < b;  // alphabetical tiebreak (and full ordering for uncovered group)
+    });
+
+    iterationOrder_ = std::move(names);
+
+    if (!uncovered.empty()) {
+        std::ostringstream oss;
+        for (size_t i = 0; i < uncovered.size(); ++i) {
+            if (i) oss << ", ";
+            oss << uncovered[i];
+        }
+        LOG_WARNING << "DRMBackend: " << uncovered.size() << " output(s) not covered by"
+                    << " display.conf, falling back to alphabetical for those: "
+                    << oss.str();
+    }
+
+    std::ostringstream oss;
+    for (size_t i = 0; i < iterationOrder_.size(); ++i) {
+        if (i) oss << ", ";
+        oss << iterationOrder_[i];
+        int x = nameToCanvasX[iterationOrder_[i]];
+        if (x != std::numeric_limits<int>::max()) {
+            oss << "@x=" << x;
+        } else {
+            oss << "@alpha";
+        }
+    }
+    LOG_INFO << "DRMBackend: surface iteration order (modeset/render/cleanup): " << oss.str();
+}
+
+std::vector<std::string> DRMBackend::orderedSurfaceNames() const {
+    if (!iterationOrder_.empty()) return iterationOrder_;
+    // Fallback: alphabetical (std::map iteration order). Used before
+    // computeIterationOrder has run, e.g. during early openWindow stages.
+    std::vector<std::string> names;
+    names.reserve(surfaces_.size());
+    for (const auto& [name, _] : surfaces_) names.push_back(name);
+    return names;
+}
+
 void DRMBackend::buildOutputRegions() {
     outputRegions_.clear();
-    
+    regionsFromUserConfig_ = false;  // auto-defaults are not operator intent
     int canvasX = 0;
     
     for (const auto& outputName : getSortedOutputNames()) {
@@ -1140,14 +1274,22 @@ void DRMBackend::buildOutputRegions() {
         );
         
         outputRegions_.push_back(region);
-        
+
         // Next output starts after this one
         canvasX += info.width;
-        
+
         LOG_INFO << "DRMBackend: Output region (" << info.name << "): "
                  << region.canvasX << "," << region.canvasY << " "
                  << region.canvasWidth << "x" << region.canvasHeight;
     }
+
+    // No sortOutputRegionsByCanvas() here on purpose: getSortedOutputNames()
+    // returns kernel enumeration order, and we assign canvasX cumulatively in
+    // that same order, so the vector is already monotonic by construction.
+    // More importantly, regionsFromUserConfig_ stays false here — those
+    // canvasX values reflect kernel enumeration, not operator-intended layout,
+    // and computeIterationOrder() deliberately falls back to alphabetical
+    // ordering for that case rather than trusting these canvasX values.
 }
 
 
@@ -1197,23 +1339,37 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
         
         outputRegions_.push_back(region);
     }
-    
+
+    // No sortOutputRegionsByCanvas() here on purpose: canvasX/canvasY are
+    // assigned cumulatively in this loop, so the vector is already monotonic
+    // by construction. The blend-zone block above also relies on
+    // outputRegions_.back() being the *physical* predecessor of the region
+    // being pushed — that invariant only holds while construction order ==
+    // canvas order. Sorting after the fact would still leave the vector
+    // unchanged today (no-op), but if anyone ever changes the iteration
+    // source so canvasX is no longer monotonic, both the sort and the blend-
+    // zone logic would need to be reworked together: do positions first, sort,
+    // then do blend zones in a second pass walking the sorted vector pairwise.
+
     // Reconfigure if already initialized
     if (multiRenderer_ && multiRenderer_->isInitialized()) {
         // Make GL context current before any GL operations (FBO creation, etc.)
         if (!surfaces_.empty()) {
             surfaces_.begin()->second->makeCurrent();
         }
-        
+
         std::vector<OutputSurface*> surfacePtrs;
         for (const auto& region : outputRegions_) {
             surfacePtrs.push_back(surfaces_.at(region.name).get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
-    
-    LOG_INFO << "DRMBackend: Auto-configured " << outputRegions_.size() 
+
+    LOG_INFO << "DRMBackend: Auto-configured " << outputRegions_.size()
              << " outputs (" << arrangement << ", overlap=" << overlap << ")";
+
+    regionsFromUserConfig_ = true;  // explicit auto-arrange counts as user intent
+    computeIterationOrder();
 }
 
 bool DRMBackend::configureOutputRegion(const std::string& outputName, const OutputRegion& region) {
@@ -1222,26 +1378,33 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName, const Outp
         if (r.name == outputName) {
             r = region;
             r.name = outputName;  // Preserve name
-            
+
+            // canvasX may have changed — restore canonical left-to-right ordering
+            // before any downstream iterator (MultiOutputRenderer,
+            // computeIterationOrder) reads the vector.
+            sortOutputRegionsByCanvas();
+
             // Reconfigure if initialized
             if (multiRenderer_ && multiRenderer_->isInitialized()) {
                 // Make GL context current before any GL operations (FBO creation, etc.)
                 if (!surfaces_.empty()) {
                     surfaces_.begin()->second->makeCurrent();
                 }
-                
+
                 std::vector<OutputSurface*> surfacePtrs;
                 for (const auto& reg : outputRegions_) {
                     surfacePtrs.push_back(surfaces_.at(reg.name).get());
                 }
                 multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
             }
-            
+
             LOG_INFO << "DRMBackend: Configured output region " << outputName;
+            regionsFromUserConfig_ = true;  // explicit per-output configuration
+            computeIterationOrder();
             return true;
         }
     }
-    
+
     LOG_WARNING << "DRMBackend: Output not found: " << outputName;
     return false;
 }

@@ -864,6 +864,11 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
     LOG_INFO << "  Found mode: " << mode->hdisplay << "x" << mode->vdisplay 
              << " clock=" << mode->clock;
     
+    // Clamp connector max bpc to 8 — our framebuffers are 8-bit (AR24), and
+    // 12 bpc on Intel TC-port DP makes link training intermittently fail
+    // (see setConnectorMaxBpc docstring).
+    setConnectorMaxBpc(drmFd_, conn->connectorId, 8);
+
     // Set mode (with fb_id=0 to just configure mode, actual framebuffer set in schedulePageFlip)
     LOG_INFO << "  Calling drmModeSetCrtc...";
     int ret = drmModeSetCrtc(drmFd_, conn->crtcId, 0, 0, 0,
@@ -875,6 +880,11 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
     }
 
     if (!verifyCrtcMode(drmFd_, conn->crtcId, *mode)) {
+        return false;
+    }
+    if (readConnectorLinkStatus(drmFd_, conn->connectorId) == 0) {
+        LOG_ERROR << "DRMOutputManager::setMode: link-status=BAD on connectorId="
+                  << conn->connectorId << " after mode change — failing the call";
         return false;
     }
 
@@ -1127,6 +1137,95 @@ void DRMOutputManager::restoreOriginalModes() {
             (void)verifyCrtcMode(drmFd_, conn.crtcId, conn.savedCrtc->mode);
         }
     }
+}
+
+bool DRMOutputManager::setConnectorMaxBpc(int fd, uint32_t connectorId,
+                                          uint64_t maxBpc) {
+    drmModeObjectProperties* props =
+        drmModeObjectGetProperties(fd, connectorId, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props) {
+        LOG_WARNING << "DRMOutputManager: setConnectorMaxBpc: drmModeObjectGetProperties"
+                    << " failed for connectorId=" << connectorId
+                    << ": " << strerror(errno);
+        return false;
+    }
+
+    bool found = false;
+    bool ok = true;
+    for (uint32_t i = 0; i < props->count_props; ++i) {
+        drmModePropertyRes* p = drmModeGetProperty(fd, props->props[i]);
+        if (!p) continue;
+        if (std::strcmp(p->name, "max bpc") == 0) {
+            found = true;
+            uint64_t current = props->prop_values[i];
+            if (current != maxBpc) {
+                int r = drmModeObjectSetProperty(fd, connectorId,
+                                                 DRM_MODE_OBJECT_CONNECTOR,
+                                                 p->prop_id, maxBpc);
+                if (r != 0) {
+                    LOG_WARNING << "DRMOutputManager: setConnectorMaxBpc: failed to set"
+                                << " 'max bpc'=" << maxBpc << " on connectorId="
+                                << connectorId << ": " << strerror(-r);
+                    ok = false;
+                } else {
+                    LOG_INFO << "DRMOutputManager: clamped 'max bpc' from " << current
+                             << " to " << maxBpc << " on connectorId=" << connectorId;
+                }
+            }
+            drmModeFreeProperty(p);
+            break;
+        }
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+
+    if (!found) {
+        LOG_DEBUG << "DRMOutputManager: setConnectorMaxBpc: 'max bpc' property absent"
+                  << " on connectorId=" << connectorId << " (driver doesn't expose it)";
+    }
+    return ok;
+}
+
+int DRMOutputManager::readConnectorLinkStatus(int fd, uint32_t connectorId) {
+    drmModeObjectProperties* props =
+        drmModeObjectGetProperties(fd, connectorId, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props) {
+        LOG_WARNING << "DRMOutputManager: readConnectorLinkStatus:"
+                    << " drmModeObjectGetProperties failed for connectorId="
+                    << connectorId << ": " << strerror(errno);
+        return -1;
+    }
+
+    int result = 1;  // default to GOOD if property absent (older kernels)
+    bool found = false;
+    for (uint32_t i = 0; i < props->count_props; ++i) {
+        drmModePropertyRes* p = drmModeGetProperty(fd, props->props[i]);
+        if (!p) continue;
+        if (std::strcmp(p->name, "link-status") == 0) {
+            found = true;
+            // DRM_MODE_LINK_STATUS_GOOD = 0, DRM_MODE_LINK_STATUS_BAD = 1
+            uint64_t v = props->prop_values[i];
+            if (v == 1) {
+                LOG_ERROR << "DRMOutputManager: link-status=BAD on connectorId="
+                          << connectorId << " (kernel detected DP/HDMI link training failure)";
+                result = 0;
+            } else {
+                LOG_DEBUG << "DRMOutputManager: link-status=GOOD on connectorId="
+                          << connectorId;
+                result = 1;
+            }
+            drmModeFreeProperty(p);
+            break;
+        }
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+
+    if (!found) {
+        LOG_DEBUG << "DRMOutputManager: link-status property absent on connectorId="
+                  << connectorId << " (kernel/driver doesn't expose it; treating as GOOD)";
+    }
+    return result;
 }
 
 bool DRMOutputManager::verifyCrtcMode(int fd, uint32_t crtcId,
