@@ -1,3 +1,13 @@
+cuems-videocomposer (0.1.2-3) unstable; urgency=medium
+
+  * Journal logging: all LOG_* sites carry real syslog priorities via
+    CuemsLogger under systemd (terminal output unchanged); MTC steady-
+    state chatter demoted to debug (~36k journal lines/day -> hundreds);
+    stdout printf error shadows removed; submodule pins converged on
+    reconciled cuemslogger/mtcreceiver heads.
+
+ -- Ion Reguera <ion@stagelab.coop>  Wed, 29 Jul 2026 19:47:42 +0200
+
 cuems-videocomposer (0.1.2-2) unstable; urgency=medium
 
   * Bump mtcreceiver to rc_1 aa44894: hold QF timebase on the ~2s
