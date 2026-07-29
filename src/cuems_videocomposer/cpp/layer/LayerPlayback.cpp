@@ -202,28 +202,33 @@ void LayerPlayback::updateFromSyncSource() {
         playing_ = false;
     }
     
-    // Log MTC timecode periodically (every 30 frames or when frame changes significantly)
+    // Log MTC timecode periodically (every 30 frames or when frame changes significantly).
+    // Both branches at DEBUG: with MTC rolling this fired ~13k times/day into the
+    // journal at the default level — steady-state position is diagnostics, not
+    // operations. Raise the level when actually chasing sync.
     if (syncFrame >= 0 && rolling != 0) {
         if (lastLoggedFrame_ < 0 || std::abs(syncFrame - lastLoggedFrame_) >= 30) {
             // Format timecode for display
             FrameInfo info = getFrameInfo();
             if (info.framerate > 0.0) {
                 std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
-                LOG_INFO << "MTC: " << smpte << " (frame " << syncFrame << ", rolling)";
+                LOG_DEBUG << "MTC: " << smpte << " (frame " << syncFrame << ", rolling)";
             } else {
-                LOG_INFO << "MTC: frame " << syncFrame << " (rolling)";
+                LOG_DEBUG << "MTC: frame " << syncFrame << " (rolling)";
             }
             lastLoggedFrame_ = syncFrame;
         }
     } else if (syncFrame >= 0 && rolling == 0) {
-        // Log when we have a frame but not rolling (stopped)
-        if (lastLoggedFrame_ != syncFrame) {
+        // Log when we have a frame but not rolling (stopped). Same >=30 frame
+        // throttle as the rolling branch — the bare frame-changed gate fired
+        // once per MTC position update.
+        if (lastLoggedFrame_ < 0 || std::abs(syncFrame - lastLoggedFrame_) >= 30) {
             FrameInfo info = getFrameInfo();
             if (info.framerate > 0.0) {
                 std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
-                LOG_INFO << "MTC: " << smpte << " (frame " << syncFrame << ", stopped)";
+                LOG_DEBUG << "MTC: " << smpte << " (frame " << syncFrame << ", stopped)";
             } else {
-                LOG_INFO << "MTC: frame " << syncFrame << " (stopped)";
+                LOG_DEBUG << "MTC: frame " << syncFrame << " (stopped)";
             }
             lastLoggedFrame_ = syncFrame;
         }

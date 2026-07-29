@@ -22,6 +22,9 @@
 #include "VideoComposerApplication.h"
 #include "input/NDIVideoInput.h"
 #include <iostream>
+#ifdef HAVE_CUEMS_LOGGER
+#include "cuemslogger.h"
+#endif
 
 int main(int argc, char** argv) {
     // Check for --discover-ndi flag before full initialization
@@ -69,8 +72,19 @@ int main(int argc, char** argv) {
         }
     }
     
+#ifdef HAVE_CUEMS_LOGGER
+    // Construct the CuemsLogger singleton on the main thread BEFORE anything
+    // spawns (OSC listener, MIDI/MTC thread, OpenMP HAP decode, DRM init).
+    // getLogger() is an unguarded check-then-construct — every consumer
+    // (audioplayer main.cpp, dmxplayer main.cpp) avoids the construction race
+    // the same way. Placed after the --discover-ndi early-exit so pure CLI
+    // paths never touch syslog. Also sets the real program slug: a lazy
+    // first-call would register the default "Cuems:CuemsLog".
+    static CuemsLogger vcLogger("videocomposer");
+#endif
+
     videocomposer::VideoComposerApplication app;
-    
+
     if (!app.initialize(argc, argv)) {
         // Check if help or version was requested (they return false but print output)
         // In that case, exit successfully. Otherwise it's a real error.

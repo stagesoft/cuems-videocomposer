@@ -65,8 +65,7 @@ bool MtcReceiverMIDIDriver::open(const std::string& portId) {
             // Note: mtcreceiver automatically opens port 0 by default in constructor
             // This uses RtMidi which may not show up in aconnect the same way as ALSA Sequencer
             if (errorCount == 0) {
-                printf("MTC: Initializing mtcreceiver (RtMidi)...\n");
-                fflush(stdout);
+                LOG_INFO << "MTC: Initializing mtcreceiver (RtMidi)...";
             }
             
             // Create mtcreceiver with custom client name for aconnect -l
@@ -83,39 +82,25 @@ bool MtcReceiverMIDIDriver::open(const std::string& portId) {
             errorFlag = false;
 
             // mtcreceiver constructor opens port 0 automatically
-            printf("MTC: mtcreceiver initialized successfully, port opened\n");
-            printf("MTC: Note: RtMidi ports may not appear in 'aconnect' - use 'aconnect -l' to see ALSA Sequencer ports\n");
-            printf("MTC: Waiting for MIDI Time Code...\n");
-            fflush(stdout);
-            
-            if (verbose_) {
-                LOG_INFO << "MTC: mtcreceiver initialized successfully";
-                LOG_INFO << "MTC: Waiting for MIDI Time Code...";
-            }
-            
+            LOG_INFO << "MTC: mtcreceiver initialized successfully, port opened";
+            LOG_INFO << "MTC: Waiting for MIDI Time Code...";
+
             return true;
         } catch (const RtMidiError& error) {
             // Specific handling for RtMidi errors (like cuems-audioplayer)
             ++errorCount;
             if (errorCount < maxRetries) {
-                printf("MTC: DRIVER_ERROR caught %d times, retrying...\n", errorCount);
-                fflush(stdout);
-                if (verbose_) {
-                    LOG_WARNING << "MTC: DRIVER_ERROR caught " << errorCount << " times, retrying";
-                }
+                // Unconditional (was gated behind verbose_): a driver retry is
+                // a real warning and must reach `cuems-logs -e`.
+                LOG_WARNING << "MTC: DRIVER_ERROR caught " << errorCount << " times, retrying";
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             } else {
-                printf("MTC: ERROR - Failed to initialize mtcreceiver after %d retries: %s\n", 
-                       maxRetries, error.getMessage().c_str());
-                fflush(stdout);
                 LOG_ERROR << "Failed to initialize mtcreceiver after " << maxRetries << " retries: " << error.getMessage();
                 mtcReceiver_.reset();
                 return false;
             }
         } catch (const std::exception& e) {
             // Handle other exceptions
-            printf("MTC: ERROR - Failed to initialize mtcreceiver: %s\n", e.what());
-            fflush(stdout);
             LOG_ERROR << "Failed to initialize mtcreceiver: " << e.what();
             mtcReceiver_.reset();
             return false;

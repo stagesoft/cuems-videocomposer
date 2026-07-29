@@ -789,6 +789,20 @@ add_definitions(-DHAVE_CUEMS_MEDIADECODER)
 if(ENABLE_MIDI AND RTMIDI_FOUND)
     add_subdirectory(src/mtcreceiver)
     add_definitions(-DHAVE_MTCRECEIVER)
+    # Arm the real CuemsLogger inside mtcreceiver, exactly like dmxplayer and
+    # audioplayer do. Without the define mtcreceiver compiles its fallback
+    # stub, whose namespace-scope inline getLogger() mangles IDENTICALLY to
+    # the real class-static CuemsLogger::getLogger(); once anything else in
+    # this binary pulls cuemslogger.a in (the Logger.h conversion does), the
+    # linker rebinds the stub's weak call sites to the real strong symbol —
+    # silent type confusion. Defining it everywhere keeps exactly one logger
+    # class in the whole binary.
+    target_compile_definitions(mtcreceiver PUBLIC HAVE_CUEMS_LOGGER)
+    # No target_link_libraries(mtcreceiver cuemslogger) here: linking a
+    # subdirectory target from the parent needs CMP0079 NEW (this project's
+    # cmake_minimum_required predates it). Not needed either — mtcreceiver.h
+    # reaches cuemslogger.h by relative include, and the final executable
+    # links cuemslogger below, which resolves mtcreceiver.a's references.
     # Add mtcreceiver driver adapter
     list(APPEND CPP_SOURCES
         src/cuems_videocomposer/cpp/sync/MtcReceiverMIDIDriver.cpp
@@ -1091,12 +1105,23 @@ target_link_libraries(cuems-videocomposer
 target_link_libraries(cuems-videocomposer cuems-mediadecoder)
 # Include directories are automatically added via PUBLIC interface of cuems-mediadecoder
 
-# Link mtcreceiver and cuemslogger if available
+# CuemsLogger for the main binary (always: its add_subdirectory above is
+# unconditional). Routes utils/Logger.h's five emit bodies through syslog
+# under systemd, so LOG_ERROR/LOG_WARNING carry a real journal PRIORITY
+# instead of the flat 6 that stdout lines get. Deliberately NOT gated on
+# ENABLE_MIDI — utils/Logger.h is included nearly everywhere, so gating the
+# include dir would break an ENABLE_MIDI=OFF build that compiles fine today.
+# Per-target on purpose: cuems-videoindexer and the test binaries keep the
+# plain-stream fallback and never link cuemslogger.
+target_compile_definitions(cuems-videocomposer PRIVATE HAVE_CUEMS_LOGGER)
+target_link_libraries(cuems-videocomposer cuemslogger)
+target_include_directories(cuems-videocomposer PRIVATE src/cuemslogger)
+
+# Link mtcreceiver if available
 if(ENABLE_MIDI AND RTMIDI_FOUND)
-    target_link_libraries(cuems-videocomposer mtcreceiver cuemslogger)
+    target_link_libraries(cuems-videocomposer mtcreceiver)
     target_include_directories(cuems-videocomposer PRIVATE
         src/mtcreceiver
-        src/cuemslogger
         ${RTMIDI_INCLUDE_DIRS}
     )
 endif()

@@ -194,20 +194,25 @@ int64_t ALSASeqMIDIDriver::pollFrame() {
     }
 
     currentFrame_ = frame;
-    
-    // Debug: log frame number when valid
-    if (frame >= 0) {
-        static int64_t lastLoggedFrame = -1;
-        if (lastLoggedFrame != frame) {
-            printf("MTC: pollFrame() returning frame %lld\n", (long long)frame);
+
+    // Debug: log frame number when valid. verbose_-gated: these fired
+    // UNGATED once per frame change (25-60 Hz) and once per poll while idle —
+    // inert today only because MIDIDriver prefers MtcReceiverMIDIDriver, but
+    // a per-frame printf+fflush is never acceptable on the MIDI path.
+    if (verbose_) {
+        if (frame >= 0) {
+            static int64_t lastLoggedFrame = -1;
+            if (lastLoggedFrame != frame) {
+                printf("MTC: pollFrame() returning frame %lld\n", (long long)frame);
+                fflush(stdout);
+                lastLoggedFrame = frame;
+            }
+        } else {
+            printf("MTC: pollFrame() returning -1 (no valid timecode)\n");
             fflush(stdout);
-            lastLoggedFrame = frame;
         }
-    } else {
-        printf("MTC: pollFrame() returning -1 (no valid timecode)\n");
-        fflush(stdout);
     }
-    
+
     return frame;
 }
 

@@ -25,6 +25,21 @@
 #include <string>
 #include <iostream>
 #include <sstream>
+#include <cstdlib>
+
+// Under systemd every stdout/stderr line is stamped PRIORITY=6 (info)
+// regardless of severity, so `journalctl -p 4` / `cuems-logs -e` could never
+// surface a single one of this program's LOG_ERROR/LOG_WARNING lines — 36k+
+// journal entries/day, every one recorded as info. When HAVE_CUEMS_LOGGER is
+// defined (the cuems-videocomposer target; videoindexer and the test binaries
+// deliberately stay on plain streams) the five emit bodies below route
+// through CuemsLogger, whose openlog/syslog path carries the record's real
+// priority. Terminal runs are unaffected: when JOURNAL_STREAM is absent
+// (systemd sets it exactly when stdout/stderr are wired to the journal) the
+// original cerr/cout output is kept byte-for-byte.
+#ifdef HAVE_CUEMS_LOGGER
+#include "cuemslogger.h"
+#endif
 
 namespace videocomposer {
 
@@ -55,33 +70,51 @@ public:
     void setQuiet(bool quiet) { quiet_ = quiet; }
     bool isQuiet() const { return quiet_; }
 
-    // Logging methods
+    // Logging methods. The !quiet_/level_ guards are the volume control and
+    // the --quiet CLI contract — they gate BEFORE any backend is touched, so
+    // level filtering costs the same whichever backend is active.
     void error(const std::string& message) {
         if (!quiet_ && level_ >= ERROR) {
+#ifdef HAVE_CUEMS_LOGGER
+            if (underJournal()) { CuemsLogger::getLogger()->logError(message); return; }
+#endif
             std::cerr << "[ERROR] " << message << std::endl;
         }
     }
 
     void warning(const std::string& message) {
         if (!quiet_ && level_ >= WARNING) {
+#ifdef HAVE_CUEMS_LOGGER
+            if (underJournal()) { CuemsLogger::getLogger()->logWarning(message); return; }
+#endif
             std::cerr << "[WARNING] " << message << std::endl;
         }
     }
 
     void info(const std::string& message) {
         if (!quiet_ && level_ >= INFO) {
+#ifdef HAVE_CUEMS_LOGGER
+            if (underJournal()) { CuemsLogger::getLogger()->logInfo(message); return; }
+#endif
             std::cout << "[INFO] " << message << std::endl;
         }
     }
 
     void debug(const std::string& message) {
         if (!quiet_ && level_ >= DEBUG) {
+#ifdef HAVE_CUEMS_LOGGER
+            if (underJournal()) { CuemsLogger::getLogger()->logDebug(message); return; }
+#endif
             std::cout << "[DEBUG] " << message << std::endl;
         }
     }
 
     void verbose(const std::string& message) {
         if (!quiet_ && level_ >= VERBOSE) {
+#ifdef HAVE_CUEMS_LOGGER
+            // CuemsLogger has no level below debug; VERBOSE folds into it.
+            if (underJournal()) { CuemsLogger::getLogger()->logDebug(message); return; }
+#endif
             std::cout << "[VERBOSE] " << message << std::endl;
         }
     }
@@ -141,11 +174,36 @@ private:
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
 
+#ifdef HAVE_CUEMS_LOGGER
+    static bool underJournal() {
+        static const bool v = (std::getenv("JOURNAL_STREAM") != nullptr);
+        return v;
+    }
+#endif
+
     Level level_;
     bool quiet_;
 };
 
-// Convenience macros
+// Convenience macros.
+//
+// <syslog.h> (reached via cuemslogger.h) defines LOG_WARNING/LOG_INFO/
+// LOG_DEBUG as integer priority macros. Undefine them before establishing
+// this file's stream macros, or every TU warns "redefined" — and a TU that
+// includes syslog.h AFTER this header would flip LOG_WARNING back to `4`,
+// turning `LOG_WARNING << "..."` into a nonsense integer shift. syslog.h is
+// include-guarded, so once undefined here the stream macros stay in force
+// for the rest of the TU regardless of later includes. (Same dance
+// rtpmidid's logger.hpp and gradient-motion-engine's logging.h do.)
+#ifdef LOG_WARNING
+#undef LOG_WARNING
+#endif
+#ifdef LOG_INFO
+#undef LOG_INFO
+#endif
+#ifdef LOG_DEBUG
+#undef LOG_DEBUG
+#endif
 #define LOG_ERROR   videocomposer::Logger::getInstance().error()
 #define LOG_WARNING videocomposer::Logger::getInstance().warning()
 #define LOG_INFO    videocomposer::Logger::getInstance().info()
