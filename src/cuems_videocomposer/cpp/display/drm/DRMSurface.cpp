@@ -745,7 +745,8 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
         handles[i] = gbm_bo_get_handle_for_plane(bo, i).u32;
         strides[i] = gbm_bo_get_stride_for_plane(bo, i);
         offsets[i] = gbm_bo_get_offset(bo, i);
-        modifiers[i] = modifier;
+        // modifiers[] is filled below, and ONLY when we are going to set
+        // DRM_MODE_FB_MODIFIERS - see the useModifiers logic.
     }
     
     // If plane-aware functions failed, fall back to legacy single-plane
@@ -768,24 +769,47 @@ bool DRMSurface::createFramebuffer(gbm_bo* bo, Framebuffer& fb) {
     
     // For NVIDIA with tiled modifiers: MUST pass DRM_MODE_FB_MODIFIERS flag
     // For other drivers: only set flag for non-zero/non-INVALID modifiers (mpv approach)
+    bool useModifiers;
     if (isNvidia) {
-        if (modifier != DRM_FORMAT_MOD_INVALID) {
-            flags = DRM_MODE_FB_MODIFIERS;
-        }
+        useModifiers = (modifier != DRM_FORMAT_MOD_INVALID);
     } else {
-        if (modifier != 0 && modifier != DRM_FORMAT_MOD_INVALID) {
-            flags = DRM_MODE_FB_MODIFIERS;
+        useModifiers = (modifier != 0 && modifier != DRM_FORMAT_MOD_INVALID);
+    }
+
+    // The kernel rejects ADDFB2 with -EINVAL if any modifiers[] entry is non-zero
+    // while DRM_MODE_FB_MODIFIERS is unset. DRM_FORMAT_MOD_INVALID is NOT zero
+    // (0x00ffffffffffffff), so populating modifiers[] unconditionally made every
+    // drmModeAddFB2WithModifiers() call fail on any driver that hands us a BO
+    // without an explicit modifier - which is what gbm_surface_create() (the
+    // legacy, non-NVIDIA path) does on amdgpu. That burned an extra rejected
+    // ioctl per frame per output plus a log line, on the hottest path we have.
+    // So: only fill modifiers[] when we are actually going to set the flag, and
+    // when we are not, skip straight to drmModeAddFB2 instead of making a call
+    // we know the kernel will refuse.
+    if (useModifiers) {
+        flags = DRM_MODE_FB_MODIFIERS;
+        for (int i = 0; i < num_planes && i < 4; ++i) {
+            modifiers[i] = modifier;
         }
     }
-    
-    // Always try drmModeAddFB2WithModifiers first
-    int ret = drmModeAddFB2WithModifiers(outputManager_->getFd(), width, height,
+
+    // Try drmModeAddFB2WithModifiers only when we have a real modifier to pass;
+    // otherwise go straight to the plain call (see useModifiers above).
+    int ret;
+    if (useModifiers) {
+        ret = drmModeAddFB2WithModifiers(outputManager_->getFd(), width, height,
                                           format, handles, strides, offsets,
                                           modifiers, &fb.fbId, flags);
-    
+        if (ret != 0) {
+            LOG_DEBUG << "DRMSurface: drmModeAddFB2WithModifiers failed for modifier 0x"
+                      << std::hex << modifier << std::dec << ", trying drmModeAddFB2";
+        }
+    } else {
+        ret = -EINVAL;  // skip the doomed call, fall through to drmModeAddFB2
+    }
+
     // Fallback: try drmModeAddFB2 without modifiers array
     if (ret != 0) {
-        LOG_DEBUG << "DRMSurface: drmModeAddFB2WithModifiers failed, trying drmModeAddFB2";
         ret = drmModeAddFB2(outputManager_->getFd(), width, height,
                             format, handles, strides, offsets, &fb.fbId, 0);
     }
@@ -854,6 +878,7 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
         LOG_ERROR << "DRMSurface: Failed to lock front buffer";
         return -ENOBUFS;
     }
+
 
     if (nextFb_.bo != bo) {
         destroyFramebuffer(nextFb_);
@@ -1133,6 +1158,7 @@ uint32_t DRMSurface::prepareAtomicFlip() {
         return 0;
     }
     
+
     // Check if we need to create a new framebuffer
     if (nextFb_.bo != bo) {
         destroyFramebuffer(nextFb_);
