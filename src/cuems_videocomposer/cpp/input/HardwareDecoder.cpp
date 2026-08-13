@@ -27,6 +27,8 @@
 #include <utility>
 #include <sstream>
 #include <cstdio>
+#include <atomic>
+#include <mutex>
 
 #ifdef __linux__
 #ifdef HAVE_VAAPI_INTEROP
@@ -52,14 +54,25 @@ extern "C" {
 
 namespace videocomposer {
 
-// Cache the detected hardware decoder type to avoid re-detection and duplicate logging
+// Cache the detected hardware decoder type to avoid re-detection and duplicate logging.
+// detectAvailable() is called from AsyncVideoLoader's worker threads, so the cache gate
+// must be atomic and the probe itself serialised - see probe_mutex below.
 static HardwareDecoder::Type cached_hw_type = HardwareDecoder::Type::NONE;
-static bool hw_type_detected = false;
+static std::atomic<bool> hw_type_detected{false};
+static std::mutex probe_mutex;
 
-// FFmpeg log callback state for suppressing messages during probing
-static std::vector<std::string> captured_ffmpeg_messages;
-static std::vector<std::string> captured_libva_errors;
-static bool is_probing_hardware = false;
+// FFmpeg log callback state for suppressing messages during probing.
+//
+// These MUST be thread_local. av_log_set_callback() installs ffmpeg_log_callback
+// process-wide, so every thread's FFmpeg output runs through it - including threads
+// that are merely opening a file (avformat_open_input) and are not probing at all.
+// When this state was global, such a thread saw another thread's is_probing_hardware
+// flag and appended to the same std::vector, corrupting the heap.
+// Thread-local storage means a non-probing thread reads its own false flag and simply
+// forwards to av_log_default_callback.
+static thread_local std::vector<std::string> captured_ffmpeg_messages;
+static thread_local std::vector<std::string> captured_libva_errors;
+static thread_local bool is_probing_hardware = false;
 
 // Custom FFmpeg log callback that filters out VAAPI errors during probing
 static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list vl) {
@@ -228,11 +241,22 @@ static void cleanup_va_display(VADisplayInfo& info) {
 #endif
 
 HardwareDecoder::Type HardwareDecoder::detectAvailable() {
-    // Return cached result if already detected
-    if (hw_type_detected) {
+    // Return cached result if already detected (fast path, no lock)
+    if (hw_type_detected.load(std::memory_order_acquire)) {
         return cached_hw_type;
     }
-    
+
+    // Serialise the probe: several AsyncVideoLoader workers can arrive here at once
+    // with a cold cache. Without this they all probe concurrently, which both races
+    // on the capture buffers and initialises VAAPI from several threads at once.
+    std::lock_guard<std::mutex> probe_lock(probe_mutex);
+
+    // Re-check under the lock - another thread may have completed the probe while
+    // we were waiting for it.
+    if (hw_type_detected.load(std::memory_order_relaxed)) {
+        return cached_hw_type;
+    }
+
     // Set up FFmpeg log callback to suppress VAAPI errors during probing
     captured_ffmpeg_messages.clear();
     captured_libva_errors.clear();
@@ -444,7 +468,8 @@ HardwareDecoder::Type HardwareDecoder::detectAvailable() {
     }
     
     cached_hw_type = foundType;
-    hw_type_detected = true;
+    // Release: publishes cached_hw_type to the lock-free readers above.
+    hw_type_detected.store(true, std::memory_order_release);
     return foundType;
 }
 

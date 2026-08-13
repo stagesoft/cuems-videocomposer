@@ -54,6 +54,14 @@ void AsyncVideoLoader::initialize(ConfigurationManager* config, DisplayBackend* 
     config_ = config;
     displayBackend_ = displayBackend;
 
+    // Warm the hardware-decoder cache on THIS thread, before any worker exists.
+    // The X11 and Wayland backends happen to probe during display init, but the DRM
+    // backend never does - so on a DRM/KMS host the first probe used to happen inside
+    // the worker pool, with several workers racing into it at once. Probing here makes
+    // the cache hot for every backend and keeps the probe single-threaded by
+    // construction (HardwareDecoder::detectAvailable() is also internally serialised).
+    HardwareDecoder::detectAvailable();
+
     // Start worker thread pool (numWorkers_ threads run workerThread() concurrently)
     running_ = true;
     workers_.clear();
