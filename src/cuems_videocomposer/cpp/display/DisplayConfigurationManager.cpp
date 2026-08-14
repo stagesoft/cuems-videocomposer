@@ -233,15 +233,26 @@ std::vector<OutputRegion> DisplayConfigurationManager::generateOutputRegions(
     
     for (size_t i = 0; i < outputs.size(); ++i) {
         const auto& out = outputs[i];
-        if (!out.enabled) continue;
-        
+        if (!out.enabled) continue;   // hardware says the connector is unusable
+
+        // ...and the operator gets a say too. `enabled=false` used to be parsed into
+        // OutputConfiguration and never read, so a connected-but-unwanted port could
+        // not be left dark: it kept a surface, kept being blitted, and kept inflating
+        // the canvas bounding box (ClickUp 869efh2hr). DRMBackend skips creating a
+        // surface for it; skipping the region here keeps it out of the canvas too.
+        const OutputConfiguration* customConfig = getOutputConfig(out.name);
+        if (customConfig && !customConfig->enabled) {
+            LOG_INFO << "DisplayConfigurationManager: " << out.name
+                     << " disabled in display.conf - excluded from the canvas";
+            continue;
+        }
+
         OutputRegion region = OutputRegion::createDefault(
             out.name,
             out.width, out.height, 0, 0
         );
-        
+
         // Check for custom configuration
-        const OutputConfiguration* customConfig = getOutputConfig(out.name);
         if (customConfig && config_.canvasLayout == CanvasLayout::CUSTOM) {
             region.canvasX = customConfig->canvasX;
             region.canvasY = customConfig->canvasY;

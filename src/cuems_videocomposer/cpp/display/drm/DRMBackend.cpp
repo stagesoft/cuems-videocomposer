@@ -112,6 +112,28 @@ bool DRMBackend::openWindow() {
             default:                         resMode = ResolutionMode::HD_1080P; break;
         }
         outputManager_->setResolutionMode(resMode);
+
+        // Hand the per-output requests down before the modeset runs. The resolution
+        // policy is global; these are what let one output be asked for a specific
+        // mode, and a refresh= here also pins that output out of refresh-rate
+        // harmonization (ClickUp 869efhv04).
+        std::map<std::string, DRMOutputManager::OutputModeOverride> overrides;
+        for (const auto& oc : configManager_->getConfiguration().outputs) {
+            if (oc.width <= 0 && oc.refreshRate <= 0.0) {
+                continue;   // nothing requested for this output
+            }
+            DRMOutputManager::OutputModeOverride ovr;
+            ovr.width       = oc.width;
+            ovr.height      = oc.height;
+            ovr.refreshRate = oc.refreshRate;
+            overrides[oc.name] = ovr;
+        }
+        if (!overrides.empty()) {
+            LOG_INFO << "DRMBackend: applying " << overrides.size()
+                     << " per-output mode request(s) from display.conf";
+        }
+        outputManager_->setOutputModeOverrides(overrides);
+
         outputManager_->applyResolutionMode();
     }
     
@@ -136,8 +158,22 @@ bool DRMBackend::openWindow() {
     
     for (const auto& outputInfo : outputs) {
         const std::string& outputName = outputInfo.name;
+
+        // An output the operator turned off gets no surface at all - no GBM/EGL
+        // buffers, no CRTC, no modeset - so a connected but unwanted port stays
+        // dark and costs nothing. Skipping it only in generateOutputRegions()
+        // would drop it from the canvas while still lighting it up (869efh2hr).
+        if (configManager_) {
+            const OutputConfiguration* oc = configManager_->getOutputConfig(outputName);
+            if (oc && !oc->enabled) {
+                LOG_INFO << "DRMBackend: " << outputName
+                         << " disabled in display.conf - no surface created";
+                continue;
+            }
+        }
+
         LOG_INFO << "DRMBackend: Creating surface for " << outputName;
-        
+
         auto surface = std::make_unique<DRMSurface>(outputManager_.get(), outputName);
         
         // Pass shared resources to subsequent surfaces
