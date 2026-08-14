@@ -129,7 +129,9 @@ private:
     int64_t timeOffset_;  // Time offset applied to sync frames
     double timeScale_;    // Time multiplier (default: 1.0)
     bool wraparound_;     // Enable wrap-around/loop (seeks to 0 when playback ends)
-    bool mtcFollow_;      // Enable/disable MTC following (default: true)
+    bool mtcFollow_;      // Enable/disable MTC following. Default FALSE: a layer
+                          // ignores its sync source until the engine sends
+                          // /mtcfollow 1 at the cue's start (see 0499270).
     
     // MTC sync state (per-layer, not static!)
     bool wasRolling_;        // Previous rolling state for change detection

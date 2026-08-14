@@ -203,13 +203,20 @@ bool test_VideoLayer_SyncUpdate() {
     syncPtr->connect();
     syncPtr->setCurrentFrame(50);
     syncPtr->setRolling(true);
-    
+
+    // A layer ignores its sync source until MTC following is switched on: the
+    // engine holds a cue and only sends /mtcfollow 1 when live MTC reaches the
+    // cue start (0499270 "layers start hidden with no MTC follow until engine
+    // enables"). Without this the layer correctly refuses to move and the
+    // assertion below sees the initial -1.
+    layer->setMtcFollow(true);
+
     layer->play();
     layer->update();
-    
+
     // Frame should be updated from sync source
     TEST_ASSERT_EQ(layer->getCurrentFrame(), 50);
-    
+
     return true;
 }
 
