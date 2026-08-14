@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -54,6 +53,7 @@ void DisplayConfigurationManager::resetToDefaults() {
     config_.resolutionPolicy = ResolutionPolicy::HD_1080P;
     config_.canvasLayout = CanvasLayout::AUTO_HORIZONTAL;
     config_.outputs.clear();
+    resolutionPolicySpecified_ = false;
     updateTimestamp();
 }
 
@@ -233,15 +233,26 @@ std::vector<OutputRegion> DisplayConfigurationManager::generateOutputRegions(
     
     for (size_t i = 0; i < outputs.size(); ++i) {
         const auto& out = outputs[i];
-        if (!out.enabled) continue;
-        
+        if (!out.enabled) continue;   // hardware says the connector is unusable
+
+        // ...and the operator gets a say too. `enabled=false` used to be parsed into
+        // OutputConfiguration and never read, so a connected-but-unwanted port could
+        // not be left dark: it kept a surface, kept being blitted, and kept inflating
+        // the canvas bounding box (ClickUp 869efh2hr). DRMBackend skips creating a
+        // surface for it; skipping the region here keeps it out of the canvas too.
+        const OutputConfiguration* customConfig = getOutputConfig(out.name);
+        if (customConfig && !customConfig->enabled) {
+            LOG_INFO << "DisplayConfigurationManager: " << out.name
+                     << " disabled in display.conf - excluded from the canvas";
+            continue;
+        }
+
         OutputRegion region = OutputRegion::createDefault(
             out.name,
             out.width, out.height, 0, 0
         );
-        
+
         // Check for custom configuration
-        const OutputConfiguration* customConfig = getOutputConfig(out.name);
         if (customConfig && config_.canvasLayout == CanvasLayout::CUSTOM) {
             region.canvasX = customConfig->canvasX;
             region.canvasY = customConfig->canvasY;
@@ -463,7 +474,9 @@ bool DisplayConfigurationManager::loadFromFile(const std::string& path) {
             if (key == "name") {
                 config_.name = value;
             } else if (key == "resolution_policy") {
-                setResolutionPolicyFromString(value);
+                if (setResolutionPolicyFromString(value)) {
+                    resolutionPolicySpecified_ = true;
+                }
             } else if (key == "canvas_layout") {
                 if (value == "horizontal") setCanvasLayout(CanvasLayout::AUTO_HORIZONTAL);
                 else if (value == "vertical") setCanvasLayout(CanvasLayout::AUTO_VERTICAL);

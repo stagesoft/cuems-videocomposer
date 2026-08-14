@@ -1,32 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
- * cuems-videocomposer - Video composer for CUEMS
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
- *
- * This program contains code derived from xjadeo:
- * Copyright (C) 2005-2014 Robin Gareus <robin@gareus.org>
- * Copyright (C) 2010-2012 Fons Adriaensen <fons@linuxaudio.org>
- * Copyright (C) 2009-2010 Tim Mayberry <mojofunk@gmail.com>
- * Copyright (C) 2005-2008 Jörn Nettingsmeier
- * https://xjadeo.sourceforge.net/
- *
- * Development has also been inspired by mpv:
- * https://mpv.io/
+ * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -49,6 +38,7 @@
 #endif
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
+#include "sync/MtcReceiverMIDIDriver.h"  // MtcReceiver::resetWrapOffset() in resetAll()
 #include "layer/LayerManager.h"
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
@@ -209,6 +199,7 @@ bool VideoComposerApplication::initializeDisplay() {
         
         // Apply resolution mode from command line
         std::string resMode = config_->getString("resolution_mode", "1080p");
+        drmBackend->setResolutionExplicit(config_->isResolutionExplicit());
         if (!drmBackend->setResolutionMode(resMode)) {
             LOG_ERROR << "Invalid resolution mode: " << resMode;
             LOG_ERROR << "Valid modes: native, maximum, 1080p, 720p, 4k";
@@ -291,11 +282,13 @@ void VideoComposerApplication::showStartupSplash() {
     if (!displayBackend_ || !displayBackend_->isWindowOpen()) {
         return;
     }
-    StartupSplash splash;
-    if (!splash.loadFromEmbedded()) {
+    splash_ = std::make_unique<StartupSplash>();
+    if (!splash_->loadFromEmbedded()) {
+        splash_.reset();
         return;
     }
-    splash.show(displayBackend_.get(), displayManager_.get(), StartupSplash::SPLASH_DURATION_SECONDS);
+    splash_->show(displayBackend_.get(), displayManager_.get(),
+                  StartupSplash::SPLASH_DURATION_SECONDS);
 }
 
 bool VideoComposerApplication::initializeRemoteControl() {
@@ -382,19 +375,28 @@ int VideoComposerApplication::run() {
     // - Rendering happens every vsync for tear-free smooth output
     
     LOG_INFO << "Entering video update loop @ display refresh rate (vsync-driven)";
-    
-    // Timing instrumentation for diagnosing micro-jumps
+
     while (running_ && shouldContinue()) {
         processEvents();
-        
+
+        // Bail out if a backend has surfaced a fatal error (e.g. DRM cold-boot
+        // modeset verifier failed even after the in-process retry). Without
+        // this, the loop would call schedulePageFlip every frame against a
+        // broken modeset forever; instead we exit non-zero so systemd
+        // Restart=on-failure brings up a fresh process.
+        if (displayBackend_ && displayBackend_->hasFatalError()) {
+            LOG_ERROR << "Display backend reports fatal error — exiting for systemd restart";
+            return 1;
+        }
+
         // Make OpenGL context current before updating layers
         // Required for VAAPI: EGL image creation needs current EGL context
         if (displayBackend_ && displayBackend_->isWindowOpen()) {
             displayBackend_->makeCurrent();
         }
-        
+
         updateLayers();
-        
+
         // Render - vsync/page-flip wait provides timing (60Hz)
         render();
     }
@@ -433,13 +435,23 @@ void VideoComposerApplication::updateLayers() {
         if (syncFrame >= 0) {
             // Get framerate from sync source (MTC framerate)
             double syncFps = globalSyncSource_->getFramerate();
+            // Undo the display-latency advance: pollFrame() returns the
+            // GPU-pipeline-compensated frame, but the OSD must show wire MTC
+            // so operators can compare against an external SMPTE reference.
+            long latencyCompMs = globalSyncSource_->getDisplayLatencyMs();
+            int64_t osdFrame = syncFrame;
+            if (latencyCompMs > 0 && syncFps > 0.0) {
+                int64_t latencyFrames = static_cast<int64_t>(
+                    std::round(static_cast<double>(latencyCompMs) * syncFps / 1000.0));
+                osdFrame = std::max(int64_t(0), syncFrame - latencyFrames);
+            }
             if (syncFps > 0.0) {
                 // Display sync source timecode (MTC) - this is monotonic and won't jump backwards
-                std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, syncFps);
+                std::string smpte = SMPTEUtils::frameToSmpteString(osdFrame, syncFps);
                 osdManager_->setSMPTETimecode(smpte);
-                
+
                 // Also set frame number from sync source
-                osdManager_->setFrameNumber(syncFrame);
+                osdManager_->setFrameNumber(osdFrame);
             } else {
                 // Fallback: use first layer's frame if sync source framerate not available
                 auto layers = layerManager_->getLayers();
@@ -448,9 +460,9 @@ void VideoComposerApplication::updateLayers() {
                     if (layer->isReady()) {
                         FrameInfo info = layer->getFrameInfo();
                         if (info.framerate > 0.0) {
-                            std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
+                            std::string smpte = SMPTEUtils::frameToSmpteString(osdFrame, info.framerate);
                             osdManager_->setSMPTETimecode(smpte);
-                            osdManager_->setFrameNumber(syncFrame);
+                            osdManager_->setFrameNumber(osdFrame);
                         } else {
                             osdManager_->setSMPTETimecode("00:00:00:00");
                         }
@@ -591,28 +603,57 @@ void VideoComposerApplication::shutdown() {
     initialized_ = false;
 }
 
-void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync) {
+void VideoComposerApplication::configureMIDISyncSource(MIDISyncSource* midiSync,
+                                                       DisplayBackend* displayBackend) {
     if (!midiSync) {
         return;
     }
-    
+
     // Configure MIDI sync source from config
     bool verbose = config_->getBool("want_verbose", false);
     bool midiClkAdj = config_->getBool("midi_clkadj", false);
     double delay = config_->getDouble("delay", -1.0);
-    
+
     // Set configuration before connecting
     midiSync->setVerbose(verbose);
     midiSync->setClockAdjustment(midiClkAdj);
     midiSync->setDelay(delay);
+
+    // Display-pipeline latency compensation. Three-way decision:
+    //   1. CLI passed --output-latency-ms <N>  (operator override)  → use N, skip measurement.
+    //   2. CLI did not pass; backend is DRM    (auto)                 → measure on real surfaces.
+    //   3. CLI did not pass; backend is X11/headless                  → leave constructor default 33 ms.
+    int outputLatencyMs = config_->getInt("output_latency_ms", -1);
+    if (outputLatencyMs >= 0) {
+        midiSync->setDisplayLatencyMs(static_cast<long>(outputLatencyMs));
+        LOG_INFO << "DisplayLatency: applied = " << outputLatencyMs
+                 << "ms (operator override via --output-latency-ms)";
+        LOG_INFO << "MIDISyncSource: display latency compensation = "
+                 << outputLatencyMs << " ms";
+        return;
+    }
+
+    DRMBackend* drmBackend = dynamic_cast<DRMBackend*>(displayBackend);
+    if (!drmBackend) {
+        LOG_INFO << "DisplayLatency: backend is not DRM, skipping measurement (X11 / headless)";
+        LOG_INFO << "DisplayLatency: applied = 33ms (constructor default)";
+        return;
+    }
+
+    // 30 warmup + 120 sample = 2.0 s of visible aura pulse on a 60 Hz display,
+    // plus the orchestrator's own pre-fill (≤6 frames) and 1 s fade-out tail.
+    int measured = drmBackend->measureDisplayLatencyMs(30, 120, splash_.get());
+    midiSync->setDisplayLatencyMs(static_cast<long>(measured));
+    LOG_INFO << "MIDISyncSource: display latency compensation = " << measured << " ms";
 }
 
 bool VideoComposerApplication::initializeGlobalSyncSource() {
     // Always create and enable global MIDI sync source by default
     auto midiSync = std::make_unique<MIDISyncSource>();
     
-    // Configure MIDI sync source
-    configureMIDISyncSource(midiSync.get());
+    // Configure MIDI sync source (also runs the auto display-latency measurement
+    // when --output-latency-ms is unset and the backend is DRM)
+    configureMIDISyncSource(midiSync.get(), displayBackend_.get());
     
     // Get MIDI port (default: "-1" for autodetect, can be disabled with "none" or "off")
     std::string midiPort = config_->getString("midi_port", "-1");
@@ -819,16 +860,25 @@ void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std:
         props.width = info.width;
         props.height = info.height;
     }
+
 }
 
 bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, const std::string& filepath) {
+    // If a layer with this cueId already exists, reuse it instead of creating
+    // a duplicate (the old layer would be orphaned in layers_ but unreachable
+    // by cueId, leaking resources and wasting update cycles).
+    if (layerManager_->getLayerByCueId(cueId)) {
+        LOG_INFO << "Layer already exists for cue ID: " << cueId << ", reloading file";
+        return loadFileIntoLayer(cueId, filepath);
+    }
+
     // Create empty layer first (fast, non-blocking)
     auto layer = createEmptyLayer(cueId);
     if (!layer) {
         LOG_ERROR << "Failed to create empty layer";
         return false;
     }
-    
+
     // Add layer to manager with cue ID
     if (!layerManager_->addLayerWithId(cueId, std::move(layer))) {
         LOG_ERROR << "Failed to add layer with cue ID: " << cueId;
@@ -859,6 +909,71 @@ bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, con
     }
     
     LOG_INFO << "Created layer with file: " << filepath << " (cue ID: " << cueId << ")";
+    return true;
+}
+
+bool VideoComposerApplication::createSharedLayer(const std::string& layerId, const std::string& driverLayerId, const std::string& filepath) {
+    // Look up the driver layer
+    VideoLayer* driverLayer = layerManager_->getLayerByCueId(driverLayerId);
+
+    // Driver not ready (async load still in flight): create empty placeholder layer
+    // and register as pending. Will be set up when driver's onAsyncLoadComplete fires.
+    if (!driverLayer || !driverLayer->playback().hasInputSource()) {
+        // Reuse existing layer if present (from previous arm cycle's unload — layer kept but InputSource cleared)
+        if (!layerManager_->getLayerByCueId(layerId)) {
+            auto emptyLayer = createEmptyLayer(layerId);
+            if (emptyLayer) {
+                layerManager_->addLayerWithId(layerId, std::move(emptyLayer));
+            }
+        }
+        pendingSharedLayers_[driverLayerId].push_back({layerId, filepath});
+        LOG_INFO << "Driver " << driverLayerId << " not ready, deferred shared setup for " << layerId;
+        return true;
+    }
+
+    // Get shared InputSource and SyncSource from the driver
+    auto sharedInput = driverLayer->playback().getSharedInputSource();
+    auto sharedSync = driverLayer->playback().getSharedSyncSource();
+
+    // Mark the driver as such (first load_shared call marks it).
+    // Do NOT call setInputSource() — it resets playback state (pause, currentFrame=-1).
+    // The driver already has the correct InputSource from the normal /layer/load path.
+    if (!driverLayer->playback().isDecodeDriver()) {
+        driverLayer->playback().setDecodeDriver(true);
+        driverLayer->setUpdatePriority(0);
+    }
+
+    // Reuse existing layer or create new one
+    VideoLayer* secondary = layerManager_->getLayerByCueId(layerId);
+    if (!secondary) {
+        auto newLayer = createEmptyLayer(layerId);
+        if (!newLayer) {
+            LOG_ERROR << "Failed to create empty shared layer";
+            return false;
+        }
+        layerManager_->addLayerWithId(layerId, std::move(newLayer));
+        secondary = layerManager_->getLayerByCueId(layerId);
+    }
+
+    // Set shared InputSource (isShared=true, isDriver=false)
+    secondary->playback().setInputSource(sharedInput, true, false);
+
+    // Share the same SyncSource (FramerateConverterSyncSource)
+    if (sharedSync) {
+        secondary->playback().setSyncSource(sharedSync);
+    }
+
+    // Secondary gets updatePriority 1 (driver = 0) to ensure driver updates first
+    secondary->setUpdatePriority(1);
+
+    // Set layer properties from shared input source
+    if (secondary->isReady()) {
+        FrameInfo info = secondary->getFrameInfo();
+        secondary->properties().width = info.width;
+        secondary->properties().height = info.height;
+    }
+
+    LOG_INFO << "Created shared layer " << layerId << " (driver: " << driverLayerId << ")";
     return true;
 }
 
@@ -898,20 +1013,47 @@ bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const
     return true;
 }
 
+void VideoComposerApplication::resetAll() {
+    LOG_INFO << "Reset: removing all layers, cancelling loads, resetting master";
+
+    // Cancel all pending async loads
+    if (asyncVideoLoader_) {
+        asyncVideoLoader_->cancelAll();
+    }
+
+    // Clear pending shared layer registrations
+    pendingSharedLayers_.clear();
+
+    // Remove all layers (unique_ptr destructors close files, stop decode queues, free textures)
+    if (layerManager_) {
+        layerManager_->removeAllLayers();
+    }
+
+    // Reset master properties (position, scale, rotation, opacity, color, warp)
+    renderer().masterProperties().reset();
+
+    // Clear the >24h wrap accumulator on project reset. MtcReceiver keeps it in a
+    // process-global static; this long-running compositor would otherwise carry a
+    // stale +86_400_000 ms offset into the next project after a >24h run (the
+    // wire-driven reset can't catch a graceful reload's small backward delta).
+    // NOTE: the driver's pollFrame() static lastReportedFrame is intentionally
+    // NOT reset here — on the first full frame of the next project the large
+    // frameDiff correctly classifies a seek-to-0, which is the desired behaviour.
+    // (Plan 3a)
+    MtcReceiver::resetWrapOffset();
+}
+
 bool VideoComposerApplication::unloadFileFromLayer(const std::string& cueId) {
-    VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
-    if (!layer) {
+    // Clear any pending secondaries waiting for this driver
+    pendingSharedLayers_.erase(cueId);
+
+    // Fully remove the layer (triggers promoteDecodeDriver if this was a shared driver)
+    if (!layerManager_->removeLayerByCueId(cueId)) {
         LOG_WARNING << "Layer not found for cue ID: " << cueId;
         return false;
     }
-    
-    // Clear input source (unloads file but keeps layer)
-    layer->setInputSource(nullptr);
-    
-    // Clear sync source
-    layer->setSyncSource(nullptr);
-    
-    LOG_INFO << "Unloaded file from layer (cue ID: " << cueId << ")";
+
+    LOG_INFO << "Removed layer (cue ID: " << cueId << ")";
     return true;
 }
 
@@ -932,20 +1074,56 @@ void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, con
                                                    std::unique_ptr<InputSource> inputSource, bool success) {
     if (!success || !inputSource) {
         LOG_ERROR << "Async load failed for: " << filepath << " (cue ID: " << cueId << ")";
+        pendingSharedLayers_.erase(cueId);  // cleanup any pending secondaries
         return;
     }
-    
+
     // Get the layer for this cue ID
     VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
     if (!layer) {
         LOG_WARNING << "Layer no longer exists for cue ID: " << cueId;
+        pendingSharedLayers_.erase(cueId);
         return;
     }
-    
+
+    // If this layer is already a decode driver (deferred setup already ran from a
+    // previous async load), don't replace its InputSource.
+    if (layer->playback().isDecodeDriver()) {
+        LOG_INFO << "Async load complete but layer " << cueId
+                 << " is already decode driver — discarding stale InputSource";
+        return;
+    }
+
     // Setup layer with the loaded input source
     setupLayerWithInputSource(layer, std::move(inputSource));
-    
     LOG_INFO << "Async load complete: " << filepath << " (cue ID: " << cueId << ")";
+
+    // Resolve pending shared layers waiting for this driver
+    auto it = pendingSharedLayers_.find(cueId);
+    if (it != pendingSharedLayers_.end()) {
+        auto sharedInput = layer->playback().getSharedInputSource();
+        auto sharedSync = layer->playback().getSharedSyncSource();
+        layer->playback().setDecodeDriver(true);
+        layer->setUpdatePriority(0);
+
+        for (auto& pending : it->second) {
+            VideoLayer* secondary = layerManager_->getLayerByCueId(pending.layerId);
+            if (!secondary) {
+                LOG_WARNING << "Pending shared layer " << pending.layerId << " no longer exists — skipping";
+                continue;
+            }
+            secondary->playback().setInputSource(sharedInput, true, false);
+            if (sharedSync) secondary->playback().setSyncSource(sharedSync);
+            secondary->setUpdatePriority(1);
+            if (secondary->isReady()) {
+                FrameInfo info = secondary->getFrameInfo();
+                secondary->properties().width = info.width;
+                secondary->properties().height = info.height;
+            }
+            LOG_INFO << "Deferred shared setup complete: " << pending.layerId << " (driver: " << cueId << ")";
+        }
+        pendingSharedLayers_.erase(it);
+    }
 }
 
 } // namespace videocomposer

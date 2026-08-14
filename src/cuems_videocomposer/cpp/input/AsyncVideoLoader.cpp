@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -35,12 +34,14 @@
 #include "../display/DisplayBackend.h"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 
 namespace videocomposer {
 
 AsyncVideoLoader::AsyncVideoLoader()
     : config_(nullptr)
     , displayBackend_(nullptr)
+    , numWorkers_(4)
     , running_(false)
 {
 }
@@ -53,11 +54,23 @@ void AsyncVideoLoader::initialize(ConfigurationManager* config, DisplayBackend* 
     config_ = config;
     displayBackend_ = displayBackend;
 
-    // Start worker thread
+    // Warm the hardware-decoder cache on THIS thread, before any worker exists.
+    // The X11 and Wayland backends happen to probe during display init, but the DRM
+    // backend never does - so on a DRM/KMS host the first probe used to happen inside
+    // the worker pool, with several workers racing into it at once. Probing here makes
+    // the cache hot for every backend and keeps the probe single-threaded by
+    // construction (HardwareDecoder::detectAvailable() is also internally serialised).
+    HardwareDecoder::detectAvailable();
+
+    // Start worker thread pool (numWorkers_ threads run workerThread() concurrently)
     running_ = true;
-    workerThread_ = std::make_unique<std::thread>(&AsyncVideoLoader::workerThread, this);
-    
-    LOG_INFO << "AsyncVideoLoader: Worker thread started";
+    workers_.clear();
+    workers_.reserve(numWorkers_);
+    for (size_t i = 0; i < numWorkers_; ++i) {
+        workers_.emplace_back(&AsyncVideoLoader::workerThread, this);
+    }
+
+    LOG_INFO << "AsyncVideoLoader: " << numWorkers_ << " worker thread(s) started";
 }
 
 void AsyncVideoLoader::shutdown() {
@@ -65,15 +78,17 @@ void AsyncVideoLoader::shutdown() {
         return;
     }
 
-    // Signal thread to stop
+    // Signal all threads to stop and wake them up
     running_ = false;
     requestCond_.notify_all();
 
-    // Wait for thread to finish
-    if (workerThread_ && workerThread_->joinable()) {
-        workerThread_->join();
+    // Join all worker threads
+    for (auto& t : workers_) {
+        if (t.joinable()) {
+            t.join();
+        }
     }
-    workerThread_.reset();
+    workers_.clear();
 
     // Clear queues
     {
@@ -145,6 +160,27 @@ void AsyncVideoLoader::cancelLoad(const std::string& cueId) {
     std::lock_guard<std::mutex> lock(pendingMutex_);
     pendingCueIds_.erase(cueId);
     LOG_INFO << "AsyncVideoLoader: Cancelled load for cue: " << cueId;
+}
+
+void AsyncVideoLoader::cancelAll() {
+    // Drain request queue
+    {
+        std::lock_guard<std::mutex> lock(requestMutex_);
+        std::queue<LoadRequest> empty;
+        requestQueue_.swap(empty);
+    }
+    // Clear pending set
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        pendingCueIds_.clear();
+    }
+    // Drain result queue (discard completed but unconsumed results)
+    {
+        std::lock_guard<std::mutex> lock(resultMutex_);
+        std::queue<LoadResult> empty;
+        resultQueue_.swap(empty);
+    }
+    LOG_INFO << "AsyncVideoLoader: Cancelled all pending loads";
 }
 
 bool AsyncVideoLoader::isLoadPending(const std::string& cueId) const {

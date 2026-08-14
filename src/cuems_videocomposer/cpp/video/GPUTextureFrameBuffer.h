@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -169,6 +168,16 @@ private:
     bool isHAP_;                     // True if this is a HAP texture (DXT1/DXT5)
     bool ownsTexture_;               // True if this instance owns the texture (should delete on destruction)
     HapVariant hapVariant_;          // HAP variant (if isHAP_ is true)
+
+    // Per-frame upload state — used by uploadCompressedData/uploadUncompressedData
+    // to pick between glCompressed/TexImage2D (reallocates storage) and the Sub
+    // variant (data-only). Reallocating on every frame triggers GPU-side
+    // memory-management work + texture cache invalidations that stall the
+    // pipeline; the Sub variant skips all that. Reset to false in release().
+    bool hasStorage_ = false;        // True once storage has been allocated by an upload
+    int  storageWidth_ = 0;          // Width that storage was allocated at
+    int  storageHeight_ = 0;         // Height that storage was allocated at
+    GLenum storageFormat_ = 0;       // Format that storage was allocated with
 };
 
 } // namespace videocomposer

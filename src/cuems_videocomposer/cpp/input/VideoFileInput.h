@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -37,6 +36,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <deque>
+#include <sys/stat.h>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -101,7 +101,19 @@ public:
     void setNoIndex(bool noIndex) { noIndex_ = noIndex; }
     bool getNoIndex() const { return noIndex_; }
 
+    // Index path helpers (used by cuems-videoindexer CLI)
+    static std::string getIndexPath(const std::string& videoPath);
+    static bool isCacheValid(const std::string& videoPath);
+
     void setHardwareDecodePreference(HardwareDecodePreference preference) { hwPreference_ = preference; }
+
+    /**
+     * Enable/disable seamless loop pre-buffering in the async decode queue.
+     * Call this when the cue's loop mode changes (e.g. engine sends /loop 1).
+     * @param loop       true when the video is set to loop
+     * @param totalFrames total frame count of the loaded video
+     */
+    void setLoopMode(bool loop, int64_t totalFrames);
 
 #ifdef HAVE_VAAPI_INTEROP
     /**
@@ -109,12 +121,19 @@ public:
      * @param displayBackend DisplayBackend instance with VAAPI support
      */
     void setDisplayBackend(DisplayBackend* displayBackend);
-    
+
     /**
      * Check if zero-copy VAAPI decoding is available
      */
     bool hasVaapiZeroCopy() const;
 #endif
+
+    /**
+     * Pre-warm the VAAPI→EGL GPU pipeline by importing frame 0.
+     * Must be called from the GL thread (main thread) after file is loaded.
+     * Eliminates ~20ms first-frame latency from one-time driver setup.
+     */
+    void prewarmGPUPipeline();
 
 private:
     struct FrameIndex {
@@ -137,8 +156,12 @@ private:
     bool seekToFrame(int64_t frameNumber);
     bool seekByTimestamp(int64_t frameNumber);
     int64_t parsePTSFromFrame(AVFrame* frame);
-    bool transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer);
+    bool transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync = false);
     void cleanup();
+
+    // Index caching
+    bool loadCachedIndex();
+    void saveCachedIndex() const;
 
     // Media decoder module
     cuems_mediadecoder::MediaFileReader mediaReader_;

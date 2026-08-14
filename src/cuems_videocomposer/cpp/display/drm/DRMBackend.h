@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -58,6 +57,7 @@ class VirtualCanvas;
 class OutputBlitShader;
 class OutputSinkManager;
 class DisplayConfigurationManager;
+class StartupSplash;
 
 /**
  * DRMBackend - DRM/KMS display backend for direct rendering
@@ -95,6 +95,13 @@ public:
     bool getOnTop() const override;
     
     bool supportsMultiDisplay() const override { return true; }
+
+    /**
+     * Aggregate of DRMSurface::hasFatalModesetError across all surfaces.
+     * Returns true if any surface failed cold-boot verification + retry —
+     * the run loop must exit so systemd Restart=on-failure recovers.
+     */
+    bool hasFatalError() const override;
     
     void* getContext() override;
     void makeCurrent() override;
@@ -164,6 +171,7 @@ public:
      * Set resolution mode (override)
      */
     bool setResolutionMode(const std::string& mode) override;
+    void setResolutionExplicit(bool explicit_) { resolutionExplicit_ = explicit_; }
     
     /**
      * Save display configuration (override)
@@ -238,6 +246,29 @@ public:
      * Get total dropped frames across all outputs (frame pacing stats)
      */
     int64_t getTotalDroppedFrames() const;
+
+    /**
+     * Measure end-to-end display latency at startup.
+     *
+     * Drives `warmupFrames + sampleFrames` full-screen presents through the
+     * cue render path on every connected surface, measures the median
+     * submit→flip latency, and returns the max-across-surfaces total
+     * (swap_chain + 1 vsync scanout + 5 ms panel response) in ms.
+     *
+     * Returns the refresh-rate-derived 2 × vsync fallback (max across
+     * surfaces) on measurement failure; returns the constructor 33 ms
+     * default if no surfaces are available.
+     *
+     * @param warmupFrames frames to discard before sampling (covers
+     *                     setCrtc warmup + GBM swap-chain ramp)
+     * @param sampleFrames frames to capture for median + p95 stats
+     * @param splash       optional StartupSplash for the palette-pulse
+     *                     render path; nullptr falls back to a clear-only
+     *                     measurement (still full-screen / forces buffer
+     *                     rotation but skips the logo composite)
+     */
+    int measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
+                                StartupSplash* splash);
     
     /**
      * Configure output region in the virtual canvas
@@ -265,7 +296,20 @@ private:
     std::unique_ptr<DRMOutputManager> outputManager_;
     std::unique_ptr<DisplayConfigurationManager> configManager_;
     std::map<std::string, std::unique_ptr<DRMSurface>> surfaces_;  // key = output name
-    std::vector<std::string> outputOrder_;  // kernel enumeration order
+    std::vector<std::string> outputOrder_;     // kernel enumeration order (DDI hardware order)
+    std::vector<std::string> iterationOrder_;  // physical layout order: by display.conf canvas-x
+                                               // ascending, alphabetical fallback for outputs not
+                                               // covered or when display.conf is missing/invalid.
+                                               // Drives modeset, render, flip, and cleanup
+                                               // iteration so they happen in operator-intuitive
+                                               // left-to-right physical order.
+    bool regionsFromUserConfig_ = false;       // True when outputRegions_ reflects operator intent
+                                               // (display.conf load, configureOutputRegion edit,
+                                               // or autoConfigureOutputs). False when filled by
+                                               // buildOutputRegions auto-defaults — in which case
+                                               // the canvas-x values are kernel-order, not
+                                               // operator-chosen, and computeIterationOrder must
+                                               // ignore them and fall back to alphabetical.
     
     // Rendering - Legacy mode (per-output)
     std::unique_ptr<OpenGLRenderer> renderer_;
@@ -274,6 +318,7 @@ private:
     std::unique_ptr<MultiOutputRenderer> multiRenderer_;
     std::vector<OutputRegion> outputRegions_;
     bool useVirtualCanvas_ = true;  // Default to Virtual Canvas mode
+    bool resolutionExplicit_ = false;  // True when -r was explicitly passed
     
     // Atomic modesetting
     bool atomicPageFlip();  // Returns true if successful
@@ -318,6 +363,39 @@ private:
 
     // Get surface names sorted by physical CRTC position (left-to-right, top-to-bottom)
     std::vector<std::string> getSortedOutputNames() const;
+
+    // (Re)compute iterationOrder_ from outputRegions_ + surfaces_. Called after
+    // outputRegions_ is finalized (after openWindow finishes loading display.conf,
+    // and after configureOutputRegion / autoConfigureOutputs). Logs the resulting
+    // order so operators can see what's driving modeset/render iteration.
+    void computeIterationOrder();
+
+    // Sort outputRegions_ in place by canvasX ascending (name as tiebreak) so
+    // the vector is canonically left-to-right. Without this, MultiOutputRenderer
+    // (which iterates the vector by index) and other downstream paths that
+    // iterate outputRegions_ directly (rather than via orderedSurfaceNames())
+    // end up using kernel discovery order — e.g. HDMI-A-1 lands at index 1
+    // even when canvasX puts it on the right.
+    //
+    // Call sites that DO call this (anything that may set canvasX from a
+    // source other than monotonic-by-construction):
+    //   - openWindow() after the display.conf load swap
+    //   - configureOutputRegion(name, x, y, w, h) — first overload
+    //   - configureOutputRegion(name, OutputRegion) — second overload
+    //
+    // Call sites that intentionally do NOT (canvasX monotonic by construction;
+    // sort would be a no-op AND inviting it would mask the construction-order
+    // dependency some local logic relies on, e.g. blend zones in
+    // autoConfigureOutputs assume outputRegions_.back() is the physical
+    // predecessor):
+    //   - buildOutputRegions()
+    //   - autoConfigureOutputs()
+    void sortOutputRegionsByCanvas();
+
+    // Returns iterationOrder_ if populated, else falls back to alphabetical
+    // (std::map iteration order over surfaces_) so any iteration site is safe
+    // even if computeIterationOrder hasn't run yet.
+    std::vector<std::string> orderedSurfaceNames() const;
 };
 
 } // namespace videocomposer

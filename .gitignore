@@ -68,3 +68,9 @@ build/
 # cache and test files
 .cache/
 video_test_files/
+
+# mkdocs
+site/
+
+# phase-0 staging artefacts (MTC bias fix — not part of the repo)
+phase-0/

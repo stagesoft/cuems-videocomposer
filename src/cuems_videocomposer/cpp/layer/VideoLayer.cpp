@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -24,6 +23,8 @@
 #include "../utils/Logger.h"
 #include "../utils/SMPTEUtils.h"
 #include "../sync/MIDISyncSource.h"
+#include "../input/VideoFileInput.h"
+#include "../input/HAPVideoInput.h"
 #include <algorithm>
 #include <cmath>
 
@@ -60,6 +61,21 @@ void VideoLayer::setInputSource(std::unique_ptr<InputSource> input) {
     
     // Invalidate frame buffer cache
     frameBufferCacheValid_ = false;
+
+    // If wraparound was already enabled (OSC /loop arrived before the file
+    // finished loading), propagate it to the new input source now.
+    if (playback_.getWraparound() && playback_.isReady()) {
+        InputSource* src = playback_.getInputSource();
+        if (src) {
+            VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(src);
+            if (videoInput) {
+                FrameInfo info = src->getFrameInfo();
+                videoInput->setLoopMode(true, info.totalFrames);
+            } else if (HAPVideoInput* hapInput = dynamic_cast<HAPVideoInput*>(src)) {
+                hapInput->setLoopMode(true);
+            }
+        }
+    }
 }
 
 void VideoLayer::setSyncSource(std::unique_ptr<SyncSource> sync) {
@@ -92,8 +108,15 @@ void VideoLayer::update() {
     }
 
     // Update playback (polls sync source and loads frames)
+    int64_t frameBefore = playback_.getCurrentFrame();
     playback_.update();
-    
+
+    // Clear awaitingFrame once a fresh frame has been loaded after
+    // a 0→1 visibility transition (prevents stale frame flash).
+    if (display_.getProperties().awaitingFrame && playback_.getCurrentFrame() != frameBefore) {
+        display_.getProperties().awaitingFrame = false;
+    }
+
     // Check for playback end and handle looping/auto-unload
     if (playback_.checkPlaybackEnd()) {
         auto& props = properties();
@@ -234,6 +257,17 @@ double VideoLayer::getTimeScale() const {
 
 void VideoLayer::setWraparound(bool enabled) {
     playback_.setWraparound(enabled);
+
+    InputSource* src = playback_.getInputSource();
+    if (src) {
+        VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(src);
+        if (videoInput) {
+            FrameInfo info = src->getFrameInfo();
+            videoInput->setLoopMode(enabled, info.totalFrames);
+        } else if (HAPVideoInput* hapInput = dynamic_cast<HAPVideoInput*>(src)) {
+            hapInput->setLoopMode(enabled);
+        }
+    }
 }
 
 bool VideoLayer::getWraparound() const {

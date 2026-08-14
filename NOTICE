@@ -1,10 +1,11 @@
 CUEMS Video Composer
 
-Copyright (C) 2020-2026 Stage Lab Coop.
-Author: Ion Reguera <ion@stagelab.coop>
+SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
 
-This project is licensed under the GNU Lesser General Public License v3.0
-or later (LGPL-3.0-or-later).
+This project is licensed under the GNU General Public License v3.0
+or later (GPL-3.0-or-later).
 
 This project contains code derived from xjadeo:
 - xjadeo project: https://xjadeo.sourceforge.net/
@@ -14,5 +15,5 @@ Development has also been inspired by mpv:
 - mpv project: https://mpv.io/
 
 Third-party components may have their own licenses (for example,
-external/hap under MIT and NDI SDK under its proprietary license terms).
+external/hap under BSD and NDI SDK under its proprietary license terms).
 See debian/copyright for packaged attribution details.

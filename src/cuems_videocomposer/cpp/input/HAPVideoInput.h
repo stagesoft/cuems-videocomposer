@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -33,6 +32,7 @@
 
 #ifdef ENABLE_HAP_DIRECT
 #include "../hap/HapDecoder.h"
+#include "AsyncHapDecoder.h"
 #endif
 
 extern "C" {
@@ -86,6 +86,12 @@ public:
      */
     CodecType getHAPVariant() const;
 
+    /**
+     * Enable seamless loop wraparound on the async worker.
+     * No-op when ENABLE_HAP_DIRECT is off or the worker failed to initialize.
+     */
+    void setLoopMode(bool enabled);
+
 
 private:
     enum class HAPVariant {
@@ -106,6 +112,8 @@ private:
     // Direct HAP decoding methods (Vidvox SDK)
     bool decodeHapDirectToTexture(AVPacket* packet, GPUTextureFrameBuffer& textureBuffer);
     bool readRawPacket(int64_t frameNumber, AVPacket* packet);
+    // Render-thread GPU upload of a pre-decoded HAP frame from the async worker
+    bool uploadHapFrameToTexture(const HapDecodedFrame& qf, GPUTextureFrameBuffer& textureBuffer);
 #endif
     
     // FFmpeg fallback methods
@@ -141,6 +149,9 @@ private:
     // HAP direct decoding
     HapDecoder hapDecoder_;
     bool fallbackWarningShown_;
+    std::unique_ptr<AsyncHapDecoder> asyncHapDecoder_;
+    bool useAsyncHapDecode_ = false;
+    int asyncMissCount_ = 0;
 #endif
 };
 

@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -90,16 +89,25 @@ void SMPTEUtils::parseString(BCD* s, const std::string& val, double framerate) {
 }
 
 int64_t SMPTEUtils::toFrame(const BCD* s, double framerate) {
-    int frame = 0;
-    int sec = 0;
-    
+    // int64_t (not int): a >24h offset can exceed INT_MAX frames at high fps,
+    // and the positive-overflow term below scales with whole days. (Plan 3a M1)
+    int64_t frame = 0;
+    int64_t sec = 0;
+
     sec = ((((s->v[SMPTE_HOUR] * 60) + s->v[SMPTE_MIN]) * 60) + s->v[SMPTE_SEC]);
     if (s->v[SMPTE_OVERFLOW] < 0) {
         sec = 86400 - sec;
         sec *= -1;
+    } else if (s->v[SMPTE_OVERFLOW] > 0) {
+        // Positive overflow = timecode at/beyond 24h. FIX_SMPTE_OVERFLOW folds
+        // hours into v[SMPTE_OVERFLOW] at the 24h mark (e.g. "25:00:00:00" →
+        // overflow=1, hour=1), so the H/M/S fields only carry the sub-24h part.
+        // Without adding the whole-day term the offset truncates mod-24h and a
+        // >24h SMPTE-string seek lands a day early. (Plan 3a hardening)
+        sec += static_cast<int64_t>(s->v[SMPTE_OVERFLOW]) * 86400;
     }
-    
-    frame = static_cast<int>(std::floor(sec * std::ceil(framerate))) + s->v[SMPTE_FRAME];
+
+    frame = static_cast<int64_t>(std::floor(sec * std::ceil(framerate))) + s->v[SMPTE_FRAME];
     return frame;
 }
 

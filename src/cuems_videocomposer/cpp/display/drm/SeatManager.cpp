@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -37,10 +36,7 @@
 #include <libseat.h>
 #endif
 
-#ifndef HAVE_LIBSEAT
-// Fallback: use libdrm directly
 #include <xf86drm.h>
-#endif
 
 namespace videocomposer {
 
@@ -212,18 +208,53 @@ bool SeatManager::enableDevice(int fd) {
     if (!seat_) {
         return false;
     }
-    
-    // With libseat, devices opened via libseat_open_device() automatically
-    // have the right permissions. The seat itself is enabled when opened.
-    // We just need to verify the device is tracked.
+
     auto it = devices_.find(fd);
     if (it == devices_.end()) {
         LOG_ERROR << "SeatManager: Device fd=" << fd << " not tracked";
         return false;
     }
-    
-    LOG_INFO << "SeatManager: Device enabled (fd=" << fd << ", device_id=" << it->second.deviceId << ")";
-    return true;
+
+    // libseat opens the device with the right permissions, but DRM master is
+    // a separate kernel concept. Under seatd the seat itself holds master and
+    // passes us a usable fd via SCM_RIGHTS — modeset ioctls work, but a
+    // direct drmSetMaster from us returns EACCES because the kernel requires
+    // CAP_SYS_ADMIN for any process that wasn't the original master-acquirer
+    // (drm_master_check_perm). That EACCES is the EXPECTED outcome here, not
+    // an error: we're not master in the kernel sense, but the seat is, and
+    // modesetting works through the seat session.
+    //
+    // We still call drmSetMaster as a hygiene probe so the logs make the
+    // master state observable. The classification:
+    //   0      -> we have CAP_SYS_ADMIN (root build, dev tooling) and got
+    //             master directly. Log INFO.
+    //   EACCES -> libseat path holding master via the seat. Expected. DEBUG.
+    //   EBUSY  -> a foreign userspace process holds master. Real conflict.
+    //             Log ERROR and fail; modeset would fight with that process.
+    //   other  -> unknown; log ERROR and fail.
+    int sm_ret = drmSetMaster(fd);
+    int sm_errno = errno;
+    if (sm_ret == 0) {
+        LOG_INFO << "SeatManager: Acquired DRM master directly (fd=" << fd
+                 << ", device_id=" << it->second.deviceId << ")";
+        return true;
+    }
+    if (sm_errno == EACCES) {
+        LOG_DEBUG << "SeatManager: drmSetMaster returned EACCES (expected under"
+                  << " libseat; seat session holds master) fd=" << fd
+                  << " device_id=" << it->second.deviceId;
+        return true;
+    }
+    if (sm_errno == EBUSY) {
+        LOG_ERROR << "SeatManager: drmSetMaster=EBUSY — another userspace"
+                  << " process holds DRM master (fd=" << fd
+                  << ", device_id=" << it->second.deviceId << ")";
+        return false;
+    }
+    LOG_ERROR << "SeatManager: drmSetMaster failed (fd=" << fd
+              << ", device_id=" << it->second.deviceId
+              << "): " << strerror(sm_errno);
+    return false;
 #else
     // Fallback: try drmSetMaster()
     if (drmSetMaster(fd) != 0) {
@@ -260,6 +291,17 @@ void SeatManager::disableDevice(int fd) {
     } else {
         LOG_INFO << "SeatManager: Released DRM master (fd=" << fd << ", fallback mode)";
     }
+#endif
+}
+
+bool SeatManager::isDeviceTracked(int fd) const {
+    if (fd < 0) {
+        return false;
+    }
+#ifdef HAVE_LIBSEAT
+    return devices_.find(fd) != devices_.end();
+#else
+    return true;  // No tracking under fallback path; trust the fd.
 #endif
 }
 

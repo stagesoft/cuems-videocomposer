@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -26,6 +25,7 @@
 #include "SyncSource.h"
 #include "MIDIDriver.h"
 #include "MTCDecoder.h"
+#include <atomic>
 #include <string>
 #include <memory>
 #include <cstdint>
@@ -100,6 +100,25 @@ public:
      */
     bool wasFullFrameReceived() override;
     
+    /**
+     * Get MTC timecode position in ms, with display-pipeline latency
+     * compensation applied (returns wire-MTC + displayLatencyMs_ so the
+     * frame chosen at wall-clock T is the one visible at MTC = T).
+     */
+    long getTimeMs() const override;
+
+    /**
+     * Set the display-pipeline latency compensation in ms. Values outside
+     * [0, 200] are clamped. Thread-safe (atomic).
+     */
+    void setDisplayLatencyMs(long ms);
+
+    /**
+     * Get the display-pipeline latency compensation in ms.
+     * Thread-safe (atomic read).
+     */
+    long getDisplayLatencyMs() const override { return displayLatencyMs_.load(); }
+
 private:
     std::unique_ptr<MIDIDriver> driver_;
     MTCDecoder mtcDecoder_;
@@ -107,6 +126,7 @@ private:
     double framerate_;
     int64_t currentFrame_;
     bool connected_;
+    std::atomic<long> displayLatencyMs_;
 };
 
 } // namespace videocomposer

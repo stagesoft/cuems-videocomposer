@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -192,15 +191,15 @@ void MultiOutputRenderer::renderToCanvas(LayerManager* layerManager, OSDManager*
     // Get all layers sorted by z-order
     auto layers = layerManager->getLayersSortedByZOrder();
     
-    // Convert to const vector
-    std::vector<const VideoLayer*> constLayers;
-    constLayers.reserve(layers.size());
+    // Convert to const vector (reuse scratch buffer to avoid per-frame alloc)
+    constLayersScratch_.clear();
+    constLayersScratch_.reserve(layers.size());
     for (auto* layer : layers) {
-        constLayers.push_back(layer);
+        constLayersScratch_.push_back(layer);
     }
 
     // Composite all layers
-    renderer_->compositeLayers(constLayers);
+    renderer_->compositeLayers(constLayersScratch_);
     
     // Render OSD if available
     // TODO: OSD rendering to canvas
@@ -226,7 +225,6 @@ void MultiOutputRenderer::blitToOutputs() {
                 glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
                 glClear(GL_COLOR_BUFFER_BIT);
                 output.surface->swapBuffers();
-                output.surface->releaseCurrent();
             }
         }
     }
@@ -257,11 +255,15 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
     
     // Swap buffers
     output.surface->swapBuffers();
-    
+
     // NOTE: Page flips are now handled by DRMBackend for atomic modesetting support
     // This allows all outputs to flip on the same vsync for 60fps dual-output
-    
-    output.surface->releaseCurrent();
+    //
+    // Do NOT call releaseCurrent() here — on Intel Mesa with 3+ GBM surfaces,
+    // fully unbinding the EGL context between outputs (eglMakeCurrent with
+    // EGL_NO_SURFACE) can prevent the next makeCurrent from functioning
+    // correctly.  The next output's makeCurrent() implicitly unbinds the
+    // previous surface, which is both correct and avoids the driver issue.
 }
 
 

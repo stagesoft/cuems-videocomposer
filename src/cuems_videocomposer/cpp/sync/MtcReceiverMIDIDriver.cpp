@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -66,54 +65,42 @@ bool MtcReceiverMIDIDriver::open(const std::string& portId) {
             // Note: mtcreceiver automatically opens port 0 by default in constructor
             // This uses RtMidi which may not show up in aconnect the same way as ALSA Sequencer
             if (errorCount == 0) {
-                printf("MTC: Initializing mtcreceiver (RtMidi)...\n");
-                fflush(stdout);
+                LOG_INFO << "MTC: Initializing mtcreceiver (RtMidi)...";
             }
             
             // Create mtcreceiver with custom client name for aconnect -l
             // Use "cuems-videocomposer" to match ALSA Sequencer naming
             mtcReceiver_ = std::make_unique<MtcReceiver>(
-                RtMidi::LINUX_ALSA,
+                MTCRECV_DEFAULT_API,
                 "cuems-videocomposer",
                 100  // queueSizeLimit
             );
-            
+
+            // Enable network-tolerant MTC timeouts (for rtpmidid / MTC over network)
+            mtcReceiver_->setNetworkMode(true);
+
             errorFlag = false;
-            
+
             // mtcreceiver constructor opens port 0 automatically
-            printf("MTC: mtcreceiver initialized successfully, port opened\n");
-            printf("MTC: Note: RtMidi ports may not appear in 'aconnect' - use 'aconnect -l' to see ALSA Sequencer ports\n");
-            printf("MTC: Waiting for MIDI Time Code...\n");
-            fflush(stdout);
-            
-            if (verbose_) {
-                LOG_INFO << "MTC: mtcreceiver initialized successfully";
-                LOG_INFO << "MTC: Waiting for MIDI Time Code...";
-            }
-            
+            LOG_INFO << "MTC: mtcreceiver initialized successfully, port opened";
+            LOG_INFO << "MTC: Waiting for MIDI Time Code...";
+
             return true;
         } catch (const RtMidiError& error) {
             // Specific handling for RtMidi errors (like cuems-audioplayer)
             ++errorCount;
             if (errorCount < maxRetries) {
-                printf("MTC: DRIVER_ERROR caught %d times, retrying...\n", errorCount);
-                fflush(stdout);
-                if (verbose_) {
-                    LOG_WARNING << "MTC: DRIVER_ERROR caught " << errorCount << " times, retrying";
-                }
+                // Unconditional (was gated behind verbose_): a driver retry is
+                // a real warning and must reach `cuems-logs -e`.
+                LOG_WARNING << "MTC: DRIVER_ERROR caught " << errorCount << " times, retrying";
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             } else {
-                printf("MTC: ERROR - Failed to initialize mtcreceiver after %d retries: %s\n", 
-                       maxRetries, error.getMessage().c_str());
-                fflush(stdout);
                 LOG_ERROR << "Failed to initialize mtcreceiver after " << maxRetries << " retries: " << error.getMessage();
                 mtcReceiver_.reset();
                 return false;
             }
         } catch (const std::exception& e) {
             // Handle other exceptions
-            printf("MTC: ERROR - Failed to initialize mtcreceiver: %s\n", e.what());
-            fflush(stdout);
             LOG_ERROR << "Failed to initialize mtcreceiver: " << e.what();
             mtcReceiver_.reset();
             return false;
@@ -144,18 +131,17 @@ bool MtcReceiverMIDIDriver::isConnected() const {
 
 int64_t MtcReceiverMIDIDriver::pollFrame() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     if (!mtcReceiver_) {
         return -1;
     }
-    
+
     // Check if a full frame was just received
-    bool fullFrameReceived = MtcReceiver::wasLastUpdateFullFrame;
+    bool fullFrameReceived = MtcReceiver::wasLastUpdateFullFrame.load();
     
-    // Get current timecode frame directly (like xjadeo - discrete updates)
-    // xjadeo uses smpte_to_frame() which calculates: frame = f + fps * (s + 60*m + 3600*h)
-    // This matches xjadeo's approach: only update when complete timecode is received
-    // No incremental updates, no backwards jumps from mtcHead resets
+    // Read the current timecode frame (populated from mtcHead; the driver
+    // below interpolates sub-frame positions for smooth playback, unlike a
+    // pure xjadeo-style discrete-update reader).
     MtcFrame curFrame = MtcReceiver::getCurFrame();
     
     // For detecting resync vs seek: remember last frame we reported
@@ -204,16 +190,21 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     bool isSeekFullFrame = false;
     if (fullFrameReceived) {
         // Check if the full frame position matches where we expect to be
-        // Allow tolerance of 2 frames (accounts for MTC 8-quarter-frame delay)
+        // Allow tolerance of 5 frames: full-frame is exact but QF interpolation lags a constant ~3 frames (measured diff==3 every resync); 5 gives node01 rtpmidid jitter margin while staying far below any real seek.
+        // Not related to any implicit MTC bias — mtcreceiver returns
+        // raw wire-MTC post-Phase-2.
         int64_t frameDiff = std::abs(frame - lastReportedFrame);
-        if (lastReportedFrame < 0 || frameDiff > 2) {
+        if (lastReportedFrame < 0 || frameDiff > 5) {
             // Position jump or first full frame - this is a SEEK
             isSeekFullFrame = true;
-            printf("MTC: Full frame SEEK - frame=%lld (was %lld), timecode=%s\n", 
-                   (long long)frame, (long long)lastReportedFrame, curFrame.toString().c_str());
-            fflush(stdout);
+            // Gate the raw stdout print behind verbose_ (m3): this runs at vsync
+            // rate, and the 24h boundary / periodic resync would otherwise flood
+            // stdout. The LOG_INFO already carried the same info under verbose_.
             if (verbose_) {
-                LOG_INFO << "MTC: Full frame SEEK to frame " << frame 
+                printf("MTC: Full frame SEEK - frame=%lld (was %lld), timecode=%s\n",
+                       (long long)frame, (long long)lastReportedFrame, curFrame.toString().c_str());
+                fflush(stdout);
+                LOG_INFO << "MTC: Full frame SEEK to frame " << frame
                          << " (" << curFrame.toString() << ")";
             }
         } else {
@@ -231,7 +222,6 @@ int64_t MtcReceiverMIDIDriver::pollFrame() {
     
     // Update last reported frame
     lastReportedFrame = frame;
-    
     // Return frame even if not "running" - we have valid MTC data
     // The rolling state will be determined separately
     
@@ -278,7 +268,7 @@ bool MtcReceiverMIDIDriver::wasFullFrameReceived() {
     if (result) {
         lastFullFrameReceived_ = false;
         // Also reset the mtcreceiver flag so it doesn't trigger again
-        MtcReceiver::wasLastUpdateFullFrame = false;
+        MtcReceiver::wasLastUpdateFullFrame.store(false);
     }
     return result;
 }

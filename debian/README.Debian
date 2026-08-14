@@ -21,7 +21,7 @@ For NDI SDK compliance information, see:
 LICENSE COMPLIANCE
 ------------------
 This package complies with:
-- LGPL v3 for CUEMS Video Composer code
+- GPL v3 for CUEMS Video Composer code
 - NDI SDK License Agreement for bundled NDI SDK libraries
 
 See /usr/share/doc/cuems-videocomposer/copyright for full copyright information.

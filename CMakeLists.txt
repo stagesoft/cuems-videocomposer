@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+
 cmake_minimum_required(VERSION 3.10)
 project(cuems-videocomposer VERSION 0.1.1 LANGUAGES C CXX)
 
@@ -550,15 +554,34 @@ include_directories(${CMAKE_SOURCE_DIR}/external/stb)
 # cuems-mediadecoder includes (also propagated via PUBLIC interface)
 include_directories(${CMAKE_SOURCE_DIR}/src/cuems-mediadecoder/include)
 
-# Embed splash.png at build time (resources/splash.png -> generated/splash_png.h)
+# Embed splash.png at build time (resources/splash.png -> generated/splash_png.h).
+#
+# CUEMS_PROBE_SPLASH (default OFF): when ON, embed resources/probe-1080p.png
+# instead of the brand splash. Used for cold-boot mode-verification testing —
+# the probe image (red border, four colored corners, "1920x1080" label) makes
+# it visually unambiguous from a panel photograph whether the cold-boot
+# 1080p modeset actually landed at 1080p (PASS) or got pinned to the top-left
+# quadrant of a 4K signal (FAIL — i915 cold-boot race fired). The same
+# splash_png[] symbol is generated, so StartupSplash needs no code change.
+# Revert with -DCUEMS_PROBE_SPLASH=OFF and rebuild.
+option(CUEMS_PROBE_SPLASH "Embed cold-boot probe image instead of brand splash" OFF)
+
+if(CUEMS_PROBE_SPLASH)
+    set(_SPLASH_SOURCE ${CMAKE_SOURCE_DIR}/resources/probe-1080p.png)
+    add_compile_definitions(CUEMS_PROBE_SPLASH=1)
+    message(STATUS "CUEMS_PROBE_SPLASH=ON — embedding cold-boot probe image (resources/probe-1080p.png), splash extended to 60s")
+else()
+    set(_SPLASH_SOURCE ${CMAKE_SOURCE_DIR}/resources/splash.png)
+endif()
+
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/generated/splash_png.h
     COMMAND python3 ${CMAKE_SOURCE_DIR}/cmake/embed_splash.py
-        ${CMAKE_SOURCE_DIR}/resources/splash.png
+        ${_SPLASH_SOURCE}
         ${CMAKE_BINARY_DIR}/generated/splash_png.h
-    DEPENDS ${CMAKE_SOURCE_DIR}/resources/splash.png ${CMAKE_SOURCE_DIR}/cmake/embed_splash.py
-    COMMENT "Embedding splash.png into splash_png.h"
+    DEPENDS ${_SPLASH_SOURCE} ${CMAKE_SOURCE_DIR}/cmake/embed_splash.py
+    COMMENT "Embedding ${_SPLASH_SOURCE} into splash_png.h"
 )
 add_custom_target(splash_png_embed ALL DEPENDS ${CMAKE_BINARY_DIR}/generated/splash_png.h)
 include_directories(${CMAKE_BINARY_DIR}/generated)
@@ -609,6 +632,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
     src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
     src/cuems_videocomposer/cpp/input/AsyncDecodeQueue.cpp
+    src/cuems_videocomposer/cpp/input/AsyncHapDecoder.cpp
     src/cuems_videocomposer/cpp/input/AsyncVideoLoader.cpp
     src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
     src/cuems_videocomposer/cpp/input/LiveInputSource.cpp
@@ -765,6 +789,20 @@ add_definitions(-DHAVE_CUEMS_MEDIADECODER)
 if(ENABLE_MIDI AND RTMIDI_FOUND)
     add_subdirectory(src/mtcreceiver)
     add_definitions(-DHAVE_MTCRECEIVER)
+    # Arm the real CuemsLogger inside mtcreceiver, exactly like dmxplayer and
+    # audioplayer do. Without the define mtcreceiver compiles its fallback
+    # stub, whose namespace-scope inline getLogger() mangles IDENTICALLY to
+    # the real class-static CuemsLogger::getLogger(); once anything else in
+    # this binary pulls cuemslogger.a in (the Logger.h conversion does), the
+    # linker rebinds the stub's weak call sites to the real strong symbol —
+    # silent type confusion. Defining it everywhere keeps exactly one logger
+    # class in the whole binary.
+    target_compile_definitions(mtcreceiver PUBLIC HAVE_CUEMS_LOGGER)
+    # No target_link_libraries(mtcreceiver cuemslogger) here: linking a
+    # subdirectory target from the parent needs CMP0079 NEW (this project's
+    # cmake_minimum_required predates it). Not needed either — mtcreceiver.h
+    # reaches cuemslogger.h by relative include, and the final executable
+    # links cuemslogger below, which resolves mtcreceiver.a's references.
     # Add mtcreceiver driver adapter
     list(APPEND CPP_SOURCES
         src/cuems_videocomposer/cpp/sync/MtcReceiverMIDIDriver.cpp
@@ -822,6 +860,54 @@ if(NDI_FOUND)
     )
 endif()
 
+# ---------------------------------------------------------------------------
+# cuems-videoindexer -- lightweight CLI to pre-build .idx sidecar files
+# Only needs VideoFileInput + cuems-mediadecoder + FFmpeg (no display libs)
+# ---------------------------------------------------------------------------
+set(VIDEOINDEXER_SOURCES
+    src/cuems-videoindexer/main.cpp
+    src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
+    src/cuems_videocomposer/cpp/input/AsyncDecodeQueue.cpp
+    src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
+    src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
+    src/cuems_videocomposer/cpp/video/GPUTextureFrameBuffer.cpp
+    src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
+)
+
+# Mirror VAAPI interop inclusion from main executable
+if(VAAPI_FOUND AND EGL_FOUND AND DRM_FOUND)
+    list(APPEND VIDEOINDEXER_SOURCES
+        src/cuems_videocomposer/cpp/hwdec/VaapiInterop.cpp
+    )
+endif()
+
+add_executable(cuems-videoindexer ${VIDEOINDEXER_SOURCES})
+target_include_directories(cuems-videoindexer PRIVATE
+    src/cuems_videocomposer
+    src/cuems_videocomposer/cpp
+    ${CMAKE_SOURCE_DIR}/src/cuems-mediadecoder/include
+)
+target_link_libraries(cuems-videoindexer
+    cuems-mediadecoder
+    ${FFMPEG_LIBRARIES}
+    m
+    pthread
+)
+# Link OpenGL if available (GPUTextureFrameBuffer may reference GL symbols)
+if(PLATFORM_LINUX)
+    if(X11_FOUND)
+        target_link_libraries(cuems-videoindexer ${X11_LIBRARIES})
+    endif()
+    find_library(GL_LIBRARY_IDX GL)
+    if(GL_LIBRARY_IDX)
+        target_link_libraries(cuems-videoindexer ${GL_LIBRARY_IDX})
+    endif()
+    if(VAAPI_FOUND AND EGL_FOUND AND DRM_FOUND)
+        target_link_libraries(cuems-videoindexer ${EGL_LIBRARIES} ${VAAPI_LIBRARIES} ${DRM_LIBRARIES})
+    endif()
+endif()
+install(TARGETS cuems-videoindexer DESTINATION bin)
+
 # Create executable
 add_executable(cuems-videocomposer ${C_SOURCES} ${CPP_SOURCES})
 add_dependencies(cuems-videocomposer splash_png_embed)
@@ -838,17 +924,21 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestConfigurationManager.cpp
         src/cuems_videocomposer/cpp/test/TestIntegration.cpp
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
+        src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
+        src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
     )
     
     # C++ implementation files needed by tests
     set(TEST_CPP_SOURCES
         src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
+        src/cuems_videocomposer/cpp/display/drm/PresentationTiming.cpp
         src/cuems_videocomposer/cpp/layer/VideoLayer.cpp
         src/cuems_videocomposer/cpp/layer/LayerPlayback.cpp
         src/cuems_videocomposer/cpp/layer/LayerDisplay.cpp
         src/cuems_videocomposer/cpp/layer/LayerManager.cpp
         src/cuems_videocomposer/cpp/sync/MTCDecoder.cpp
         src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
+        src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
         src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
         src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
         src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
@@ -857,6 +947,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/display/CPUImageProcessor.cpp
         src/cuems_videocomposer/cpp/input/VideoFileInput.cpp
         src/cuems_videocomposer/cpp/input/AsyncDecodeQueue.cpp
+        src/cuems_videocomposer/cpp/input/AsyncHapDecoder.cpp
         src/cuems_videocomposer/cpp/input/AsyncVideoLoader.cpp
         src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
         src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
@@ -1014,12 +1105,23 @@ target_link_libraries(cuems-videocomposer
 target_link_libraries(cuems-videocomposer cuems-mediadecoder)
 # Include directories are automatically added via PUBLIC interface of cuems-mediadecoder
 
-# Link mtcreceiver and cuemslogger if available
+# CuemsLogger for the main binary (always: its add_subdirectory above is
+# unconditional). Routes utils/Logger.h's five emit bodies through syslog
+# under systemd, so LOG_ERROR/LOG_WARNING carry a real journal PRIORITY
+# instead of the flat 6 that stdout lines get. Deliberately NOT gated on
+# ENABLE_MIDI — utils/Logger.h is included nearly everywhere, so gating the
+# include dir would break an ENABLE_MIDI=OFF build that compiles fine today.
+# Per-target on purpose: cuems-videoindexer and the test binaries keep the
+# plain-stream fallback and never link cuemslogger.
+target_compile_definitions(cuems-videocomposer PRIVATE HAVE_CUEMS_LOGGER)
+target_link_libraries(cuems-videocomposer cuemslogger)
+target_include_directories(cuems-videocomposer PRIVATE src/cuemslogger)
+
+# Link mtcreceiver if available
 if(ENABLE_MIDI AND RTMIDI_FOUND)
-    target_link_libraries(cuems-videocomposer mtcreceiver cuemslogger)
+    target_link_libraries(cuems-videocomposer mtcreceiver)
     target_include_directories(cuems-videocomposer PRIVATE
         src/mtcreceiver
-        src/cuemslogger
         ${RTMIDI_INCLUDE_DIRS}
     )
 endif()

@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -29,6 +28,7 @@
 #include <queue>
 #include <mutex>
 #include <thread>
+#include <vector>
 #include <condition_variable>
 #include <functional>
 #include <atomic>
@@ -89,6 +89,13 @@ public:
     void cancelLoad(const std::string& cueId);
 
     /**
+     * Cancel all pending and queued loads (atomic reset for project load)
+     * In-flight loads will complete but their callbacks will find no matching
+     * layer and be harmlessly discarded.
+     */
+    void cancelAll();
+
+    /**
      * Check if a load is pending for a cue ID
      * @param cueId Cue ID to check
      * @return true if load is pending
@@ -132,8 +139,9 @@ private:
     ConfigurationManager* config_;
     DisplayBackend* displayBackend_;
 
-    // Threading
-    std::unique_ptr<std::thread> workerThread_;
+    // Threading – pool of worker threads (default: 2, so two videos load in parallel)
+    std::vector<std::thread> workers_;
+    size_t numWorkers_;
     std::atomic<bool> running_;
 
     // Request queue (protected by mutex)

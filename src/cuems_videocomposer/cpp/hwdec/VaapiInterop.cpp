@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -305,11 +304,17 @@ bool VaapiInterop::importFrame(AVFrame* vaapiFrame,
     // NOTE: Post-export sync removed - pre-export sync is sufficient
     // EGL image import provides implicit synchronization
     
+    // desc reports the coded/aligned surface size (e.g. 1088 for 1080p);
+    // rows beyond the frame's display height are uninitialized decoder
+    // padding that renders bright green (NV12 zeros). Clamp so the EGL
+    // images never expose them.
     width = desc.width;
     height = desc.height;
+    if (vaapiFrame->width > 0 && vaapiFrame->width < width) width = vaapiFrame->width;
+    if (vaapiFrame->height > 0 && vaapiFrame->height < height) height = vaapiFrame->height;
     frameWidth_ = width;
     frameHeight_ = height;
-    
+
     // Verify we have NV12 format (expected from VAAPI H.264 decoding)
     if (desc.fourcc != VA_FOURCC_NV12 && desc.fourcc != VA_FOURCC('N','V','1','2')) {
         LOG_WARNING << "VaapiInterop: Unexpected fourcc: " << std::hex << desc.fourcc 
@@ -411,7 +416,7 @@ bool VaapiInterop::importFrame(AVFrame* vaapiFrame,
     return true;
 }
 
-bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height) {
+bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height, bool skipSync) {
     // Create EGL images only - do NOT bind textures here
     // The caller should call bindTexturesToImages() from the GL thread
     
@@ -460,15 +465,12 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
         }
     }
     
-    // CRITICAL: Release any existing frame BEFORE importing new one
-    // This is necessary when multiple layers share the same VaapiInterop instance
-    // Each layer may try to import a frame before the previous layer's frame is released
-    // Releasing here ensures we don't have multiple frames in flight
-    if (currentFrame_->buf[0]) {
-        // Release the previous frame's resources (but keep EGL images/textures for now)
-        // They will be cleaned up in bindTexturesToImages() after new textures are bound
-        av_frame_unref(currentFrame_);
-    }
+    // CRITICAL: Release any existing frame BEFORE importing new one.
+    // av_frame_unref is safe to call on an empty/zeroed frame (it's a no-op).
+    // The old check `if (currentFrame_->buf[0])` was insufficient: FFmpeg 5.x+ av_frame_ref
+    // returns EINVAL if dst has any non-zero fields (width, height, format) even with buf[0]==NULL,
+    // which can occur after a partial previous ref attempt. Unconditional unref is the correct fix.
+    av_frame_unref(currentFrame_);
     
     // Get VAAPI device context from frame
     AVHWFramesContext* hwFramesCtx = (AVHWFramesContext*)vaapiFrame->hw_frames_ctx->data;
@@ -489,37 +491,46 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     VADRMPRIMESurfaceDescriptor desc;
     memset(&desc, 0, sizeof(desc));
     
-    // CRITICAL: Sync BEFORE export to ensure decode is complete
-    VAStatus syncStatus = vaSyncSurface(vaDisplay, surface);
-    if (syncStatus != VA_STATUS_SUCCESS) {
-        LOG_WARNING << "VaapiInterop: vaSyncSurface (pre-export) failed: " << syncStatus;
+    // Sync BEFORE export to ensure decode is complete.
+    // Skip if caller guarantees the surface is already synced (e.g. from async decode queue).
+    if (!skipSync) {
+        VAStatus syncStatus = vaSyncSurface(vaDisplay, surface);
+        if (syncStatus != VA_STATUS_SUCCESS) {
+            LOG_WARNING << "VaapiInterop: vaSyncSurface (pre-export) failed: " << syncStatus;
+        }
     }
-    
+
     VAStatus vaStatus = vaExportSurfaceHandle(
         vaDisplay, surface,
         VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
         VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
         &desc);
-    
+
     if (vaStatus != VA_STATUS_SUCCESS) {
         LOG_ERROR << "VaapiInterop: vaExportSurfaceHandle failed: " << vaStatus;
         return false;
     }
-    
+
     // NOTE: Post-export sync removed - pre-export sync is sufficient
     // mpv only syncs once before export, not after
     // The EGL image import provides implicit synchronization
-    
+
+    // desc reports the coded/aligned surface size (e.g. 1088 for 1080p);
+    // rows beyond the frame's display height are uninitialized decoder
+    // padding that renders bright green (NV12 zeros). Clamp so the EGL
+    // images never expose them.
     width = desc.width;
     height = desc.height;
-    
+    if (vaapiFrame->width > 0 && vaapiFrame->width < width) width = vaapiFrame->width;
+    if (vaapiFrame->height > 0 && vaapiFrame->height < height) height = vaapiFrame->height;
+
     // DEBUG: Read back VAAPI surface to verify decoded content
     if (debugSurfaceReadbackEnabled_) {
         debugReadbackVaapiSurface(surface, vaDisplay, width, height);
     }
     frameWidth_ = width;
     frameHeight_ = height;
-    
+
     // Extract plane info (same logic as importFrame)
     int yObjectIdx, uvObjectIdx;
     uint32_t yOffset, uvOffset, yPitch, uvPitch;
@@ -611,6 +622,7 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height)
     // CRITICAL: Clone the new frame to currentFrame_ (increment ref count)
     // This keeps the VAAPI surface alive while we use its EGL images
     // We do this AFTER all validation and EGL image creation succeeds
+
     int ret = av_frame_ref(currentFrame_, vaapiFrame);
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -818,7 +830,7 @@ bool VaapiInterop::bindTexturesToImages(GLuint& texY, GLuint& texUV) {
     // Return NEW texture IDs
     texY = textureY_;
     texUV = textureUV_;
-    
+
     return true;
 }
 

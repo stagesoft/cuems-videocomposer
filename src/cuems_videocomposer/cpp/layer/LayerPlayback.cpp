@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -24,6 +23,7 @@
 #include "../utils/Logger.h"
 #include "../utils/SMPTEUtils.h"
 #include "../sync/SyncSource.h"
+#include "../sync/FramerateConverterSyncSource.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/VideoFileInput.h"
 #include <algorithm>
@@ -58,12 +58,29 @@ LayerPlayback::~LayerPlayback() {
 void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
     pause();
     inputSource_ = std::move(input);
+    isSharedLayer_ = false;
+    isDecodeDriver_ = false;
+    currentFrame_ = -1;
+    lastSyncFrame_ = -1;
+    frameOnGPU_ = false;
+}
+
+void LayerPlayback::setInputSource(std::shared_ptr<InputSource> input, bool isShared, bool isDriver) {
+    pause();
+    inputSource_ = std::move(input);
+    isSharedLayer_ = isShared;
+    isDecodeDriver_ = isDriver;
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
     frameOnGPU_ = false;
 }
 
 void LayerPlayback::setSyncSource(std::unique_ptr<SyncSource> sync) {
+    syncSource_ = std::move(sync);
+    lastSyncFrame_ = -1;
+}
+
+void LayerPlayback::setSyncSource(std::shared_ptr<SyncSource> sync) {
     syncSource_ = std::move(sync);
     lastSyncFrame_ = -1;
 }
@@ -124,9 +141,21 @@ void LayerPlayback::updateFromSyncSource() {
 
     // NOTE: These were previously static variables shared across ALL layers (bug!)
     // Now they are instance variables, each layer has its own state
-    
+
     uint8_t rolling = 0;
-    int64_t syncFrame = syncSource_->pollFrame(&rolling);
+    int64_t syncFrame;
+    if (isSharedLayer_ && !isDecodeDriver_) {
+        // Secondary shared layer: read cached smoothed frame from driver's last pollFrame()
+        syncFrame = syncSource_->getCurrentFrame();
+        // Read cached rolling state from driver's last pollFrame()
+        auto* frcSync = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
+        if (frcSync) {
+            rolling = frcSync->getCurrentRolling() ? 1 : 0;
+        }
+    } else {
+        // Driver or non-shared layer: advance the cadence smoother
+        syncFrame = syncSource_->pollFrame(&rolling);
+    }
     
     // Debug: log frame and rolling state periodically
     debugCounter_++;
@@ -173,28 +202,33 @@ void LayerPlayback::updateFromSyncSource() {
         playing_ = false;
     }
     
-    // Log MTC timecode periodically (every 30 frames or when frame changes significantly)
+    // Log MTC timecode periodically (every 30 frames or when frame changes significantly).
+    // Both branches at DEBUG: with MTC rolling this fired ~13k times/day into the
+    // journal at the default level — steady-state position is diagnostics, not
+    // operations. Raise the level when actually chasing sync.
     if (syncFrame >= 0 && rolling != 0) {
         if (lastLoggedFrame_ < 0 || std::abs(syncFrame - lastLoggedFrame_) >= 30) {
             // Format timecode for display
             FrameInfo info = getFrameInfo();
             if (info.framerate > 0.0) {
                 std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
-                LOG_INFO << "MTC: " << smpte << " (frame " << syncFrame << ", rolling)";
+                LOG_DEBUG << "MTC: " << smpte << " (frame " << syncFrame << ", rolling)";
             } else {
-                LOG_INFO << "MTC: frame " << syncFrame << " (rolling)";
+                LOG_DEBUG << "MTC: frame " << syncFrame << " (rolling)";
             }
             lastLoggedFrame_ = syncFrame;
         }
     } else if (syncFrame >= 0 && rolling == 0) {
-        // Log when we have a frame but not rolling (stopped)
-        if (lastLoggedFrame_ != syncFrame) {
+        // Log when we have a frame but not rolling (stopped). Same >=30 frame
+        // throttle as the rolling branch — the bare frame-changed gate fired
+        // once per MTC position update.
+        if (lastLoggedFrame_ < 0 || std::abs(syncFrame - lastLoggedFrame_) >= 30) {
             FrameInfo info = getFrameInfo();
             if (info.framerate > 0.0) {
                 std::string smpte = SMPTEUtils::frameToSmpteString(syncFrame, info.framerate);
-                LOG_INFO << "MTC: " << smpte << " (frame " << syncFrame << ", stopped)";
+                LOG_DEBUG << "MTC: " << smpte << " (frame " << syncFrame << ", stopped)";
             } else {
-                LOG_INFO << "MTC: frame " << syncFrame << " (stopped)";
+                LOG_DEBUG << "MTC: frame " << syncFrame << " (stopped)";
             }
             lastLoggedFrame_ = syncFrame;
         }
@@ -202,10 +236,21 @@ void LayerPlayback::updateFromSyncSource() {
     
     // Process frame updates only if we have a valid frame
     if (syncFrame >= 0) {
-        // Apply time-scaling: multiply by timescale, then add offset
-        // Note: Framerate conversion is handled by FramerateConverterSyncSource wrapper
-        // LayerPlayback doesn't need to know about framerate conversion
-        int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + timeOffset_;
+        // Apply time-scaling: multiply by timescale, then add offset.
+        // syncFrame is already in video fps (converted by FramerateConverterSyncSource).
+        // timeOffset_ arrives from the engine in MTC fps (always 25fps), so convert
+        // it to video fps using the same ratio the sync source uses for frames.
+        int64_t convertedOffset = timeOffset_;
+        auto* converter = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
+        if (converter && timeOffset_ != 0) {
+            double srcFps = converter->getSourceFramerate();
+            double dstFps = converter->getFramerate();
+            if (srcFps > 0 && dstFps > 0 && std::abs(srcFps - dstFps) > 0.01) {
+                convertedOffset = static_cast<int64_t>(std::floor(
+                    static_cast<double>(timeOffset_) * dstFps / srcFps));
+            }
+        }
+        int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + convertedOffset;
         
         // Clamp frame to valid range (no automatic wrapping - use loop instead)
         if (inputSource_) {
@@ -213,22 +258,24 @@ void LayerPlayback::updateFromSyncSource() {
             int64_t totalFrames = info.totalFrames;
             
             if (totalFrames > 0) {
-                // Clamp to valid range instead of wrapping
-                // Only log once to avoid flooding output
                 if (adjustedFrame >= totalFrames) {
-                    if (!loggedExceededDuration_) {
-                        LOG_INFO << "Frame " << adjustedFrame << " exceeds video duration (" << totalFrames << "), clamping to " << (totalFrames - 1) << " (will not log again)";
-                        loggedExceededDuration_ = true;
+                    if (wraparound_) {
+                        // Loop mode: wrap via modulo so the decode queue pre-buffers
+                        // frame 0 seamlessly before the engine offset command arrives.
+                        adjustedFrame = adjustedFrame % totalFrames;
+                    } else {
+                        // Non-loop mode: hold the last frame until MTC stops.
+                        adjustedFrame = totalFrames - 1;
                     }
-                    adjustedFrame = totalFrames - 1;
                 } else if (adjustedFrame < 0) {
-                    LOG_VERBOSE << "Frame " << adjustedFrame << " is negative, clamping to 0";
-                    adjustedFrame = 0;
-                    loggedExceededDuration_ = false; // Reset since we're back in valid range
-                } else {
-                    // Frame is in valid range, reset the flag
-                    loggedExceededDuration_ = false;
+                    if (wraparound_) {
+                        adjustedFrame = totalFrames - ((-adjustedFrame) % totalFrames);
+                        if (adjustedFrame == totalFrames) adjustedFrame = 0;
+                    } else {
+                        adjustedFrame = 0;
+                    }
                 }
+                loggedExceededDuration_ = (adjustedFrame == 0);
             }
         }
         
@@ -250,13 +297,12 @@ void LayerPlayback::updateFromSyncSource() {
         if (adjustedFrame != lastSyncFrame_ || fullFrameReceived) {
             vsyncCount_++;
             
-            if (fullFrameReceived) {
+            if (fullFrameReceived && !(isSharedLayer_ && !isDecodeDriver_)) {
                 // Full frame received - force a seek first, then load
-                // This ensures we jump to the exact position even if frame number is same
-                // Reset seek state to bypass codec optimizations (needed for H264 with indexing)
+                // (Shared secondaries skip: seeking would corrupt driver's decoder)
                 LOG_VERBOSE << "MTC: Full frame - forcing seek to frame " << adjustedFrame;
                 if (inputSource_) {
-                    inputSource_->resetSeekState();  // Force actual seek even if same frame
+                    inputSource_->resetSeekState();
                 }
                 if (inputSource_ && inputSource_->seek(adjustedFrame)) {
                     if (loadFrame(adjustedFrame)) {
@@ -282,6 +328,8 @@ void LayerPlayback::updateFromSyncSource() {
                 }
                 lastFrameChangeVsync_ = vsyncCount_;
                 lastVideoFrame_ = adjustedFrame;
+            } else if (isSharedLayer_ && !isDecodeDriver_) {
+                // Shared secondary: cache not ready yet — skip seek (would corrupt driver's decoder)
             } else {
                 // If load fails, try seeking first (helps with keyframe-based codecs)
                 LOG_WARNING << "Failed to load frame " << adjustedFrame << ", trying seek first";
@@ -320,12 +368,18 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         return false;
     }
 
+    // --- Secondary shared layer: read from driver cache ---
+    if (isSharedLayer_ && !isDecodeDriver_) {
+        return copyFromDriverCache(frameNumber);
+    }
+
     // Check if this is a live stream (NDI, V4L2, RTSP, etc.)
     if (inputSource_->isLiveStream()) {
         // Live streams: get latest available frame (ignore frameNumber)
         // The async buffer in LiveInputSource keeps frames ready
         if (inputSource_->readLatestFrame(cpuFrameBuffer_)) {
             frameOnGPU_ = false;
+            if (isDecodeDriver_) inputSource_->setCachedFrame(-1, cpuFrameBuffer_);
             return true;
         }
         return false;
@@ -338,6 +392,7 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         // HAP with direct texture upload: decode directly to compressed DXT GPU texture
         if (hapInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
             frameOnGPU_ = true;
+            if (isDecodeDriver_) inputSource_->setCachedFrame(frameNumber, gpuFrameBuffer_);
             return true;
         }
         // If direct upload fails, fall through to FFmpeg fallback (handled in readFrameToTexture)
@@ -347,21 +402,22 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
         // HAP without direct upload: decode to CPU buffer as RGBA (FFmpeg fallback)
         if (hapInput->readFrame(frameNumber, cpuFrameBuffer_)) {
             frameOnGPU_ = false;
+            if (isDecodeDriver_) inputSource_->setCachedFrame(frameNumber, cpuFrameBuffer_);
             return true;
         }
         return false;
 #endif
     }
-    
+
     bool success = false;
     static bool loggedBackend = false;  // Log decode backend once
-    
+
     // Check if this is VideoFileInput with hardware decoding
     VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(inputSource_.get());
     if (videoInput) {
         // Check if hardware decoding is available and should be used
         InputSource::DecodeBackend backend = videoInput->getOptimalBackend();
-        
+
         // Log the decode backend once at startup
         if (!loggedBackend) {
             if (backend == InputSource::DecodeBackend::GPU_HARDWARE) {
@@ -371,7 +427,7 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
             }
             loggedBackend = true;
         }
-        
+
         if (backend == InputSource::DecodeBackend::GPU_HARDWARE) {
             // Hardware decoding: decode directly to GPU texture
             if (videoInput->readFrameToTexture(frameNumber, gpuFrameBuffer_)) {
@@ -382,7 +438,7 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
                 LOG_WARNING << "Hardware decoding failed for frame " << frameNumber << ", falling back to software";
             }
         }
-        
+
         if (!success) {
             // Software decoding: use CPU frame buffer
             if (videoInput->readFrame(frameNumber, cpuFrameBuffer_)) {
@@ -397,8 +453,40 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
             success = true;
         }
     }
-    
+
+    // Populate cache for shared secondaries (all non-HAP, non-live paths)
+    if (success && isDecodeDriver_) {
+        if (frameOnGPU_)
+            inputSource_->setCachedFrame(frameNumber, gpuFrameBuffer_);
+        else
+            inputSource_->setCachedFrame(frameNumber, cpuFrameBuffer_);
+    }
+
     return success;
+}
+
+bool LayerPlayback::copyFromDriverCache(int64_t frameNumber) {
+    if (!inputSource_->hasCachedFrame()) return false;  // Driver hasn't decoded anything yet
+
+    int64_t cachedNum = inputSource_->getCachedFrameNumber();
+    // For live sources cachedNum == -1 (no meaningful frame number) — don't warn
+    if (cachedNum >= 0 && cachedNum != frameNumber) {
+        LOG_DEBUG << "Shared layer frame mismatch: requested " << frameNumber
+                  << ", driver cached " << cachedNum << " (timeOffset divergence?)";
+    }
+
+    if (inputSource_->isCachedOnGPU()) {
+        auto* cached = inputSource_->getCachedGPUTexture();
+        if (!cached) return false;
+        gpuFrameBuffer_ = *cached;  // non-owning copy (ownsTexture_=false via copy ctor)
+        frameOnGPU_ = true;
+    } else {
+        auto* cached = inputSource_->getCachedCPUFrame();
+        if (!cached) return false;
+        cpuFrameBuffer_.copyFrom(*cached);  // non-owning shallow copy (pointer + metadata, NOT pixels)
+        frameOnGPU_ = false;
+    }
+    return true;
 }
 
 bool LayerPlayback::getFrameBuffer(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const {

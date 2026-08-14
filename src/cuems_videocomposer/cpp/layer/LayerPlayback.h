@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -49,12 +48,24 @@ public:
     LayerPlayback();
     ~LayerPlayback();
 
-    // Set input and sync sources
+    // Set input and sync sources (non-shared — converts to shared_ptr internally)
     void setInputSource(std::unique_ptr<InputSource> input);
     void setSyncSource(std::unique_ptr<SyncSource> sync);
-    
+
+    // Set input and sync sources (shared — for shared decoder layers)
+    void setInputSource(std::shared_ptr<InputSource> input, bool isShared, bool isDriver);
+    void setSyncSource(std::shared_ptr<SyncSource> sync);
+
     InputSource* getInputSource() const { return inputSource_.get(); }
     SyncSource* getSyncSource() const { return syncSource_.get(); }
+    std::shared_ptr<InputSource> getSharedInputSource() const { return inputSource_; }
+    std::shared_ptr<SyncSource> getSharedSyncSource() const { return syncSource_; }
+    bool hasInputSource() const { return inputSource_ != nullptr; }
+
+    // Shared decoder flags
+    bool isSharedLayer() const { return isSharedLayer_; }
+    bool isDecodeDriver() const { return isDecodeDriver_; }
+    void setDecodeDriver(bool v) { isDecodeDriver_ = v; }
 
     // Playback control
     bool play();
@@ -104,8 +115,12 @@ public:
     bool checkPlaybackEnd() const;
 
 private:
-    std::unique_ptr<InputSource> inputSource_;
-    std::unique_ptr<SyncSource> syncSource_;
+    std::shared_ptr<InputSource> inputSource_;
+    std::shared_ptr<SyncSource> syncSource_;
+
+    // Shared decoder flags (NOT derived from use_count — explicit)
+    bool isSharedLayer_ = false;   // true when sharing an InputSource with other layers
+    bool isDecodeDriver_ = false;  // true when this layer drives decode (calls readFrame/readFrameToTexture)
     
     // Playback state
     bool playing_;
@@ -114,7 +129,9 @@ private:
     int64_t timeOffset_;  // Time offset applied to sync frames
     double timeScale_;    // Time multiplier (default: 1.0)
     bool wraparound_;     // Enable wrap-around/loop (seeks to 0 when playback ends)
-    bool mtcFollow_;      // Enable/disable MTC following (default: true)
+    bool mtcFollow_;      // Enable/disable MTC following. Default FALSE: a layer
+                          // ignores its sync source until the engine sends
+                          // /mtcfollow 1 at the cue's start (see 0499270).
     
     // MTC sync state (per-layer, not static!)
     bool wasRolling_;        // Previous rolling state for change detection
@@ -135,6 +152,7 @@ private:
     // Internal methods
     void updateFromSyncSource();
     bool loadFrame(int64_t frameNumber);
+    bool copyFromDriverCache(int64_t frameNumber);  // For shared secondary layers
 };
 
 } // namespace videocomposer

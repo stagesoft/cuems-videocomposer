@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -155,6 +154,7 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerLayerCommand("panorama", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerPanorama(layer, args);
     });
+    // Debug-only: hot-swap file on an existing layer. Not used by engine cue lifecycle.
     registerLayerCommand("file", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerFile(layer, args);
     });
@@ -267,6 +267,12 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerAppCommand("master/corner4", [this](const std::vector<std::string>& args) {
         return handleMasterCorner4(args);
     });
+    registerAppCommand("reset", [this](const std::vector<std::string>& args) {
+        if (!app_) return false;
+        app_->resetAll();
+        return true;
+    });
+
     registerAppCommand("master/reset", [this](const std::vector<std::string>& args) {
         return handleMasterReset(args);
     });
@@ -375,10 +381,13 @@ bool RemoteCommandRouter::routeCommand(const std::string& path, const std::vecto
     if (cleanPath.find("layer/") == 0) {
         std::string remaining = cleanPath.substr(6); // Remove "layer/"
         
-        // Check for special commands: load, unload
+        // Check for special commands: load, load_shared, unload
         if (remaining == "load") {
             // /videocomposer/layer/load s s (filepath, cueId)
             return handleLayerLoad(args);
+        } else if (remaining == "load_shared") {
+            // /videocomposer/layer/load_shared s s s (filepath, layerId, driverLayerId)
+            return handleLayerLoadShared(args);
         } else if (remaining == "unload") {
             // /videocomposer/layer/unload s (cueId)
             return handleLayerUnload(args);
@@ -640,6 +649,12 @@ bool RemoteCommandRouter::handleLayerVisible(VideoLayer* layer, const std::vecto
     }
 
     int visible = std::atoi(args[0].c_str());
+    // When transitioning 0→1, suppress rendering until a fresh frame
+    // is loaded by updateFromSyncSource. This prevents a stale frame
+    // from previous playback from flashing on screen.
+    if (visible != 0 && !layer->properties().visible) {
+        layer->properties().awaitingFrame = true;
+    }
     layer->properties().visible = (visible != 0);
     return true;
 }
@@ -1070,20 +1085,39 @@ bool RemoteCommandRouter::handleLayerLoad(const std::vector<std::string>& args) 
     return app_->createLayerWithFile(cueId, filepath);
 }
 
+bool RemoteCommandRouter::handleLayerLoadShared(const std::vector<std::string>& args) {
+    if (!app_ || args.size() < 3) {
+        return false;
+    }
+
+    std::string filepath = args[0];
+    std::string layerId = args[1];
+    std::string driverLayerId = args[2];
+
+    return app_->createSharedLayer(layerId, driverLayerId, filepath);
+}
+
 bool RemoteCommandRouter::handleLayerFile(VideoLayer* layer, const std::vector<std::string>& args) {
     if (!layer || !app_ || args.empty()) {
         return false;
     }
-    
+
+    // NOTE: /file is a debug-only command for manual testing. Not part of normal
+    // cue lifecycle (arm→load→run→unload). Engine never sends this.
+    if (layer->playback().isSharedLayer()) {
+        LOG_WARNING << "Cannot change file on shared layer — unload and reload the cue instead";
+        return false;
+    }
+
     std::string filepath = args[0];
-    
+
     // Get cue ID from layer manager
     std::string cueId = layerManager_->getCueIdFromLayer(layer);
     if (cueId.empty()) {
         LOG_WARNING << "Could not find cue ID for layer";
         return false;
     }
-    
+
     return app_->loadFileIntoLayer(cueId, filepath);
 }
 

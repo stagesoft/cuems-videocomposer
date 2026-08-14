@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -150,7 +149,13 @@ public:
      * Get device path
      */
     const std::string& getDevicePath() const { return devicePath_; }
-    
+
+    /**
+     * Get the SeatManager (for pre-flight checks before in-process modeset retries).
+     * Returns nullptr if init() has not run.
+     */
+    SeatManager* getSeatManager() const { return seatManager_.get(); }
+
     // ===== Output Enumeration =====
     
     /**
@@ -207,7 +212,63 @@ public:
      * @return true if mode is valid and available
      */
     bool prepareMode(int index, int width, int height, double refreshRate = 0.0);
-    
+
+    /**
+     * Verify that drmModeGetCrtc reports a CRTC whose mode hdisplay/vdisplay
+     * matches the requested mode. Compares resolution only — tolerant of kernel
+     * timing normalization (clock/htotal/vtotal/flags differences).
+     *
+     * Caveat: the kernel's own readback can disagree with what the panel is
+     * actually scanning out (e.g. cold-boot HDMI PHY race where SetCrtc returns
+     * 0 and GetCrtc reports the requested mode but the link is still in 4K).
+     * A "true" return means the kernel agrees with us, not that the sink does.
+     *
+     * @param fd        Open DRM fd (must be DRM master).
+     * @param crtcId    The CRTC to read back.
+     * @param requested The mode we asked drmModeSetCrtc to apply.
+     * @return true iff drmModeGetCrtc succeeds AND actual.hdisplay == requested.hdisplay
+     *         AND actual.vdisplay == requested.vdisplay. Returns false (and logs
+     *         at LOG_ERROR) if drmModeGetCrtc returns nullptr or the comparison
+     *         fails.
+     */
+    static bool verifyCrtcMode(int fd, uint32_t crtcId, const drmModeModeInfo& requested);
+
+    /**
+     * Read the connector's "link-status" DRM property. Kernels >=4.10 set this
+     * to BAD when DP/HDMI link training failed after a successful modeset
+     * ioctl (i.e. the kernel programmed the pipe but the actual link never
+     * came up). Userspace is expected to either retry the modeset or surface
+     * the failure.
+     *
+     * Returns:
+     *   1  -> link-status property reads GOOD (the link trained successfully,
+     *         or the property is absent — older kernel, treat as GOOD).
+     *   0  -> link-status reads BAD (link training failed; caller should
+     *         retry or escalate).
+     *  -1  -> property API call failed (errno set). Treat as inconclusive.
+     */
+    static int readConnectorLinkStatus(int fd, uint32_t connectorId);
+
+    /**
+     * Clamp the connector's "max bpc" DRM property to maxBpc. No-op if the
+     * connector doesn't expose that property (older kernels / non-i915
+     * drivers don't always have it).
+     *
+     * Why this exists: on Intel TC-port DP connectors (Tiger/Alder Lake +
+     * USB-C/Thunderbolt DDIs), the kernel auto-selects 12 bpc whenever the
+     * monitor advertises max_bpc=12. Link training at 12 bpc is racy on
+     * these ports — the modeset ioctl reports success, but the link drops
+     * silently and the panel goes dark intermittently (one good restart,
+     * one bad, with streaks). Our framebuffers are 8-bit (DRM_FORMAT_AR24
+     * etc.), so 12 bpc only adds dither — it doesn't gain us color depth
+     * but it does cost link reliability.
+     *
+     * Clamping to 8 bpc before drmModeSetCrtc removes the failure surface.
+     * Returns true on success or when the property is absent (treated as
+     * not applicable); false on a real error.
+     */
+    static bool setConnectorMaxBpc(int fd, uint32_t connectorId, uint64_t maxBpc);
+
     // ===== Resolution Mode Selection =====
     
     /**
@@ -251,6 +312,44 @@ public:
      * Restore original mode for all outputs
      */
     void restoreOriginalModes();
+
+    /**
+     * Per-output mode request coming from the operator's display.conf.
+     *
+     * The resolution policy is global, so before this there was no way to ask a
+     * single output for a specific mode: display.conf's per-output `resolution=`
+     * and `refresh=` were parsed into OutputConfiguration and then never read
+     * (ClickUp 869efhv04). An output carrying an explicit refresh is "pinned" —
+     * harmonizeRefreshRates() then leaves it alone, because otherwise it would
+     * immediately raise it back to the highest rate every output supports, which
+     * is what made 2x4K30 impossible to request.
+     */
+    struct OutputModeOverride {
+        int width = 0;             // 0 = follow the global resolution policy
+        int height = 0;
+        double refreshRate = 0.0;  // >0 = pinned, excluded from harmonization
+    };
+
+    /**
+     * Install per-output overrides. Outputs with no entry keep policy behaviour.
+     * Must be called before applyResolutionMode() to have any effect.
+     */
+    void setOutputModeOverrides(const std::map<std::string, OutputModeOverride>& overrides) {
+        modeOverrides_ = overrides;
+    }
+
+    /** Override for an output, or nullptr when it has none. */
+    const OutputModeOverride* getOutputModeOverride(const std::string& name) const {
+        auto it = modeOverrides_.find(name);
+        return it == modeOverrides_.end() ? nullptr : &it->second;
+    }
+
+    /**
+     * Harmonize refresh rates across all connected outputs.
+     * Called once from applyResolutionMode() after all outputs are configured.
+     * Finds the highest refresh rate that all outputs support at their selected resolution.
+     */
+    void harmonizeRefreshRates();
     
     // ===== Atomic Modesetting =====
     
@@ -341,6 +440,10 @@ private:
     std::string devicePath_;
     bool atomicSupported_ = false;
     ResolutionMode resolutionMode_ = ResolutionMode::HD_1080P;  // Default to 1080p
+
+    // Per-output overrides from display.conf, keyed by connector name. Empty by
+    // default, so an installation that sets nothing keeps the previous behaviour.
+    std::map<std::string, OutputModeOverride> modeOverrides_;
     
     // DRM resources
     drmModeRes* resources_ = nullptr;

@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -45,8 +44,24 @@ extern bool test_ConfigurationManager_NonExistent();
 extern bool test_Integration_LayerManagerWithMultipleLayers();
 extern bool test_Integration_VideoLayerTimeScaling();
 extern bool test_Integration_LayerProperties();
+extern bool test_Integration_MIDISyncSource_DisplayLatencyAtomicity();
+extern bool test_Integration_MIDISyncSource_GetDisplayLatencyMs();
+extern bool test_Integration_FramerateConverter_DelegatesDisplayLatency();
+#ifdef HAVE_MTCRECEIVER
+extern bool test_Integration_MIDISyncSource_NoJumpSnapBias();
+#endif
 
 extern bool test_MTCDecoder();
+
+extern bool test_SMPTEUtils_Overflow24h();
+
+extern bool test_PresentationTiming_CaptureDisabled_NoOp();
+extern bool test_PresentationTiming_FifoPairing();
+extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
+extern bool test_PresentationTiming_DiscardPendingSubmit();
+extern bool test_PresentationTiming_StatisticsMedianAndP95();
+extern bool test_PresentationTiming_ResetClearsState();
+extern bool test_PresentationTiming_ConcurrentSubmitFlip();
 
 using namespace videocomposer::test;
 
@@ -74,9 +89,24 @@ int main() {
     TestFramework::instance().addTest("Integration_LayerManagerWithMultipleLayers", test_Integration_LayerManagerWithMultipleLayers);
     TestFramework::instance().addTest("Integration_VideoLayerTimeScaling", test_Integration_VideoLayerTimeScaling);
     TestFramework::instance().addTest("Integration_LayerProperties", test_Integration_LayerProperties);
-    
+    TestFramework::instance().addTest("Integration_MIDISyncSource_DisplayLatencyAtomicity", test_Integration_MIDISyncSource_DisplayLatencyAtomicity);
+    TestFramework::instance().addTest("Integration_MIDISyncSource_GetDisplayLatencyMs", test_Integration_MIDISyncSource_GetDisplayLatencyMs);
+    TestFramework::instance().addTest("Integration_FramerateConverter_DelegatesDisplayLatency", test_Integration_FramerateConverter_DelegatesDisplayLatency);
+#ifdef HAVE_MTCRECEIVER
+    TestFramework::instance().addTest("Integration_MIDISyncSource_NoJumpSnapBias", test_Integration_MIDISyncSource_NoJumpSnapBias);
+#endif
+
     TestFramework::instance().addTest("MTCDecoder", test_MTCDecoder);
-    
+    TestFramework::instance().addTest("SMPTEUtils_Overflow24h", test_SMPTEUtils_Overflow24h);
+
+    TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
+    TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);
+    TestFramework::instance().addTest("PresentationTiming_FifoPairing_UsesKernelUst", test_PresentationTiming_FifoPairing_UsesKernelUst);
+    TestFramework::instance().addTest("PresentationTiming_DiscardPendingSubmit", test_PresentationTiming_DiscardPendingSubmit);
+    TestFramework::instance().addTest("PresentationTiming_StatisticsMedianAndP95", test_PresentationTiming_StatisticsMedianAndP95);
+    TestFramework::instance().addTest("PresentationTiming_ResetClearsState", test_PresentationTiming_ResetClearsState);
+    TestFramework::instance().addTest("PresentationTiming_ConcurrentSubmitFlip", test_PresentationTiming_ConcurrentSubmitFlip);
+
     return TestFramework::instance().runAll();
 }
 

@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -28,6 +27,9 @@
 #include <cassert>
 #include <algorithm>
 #include <vector>
+#include <cstdio>
+#include <cstdlib>
+#include <sys/stat.h>
 
 #ifdef HAVE_VAAPI_INTEROP
 #include "../hwdec/VaapiInterop.h"
@@ -119,19 +121,30 @@ bool VideoFileInput::open(const std::string& source) {
     }
 
     // Open video file using MediaFileReader
+    //
+    // Every failure below used to return a bare false, so a failed load produced
+    // one message ("Failed to open <path>") for six unrelated causes. Each site
+    // now says which step refused and why - see ClickUp 869efh2ma, where a large
+    // .mov failed to load and the log could not distinguish a truncated file from
+    // an unsupported container or a codec problem.
     if (!mediaReader_.open(source)) {
+        LOG_ERROR << "VideoFileInput: cannot open " << source << ": "
+                  << mediaReader_.getLastError();
         return false;
     }
 
     // Get format context for compatibility
     formatCtx_ = mediaReader_.getFormatContext();
     if (!formatCtx_) {
+        LOG_ERROR << "VideoFileInput: no format context after opening " << source;
         return false;
     }
 
     // Find video stream using MediaFileReader
     videoStream_ = mediaReader_.findStream(AVMEDIA_TYPE_VIDEO);
     if (videoStream_ < 0) {
+        LOG_ERROR << "VideoFileInput: no video stream in " << source
+                  << " (" << mediaReader_.getStreamCount() << " streams present)";
         mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
@@ -139,6 +152,11 @@ bool VideoFileInput::open(const std::string& source) {
 
     // Open codec (try hardware first, fallback to software)
     if (!openHardwareCodec() && !openCodec()) {
+        AVCodecParameters* cp = mediaReader_.getCodecParameters(videoStream_);
+        LOG_ERROR << "VideoFileInput: no usable decoder (hardware and software both "
+                  << "failed) for codec "
+                  << (cp ? avcodec_get_name(cp->codec_id) : "unknown")
+                  << " in " << source;
         mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
@@ -147,6 +165,8 @@ bool VideoFileInput::open(const std::string& source) {
     // Get video properties
     AVStream* avStream = mediaReader_.getStream(videoStream_);
     if (!avStream) {
+        LOG_ERROR << "VideoFileInput: video stream " << videoStream_
+                  << " unavailable in " << source;
         mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
@@ -197,10 +217,18 @@ bool VideoFileInput::open(const std::string& source) {
 
     // Index frames (unless --noindex flag is set)
     if (!noIndex_) {
-    if (!indexFrames()) {
-        cleanup();
-        return false;
-    }
+        if (!loadCachedIndex()) {
+            // Cache miss or stale – run the full 3-pass indexing
+            if (!indexFrames()) {
+                LOG_ERROR << "VideoFileInput: frame indexing failed for " << source
+                          << " (estimated " << frameInfo_.totalFrames << " frames, "
+                          << frameInfo_.duration << "s @ " << frameInfo_.framerate << "fps)";
+                cleanup();
+                return false;
+            }
+            // Persist the index so next open() is instant
+            saveCachedIndex();
+        }
 
         // If indexing completed, use indexed frame count if available
         if (frameCount_ > 0 && frameInfo_.totalFrames == 0) {
@@ -229,8 +257,31 @@ bool VideoFileInput::open(const std::string& source) {
             useAsyncDecode_ = false;
         }
     }
-    
+
     return true;
+}
+
+void VideoFileInput::prewarmGPUPipeline() {
+    if (!useAsyncDecode_ || !asyncDecodeQueue_ || !useHardwareDecoding_) {
+        return;
+    }
+#ifdef HAVE_VAAPI_INTEROP
+    if (!vaapiInterop_ || !vaapiInterop_->isAvailable()) {
+        return;
+    }
+
+    // Wait for the decode thread to have frame 0 ready
+    asyncDecodeQueue_->setTargetFrame(0);
+    AVFrame* warmFrame = asyncDecodeQueue_->getFrame(0, 500);
+    if (warmFrame) {
+        // Import frame 0 through the full GPU pipeline (DRM export + EGL + GL texture)
+        // This pays the one-time driver setup cost before playback starts.
+        GPUTextureFrameBuffer warmBuf;
+        if (transferHardwareFrameToGPU(warmFrame, warmBuf, true)) {
+            LOG_INFO << "Pre-warmed VAAPI→EGL pipeline for " << currentFile_;
+        }
+    }
+#endif
 }
 
 void VideoFileInput::close() {
@@ -1800,6 +1851,18 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         return false;
     }
 
+    // Lazy initialization of VaapiInterop (needs GL context which may not be available at open time)
+#ifdef HAVE_VAAPI_INTEROP
+    if (!vaapiInterop_ && displayBackend_ && displayBackend_->hasVaapiSupport() &&
+        hwDecoderType_ == HardwareDecoder::Type::VAAPI) {
+        vaapiInterop_ = std::make_unique<VaapiInterop>();
+        if (!vaapiInterop_->init(displayBackend_)) {
+            LOG_WARNING << "Failed to initialize per-instance VaapiInterop (async path)";
+            vaapiInterop_.reset();
+        }
+    }
+#endif
+
     // =========================================================================
     // ASYNC DECODE PATH (mpv-style)
     // Use async queue if available - provides pre-buffered frames for smooth playback
@@ -1808,13 +1871,16 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         // Set target frame so decode thread knows where we are
         asyncDecodeQueue_->setTargetFrame(frameNumber);
         
-        // Try to get frame from queue (wait up to 5ms if not ready)
-        AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, 5);
+        // On the very first frame request the decode thread needs time to cold-start
+        // the VAAPI pipeline (~50ms for 4K). Wait longer so we never fall through to
+        // the synchronous path which blocks the render thread for the full decode time.
+        int waitMs = textureBuffer.isValid() ? 5 : 200;
+        AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, waitMs);
         
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
-            bool success = transferHardwareFrameToGPU(queuedFrame, textureBuffer);
+            bool success = transferHardwareFrameToGPU(queuedFrame, textureBuffer, true);  // skipSync: already synced by async queue
             if (success) {
                 return true;
             } else {
@@ -1824,11 +1890,17 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
             // Frame not ready - this shouldn't happen often if queue is working
             static int missCount = 0;
             if (++missCount % 30 == 1) {  // Log every 30 misses
-                LOG_WARNING << "Async decode: frame " << frameNumber << " not in queue (oldest=" 
-                           << asyncDecodeQueue_->getOldestFrame() << ", newest=" 
+                LOG_WARNING << "Async decode: frame " << frameNumber << " not in queue (oldest="
+                           << asyncDecodeQueue_->getOldestFrame() << ", newest="
                            << asyncDecodeQueue_->getNewestFrame() << ")";
             }
-            // Fall through to synchronous path as backup
+            // Keep showing the last displayed frame instead of falling through
+            // to the sync path, which competes for VAAPI hardware and causes
+            // progressive surface pool exhaustion → eventual freeze.
+            if (textureBuffer.isValid()) {
+                return true;
+            }
+            // Fall through to synchronous path only if no valid texture exists
         }
     }
     
@@ -2055,7 +2127,7 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     return success;
 }
 
-bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer) {
+bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync) {
     if (!hwFrame) {
         LOG_WARNING << "transferHardwareFrameToGPU: hwFrame is NULL";
         return false;
@@ -2083,12 +2155,11 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
     if (hwFrame->format == AV_PIX_FMT_VAAPI && vaapiInterop_ && vaapiInterop_->isAvailable()) {
         GLuint texY = 0, texUV = 0;
         int width = 0, height = 0;
-        
+
         // Phase 1: Create EGL images (works on any thread)
-        if (vaapiInterop_->createEGLImages(hwFrame, width, height)) {
+        // Skip vaSyncSurface if frame was already synced by the async decode queue
+        if (vaapiInterop_->createEGLImages(hwFrame, width, height, skipSync)) {
             // Phase 2: Try to bind textures (needs GL context)
-            // If we're on the GL thread, this will succeed
-            // If not, the caller can call bindTexturesToImages later
             if (vaapiInterop_->bindTexturesToImages(texY, texUV)) {
                 // Set up the texture buffer with the imported textures
                 if (!textureBuffer.setExternalNV12Textures(texY, texUV, frameInfo_)) {
@@ -2217,7 +2288,16 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
 
     // FALLBACK: For other formats, use sws_scale to convert to RGBA
     // This is slower but ensures compatibility with all pixel formats
-    
+
+    // Guard: hardware formats and AV_PIX_FMT_NONE have no swscale descriptor → crash.
+    // If we reach here with such a format (e.g. av_hwframe_transfer_data produced an unexpected
+    // result), return false gracefully instead of asserting inside sws_getContext.
+    if (!av_pix_fmt_desc_get(srcFormat)) {
+        LOG_WARNING << "transferHardwareFrameToGPU: unsupported/hw srcFormat " 
+                   << (int)srcFormat << " for sws_scale, skipping frame";
+        return false;
+    }
+
     // Allocate RGBA texture buffer if needed
     if (!textureBuffer.isValid() || 
         textureBuffer.getPlaneType() != TexturePlaneType::SINGLE ||
@@ -2422,6 +2502,12 @@ void VideoFileInput::startAsyncDecode(int64_t startFrame) {
         decodeCond_.notify_one();
     }
 #endif
+}
+
+void VideoFileInput::setLoopMode(bool loop, int64_t totalFrames) {
+    if (asyncDecodeQueue_) {
+        asyncDecodeQueue_->setLoopMode(loop, totalFrames);
+    }
 }
 
 VideoFileInput::CachedFrame* VideoFileInput::findCachedFrame(int64_t frameNumber) {
@@ -2701,6 +2787,185 @@ bool VideoFileInput::decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffe
 
     currentFrame_ = frameNumber;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Index caching  (shared by videocomposer runtime and cuems-videoindexer CLI)
+// ---------------------------------------------------------------------------
+
+static const char   IDX_MAGIC[4]   = {'C','X','I','D'};
+static const uint32_t IDX_VERSION  = 1;
+
+struct IdxHeader {
+    char     magic[4];
+    uint32_t version;
+    int64_t  video_size;
+    int64_t  video_mtime;
+    int64_t  frameCount;
+    int32_t  frameRateQ_num;
+    int32_t  frameRateQ_den;
+    int32_t  width;
+    int32_t  height;
+    float    aspect;
+    double   framerate;
+    int64_t  totalFrames;
+    double   duration;
+    int64_t  fileFrameOffset;
+    uint8_t  scanComplete;
+    uint8_t  byteSeek;
+    uint8_t  _pad[6]; // align to 8 bytes
+};
+
+std::string VideoFileInput::getIndexPath(const std::string& videoPath) {
+    // /path/to/media/video.mp4  ->  /path/to/media/indexes/video.mp4.idx
+    size_t sep = videoPath.rfind('/');
+    std::string dir  = (sep != std::string::npos) ? videoPath.substr(0, sep) : ".";
+    std::string base = (sep != std::string::npos) ? videoPath.substr(sep + 1) : videoPath;
+    return dir + "/indexes/" + base + ".idx";
+}
+
+bool VideoFileInput::isCacheValid(const std::string& videoPath) {
+    std::string idxPath = getIndexPath(videoPath);
+
+    struct stat vidSt{}, idxSt{};
+    if (stat(videoPath.c_str(), &vidSt) != 0) return false;
+    if (stat(idxPath.c_str(), &idxSt) != 0) return false;
+
+    FILE* f = fopen(idxPath.c_str(), "rb");
+    if (!f) return false;
+
+    IdxHeader hdr{};
+    bool ok = (fread(&hdr, sizeof(hdr), 1, f) == 1);
+    fclose(f);
+
+    if (!ok) return false;
+    if (memcmp(hdr.magic, IDX_MAGIC, 4) != 0) return false;
+    if (hdr.version != IDX_VERSION) return false;
+    if (hdr.video_size  != (int64_t)vidSt.st_size)  return false;
+    if (hdr.video_mtime != (int64_t)vidSt.st_mtime) return false;
+    return true;
+}
+
+bool VideoFileInput::loadCachedIndex() {
+    if (currentFile_.empty()) return false;
+
+    std::string idxPath = getIndexPath(currentFile_);
+
+    struct stat vidSt{};
+    if (stat(currentFile_.c_str(), &vidSt) != 0) return false;
+
+    FILE* f = fopen(idxPath.c_str(), "rb");
+    if (!f) return false;
+
+    IdxHeader hdr{};
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return false; }
+
+    if (memcmp(hdr.magic, IDX_MAGIC, 4) != 0 ||
+        hdr.version    != IDX_VERSION          ||
+        hdr.video_size  != (int64_t)vidSt.st_size  ||
+        hdr.video_mtime != (int64_t)vidSt.st_mtime ||
+        hdr.frameCount  <= 0)
+    {
+        fclose(f);
+        return false;
+    }
+
+    size_t bytes = (size_t)hdr.frameCount * sizeof(FrameIndex);
+    FrameIndex* idx = static_cast<FrameIndex*>(malloc(bytes));
+    if (!idx) { fclose(f); return false; }
+
+    if (fread(idx, sizeof(FrameIndex), (size_t)hdr.frameCount, f) != (size_t)hdr.frameCount) {
+        free(idx);
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    if (frameIndex_) free(frameIndex_);
+    frameIndex_   = idx;
+    frameCount_   = hdr.frameCount;
+    frameRateQ_   = { hdr.frameRateQ_num, hdr.frameRateQ_den };
+    scanComplete_ = hdr.scanComplete != 0;
+    byteSeek_     = hdr.byteSeek != 0;
+
+    // Restore frameInfo fields that indexing sets
+    frameInfo_.width           = hdr.width;
+    frameInfo_.height          = hdr.height;
+    frameInfo_.aspect          = hdr.aspect;
+    frameInfo_.framerate       = hdr.framerate;
+    frameInfo_.totalFrames     = hdr.totalFrames > 0 ? hdr.totalFrames : hdr.frameCount;
+    frameInfo_.duration        = hdr.duration;
+    frameInfo_.fileFrameOffset = hdr.fileFrameOffset;
+
+    LOG_INFO << "Loaded cached index for " << currentFile_
+             << " (" << frameCount_ << " frames)";
+    return true;
+}
+
+void VideoFileInput::saveCachedIndex() const {
+    if (currentFile_.empty() || !frameIndex_ || frameCount_ <= 0) return;
+
+    std::string idxPath = getIndexPath(currentFile_);
+
+    // Create indexes/ directory if needed
+    size_t sep = idxPath.rfind('/');
+    if (sep != std::string::npos) {
+        std::string dir = idxPath.substr(0, sep);
+        // mkdir -p equivalent using POSIX
+        std::string cmd = "mkdir -p \"" + dir + "\"";
+        (void)system(cmd.c_str());
+    }
+
+    struct stat vidSt{};
+    if (stat(currentFile_.c_str(), &vidSt) != 0) {
+        LOG_WARNING << "saveCachedIndex: cannot stat " << currentFile_;
+        return;
+    }
+
+    IdxHeader hdr{};
+    memcpy(hdr.magic, IDX_MAGIC, 4);
+    hdr.version        = IDX_VERSION;
+    hdr.video_size     = (int64_t)vidSt.st_size;
+    hdr.video_mtime    = (int64_t)vidSt.st_mtime;
+    hdr.frameCount     = frameCount_;
+    hdr.frameRateQ_num = frameRateQ_.num;
+    hdr.frameRateQ_den = frameRateQ_.den;
+    hdr.width          = frameInfo_.width;
+    hdr.height         = frameInfo_.height;
+    hdr.aspect         = frameInfo_.aspect;
+    hdr.framerate      = frameInfo_.framerate;
+    hdr.totalFrames    = frameInfo_.totalFrames;
+    hdr.duration       = frameInfo_.duration;
+    hdr.fileFrameOffset= frameInfo_.fileFrameOffset;
+    hdr.scanComplete   = scanComplete_ ? 1 : 0;
+    hdr.byteSeek       = byteSeek_     ? 1 : 0;
+
+    // Write to a temp file and rename (atomic-ish)
+    std::string tmpPath = idxPath + ".tmp";
+    FILE* f = fopen(tmpPath.c_str(), "wb");
+    if (!f) {
+        LOG_WARNING << "saveCachedIndex: cannot create " << tmpPath;
+        return;
+    }
+
+    bool ok = (fwrite(&hdr, sizeof(hdr), 1, f) == 1) &&
+              (fwrite(frameIndex_, sizeof(FrameIndex), (size_t)frameCount_, f) == (size_t)frameCount_);
+    fclose(f);
+
+    if (!ok) {
+        remove(tmpPath.c_str());
+        LOG_WARNING << "saveCachedIndex: write error for " << idxPath;
+        return;
+    }
+
+    if (rename(tmpPath.c_str(), idxPath.c_str()) != 0) {
+        remove(tmpPath.c_str());
+        LOG_WARNING << "saveCachedIndex: rename failed for " << idxPath;
+        return;
+    }
+
+    LOG_INFO << "Saved index cache: " << idxPath
+             << " (" << frameCount_ << " frames)";
 }
 
 } // namespace videocomposer

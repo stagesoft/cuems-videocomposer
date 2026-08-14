@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -33,6 +32,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 
 // For EDID parsing
@@ -864,16 +864,30 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
     LOG_INFO << "  Found mode: " << mode->hdisplay << "x" << mode->vdisplay 
              << " clock=" << mode->clock;
     
+    // Clamp connector max bpc to 8 — our framebuffers are 8-bit (AR24), and
+    // 12 bpc on Intel TC-port DP makes link training intermittently fail
+    // (see setConnectorMaxBpc docstring).
+    setConnectorMaxBpc(drmFd_, conn->connectorId, 8);
+
     // Set mode (with fb_id=0 to just configure mode, actual framebuffer set in schedulePageFlip)
     LOG_INFO << "  Calling drmModeSetCrtc...";
     int ret = drmModeSetCrtc(drmFd_, conn->crtcId, 0, 0, 0,
                              &conn->connectorId, 1, mode);
-    
+
     if (ret != 0) {
         LOG_ERROR << "DRMOutputManager: drmModeSetCrtc failed: " << strerror(-ret);
         return false;
     }
-    
+
+    if (!verifyCrtcMode(drmFd_, conn->crtcId, *mode)) {
+        return false;
+    }
+    if (readConnectorLinkStatus(drmFd_, conn->connectorId) == 0) {
+        LOG_ERROR << "DRMOutputManager::setMode: link-status=BAD on connectorId="
+                  << conn->connectorId << " after mode change — failing the call";
+        return false;
+    }
+
     // Save the new current mode (for use in schedulePageFlip after resize)
     conn->currentMode = *mode;
     conn->hasCurrentMode = true;
@@ -966,7 +980,7 @@ void DRMOutputManager::setResolutionMode(ResolutionMode mode) {
 
 bool DRMOutputManager::applyResolutionMode() {
     bool allSuccess = true;
-    
+
     for (size_t i = 0; i < connectors_.size(); ++i) {
         if (connectors_[i].info.connected) {
             if (!applyResolutionModeToOutput(static_cast<int>(i))) {
@@ -974,9 +988,12 @@ bool DRMOutputManager::applyResolutionMode() {
             }
         }
     }
-    
+
+    // Harmonize refresh rates once after all outputs are configured
+    harmonizeRefreshRates();
+
     // No need to rebuild - getOutputs() builds from connectors_ dynamically
-    
+
     return allSuccess;
 }
 
@@ -987,7 +1004,52 @@ bool DRMOutputManager::applyResolutionModeToOutput(int index) {
     }
     
     const drmModeModeInfo* bestMode = nullptr;
-    
+
+    // An explicit per-output request in display.conf outranks the global policy.
+    // Without this the operator's `resolution=` / `refresh=` were parsed, stored,
+    // written back on save and never consulted (ClickUp 869efhv04).
+    const OutputModeOverride* ovr = getOutputModeOverride(conn->info.name);
+    if (ovr && (ovr->width > 0 || ovr->refreshRate > 0.0)) {
+        // Whichever half of the request was left unspecified keeps what the policy
+        // would have chosen, so `refresh=` alone preserves the resolution and
+        // `resolution=` alone preserves the rate.
+        int wantW = ovr->width;
+        int wantH = ovr->height;
+        if (wantW <= 0 || wantH <= 0) {
+            wantW = conn->info.width;
+            wantH = conn->info.height;
+        }
+
+        const drmModeModeInfo* requested =
+            findMode(conn->connector, wantW, wantH, ovr->refreshRate);
+        if (!requested) {
+            // Fail loudly. Silently dropping to the preferred mode is what kept the
+            // original bug invisible: the operator had no way to tell that the mode
+            // they asked for did not exist.
+            LOG_ERROR << "DRMOutputManager: " << conn->info.name
+                      << " requested " << wantW << "x" << wantH << "@"
+                      << (ovr->refreshRate > 0.0 ? std::to_string(ovr->refreshRate) : std::string("any"))
+                      << " in display.conf, but the connector has no such mode - "
+                      << "falling back to the resolution policy";
+        } else {
+            conn->info.width = requested->hdisplay;
+            conn->info.height = requested->vdisplay;
+            if (requested->htotal && requested->vtotal) {
+                conn->info.refreshRate = (double)requested->clock * 1000.0 /
+                                         ((double)requested->htotal * (double)requested->vtotal);
+            }
+            conn->currentMode = *requested;
+            conn->hasCurrentMode = true;
+
+            LOG_INFO << "DRMOutputManager: " << conn->info.name
+                     << " configured from display.conf to "
+                     << requested->hdisplay << "x" << requested->vdisplay
+                     << "@" << conn->info.refreshRate << "Hz"
+                     << (ovr->refreshRate > 0.0 ? " (refresh pinned)" : "");
+            return true;
+        }
+    }
+
     switch (resolutionMode_) {
         case ResolutionMode::NATIVE:
             bestMode = findBestMode(*conn, 0, 0, false);  // Use EDID preferred (panel's native)
@@ -1104,14 +1166,280 @@ const drmModeModeInfo* DRMOutputManager::findBestMode(const DRMConnector& connec
 void DRMOutputManager::restoreOriginalModes() {
     for (auto& conn : connectors_) {
         if (conn.savedCrtc && conn.crtcId) {
-            drmModeSetCrtc(drmFd_,
+            int ret = drmModeSetCrtc(drmFd_,
                           conn.savedCrtc->crtc_id,
                           conn.savedCrtc->buffer_id,
                           conn.savedCrtc->x, conn.savedCrtc->y,
                           &conn.connectorId, 1,
                           &conn.savedCrtc->mode);
+            if (ret != 0) {
+                LOG_WARNING << "DRMOutputManager: restoreOriginalModes drmModeSetCrtc"
+                            << " failed for " << conn.info.name
+                            << ": " << strerror(-ret);
+                continue;
+            }
+            // Cleanup path: verify but do not block teardown on mismatch.
+            (void)verifyCrtcMode(drmFd_, conn.crtcId, conn.savedCrtc->mode);
         }
     }
+}
+
+bool DRMOutputManager::setConnectorMaxBpc(int fd, uint32_t connectorId,
+                                          uint64_t maxBpc) {
+    drmModeObjectProperties* props =
+        drmModeObjectGetProperties(fd, connectorId, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props) {
+        LOG_WARNING << "DRMOutputManager: setConnectorMaxBpc: drmModeObjectGetProperties"
+                    << " failed for connectorId=" << connectorId
+                    << ": " << strerror(errno);
+        return false;
+    }
+
+    bool found = false;
+    bool ok = true;
+    for (uint32_t i = 0; i < props->count_props; ++i) {
+        drmModePropertyRes* p = drmModeGetProperty(fd, props->props[i]);
+        if (!p) continue;
+        if (std::strcmp(p->name, "max bpc") == 0) {
+            found = true;
+            uint64_t current = props->prop_values[i];
+            if (current != maxBpc) {
+                int r = drmModeObjectSetProperty(fd, connectorId,
+                                                 DRM_MODE_OBJECT_CONNECTOR,
+                                                 p->prop_id, maxBpc);
+                if (r != 0) {
+                    LOG_WARNING << "DRMOutputManager: setConnectorMaxBpc: failed to set"
+                                << " 'max bpc'=" << maxBpc << " on connectorId="
+                                << connectorId << ": " << strerror(-r);
+                    ok = false;
+                } else {
+                    LOG_INFO << "DRMOutputManager: clamped 'max bpc' from " << current
+                             << " to " << maxBpc << " on connectorId=" << connectorId;
+                }
+            }
+            drmModeFreeProperty(p);
+            break;
+        }
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+
+    if (!found) {
+        LOG_DEBUG << "DRMOutputManager: setConnectorMaxBpc: 'max bpc' property absent"
+                  << " on connectorId=" << connectorId << " (driver doesn't expose it)";
+    }
+    return ok;
+}
+
+int DRMOutputManager::readConnectorLinkStatus(int fd, uint32_t connectorId) {
+    drmModeObjectProperties* props =
+        drmModeObjectGetProperties(fd, connectorId, DRM_MODE_OBJECT_CONNECTOR);
+    if (!props) {
+        LOG_WARNING << "DRMOutputManager: readConnectorLinkStatus:"
+                    << " drmModeObjectGetProperties failed for connectorId="
+                    << connectorId << ": " << strerror(errno);
+        return -1;
+    }
+
+    int result = 1;  // default to GOOD if property absent (older kernels)
+    bool found = false;
+    for (uint32_t i = 0; i < props->count_props; ++i) {
+        drmModePropertyRes* p = drmModeGetProperty(fd, props->props[i]);
+        if (!p) continue;
+        if (std::strcmp(p->name, "link-status") == 0) {
+            found = true;
+            // DRM_MODE_LINK_STATUS_GOOD = 0, DRM_MODE_LINK_STATUS_BAD = 1
+            uint64_t v = props->prop_values[i];
+            if (v == 1) {
+                LOG_ERROR << "DRMOutputManager: link-status=BAD on connectorId="
+                          << connectorId << " (kernel detected DP/HDMI link training failure)";
+                result = 0;
+            } else {
+                LOG_DEBUG << "DRMOutputManager: link-status=GOOD on connectorId="
+                          << connectorId;
+                result = 1;
+            }
+            drmModeFreeProperty(p);
+            break;
+        }
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+
+    if (!found) {
+        LOG_DEBUG << "DRMOutputManager: link-status property absent on connectorId="
+                  << connectorId << " (kernel/driver doesn't expose it; treating as GOOD)";
+    }
+    return result;
+}
+
+bool DRMOutputManager::verifyCrtcMode(int fd, uint32_t crtcId,
+                                      const drmModeModeInfo& requested) {
+    drmModeCrtc* actual = drmModeGetCrtc(fd, crtcId);
+    if (!actual) {
+        LOG_ERROR << "DRMOutputManager: verifyCrtcMode: drmModeGetCrtc failed for"
+                  << " crtcId=" << crtcId << ": " << strerror(errno);
+        return false;
+    }
+
+    const bool ok = (actual->mode.hdisplay == requested.hdisplay) &&
+                    (actual->mode.vdisplay == requested.vdisplay);
+
+    if (!ok) {
+        LOG_ERROR << "DRMOutputManager: verifyCrtcMode MISMATCH on crtcId=" << crtcId
+                  << " — requested " << requested.hdisplay << "x" << requested.vdisplay
+                  << " (clock=" << requested.clock << " htotal=" << requested.htotal
+                  << " vtotal=" << requested.vtotal << ")"
+                  << " actual " << actual->mode.hdisplay << "x" << actual->mode.vdisplay
+                  << " (clock=" << actual->mode.clock << " htotal=" << actual->mode.htotal
+                  << " vtotal=" << actual->mode.vtotal
+                  << " mode_valid=" << (actual->mode_valid ? 1 : 0) << ")";
+    } else {
+        LOG_INFO << "DRMOutputManager: verifyCrtcMode OK on crtcId=" << crtcId
+                 << " — " << actual->mode.hdisplay << "x" << actual->mode.vdisplay;
+    }
+
+    drmModeFreeCrtc(actual);
+    return ok;
+}
+
+void DRMOutputManager::harmonizeRefreshRates() {
+    // Collect refresh rates from all connected outputs that have a selected mode.
+    //
+    // An output whose display.conf section pins an explicit refresh= is excluded:
+    // harmonization always climbs to the highest rate every output supports, so
+    // including a pinned output would immediately undo the operator's request.
+    // That is precisely what made 2x4K30 impossible to ask for (ClickUp 869efhv04)
+    // — the capacity-relevant configuration on the FP530, where 60Hz drops frames
+    // and 30Hz does not. Outputs without a pin still harmonize among themselves.
+    std::vector<size_t> connectedIndices;
+    std::vector<std::string> pinnedNames;
+    for (size_t i = 0; i < connectors_.size(); ++i) {
+        if (!connectors_[i].info.connected || !connectors_[i].hasCurrentMode) {
+            continue;
+        }
+        const OutputModeOverride* ovr = getOutputModeOverride(connectors_[i].info.name);
+        if (ovr && ovr->refreshRate > 0.0) {
+            pinnedNames.push_back(connectors_[i].info.name);
+            continue;
+        }
+        connectedIndices.push_back(i);
+    }
+
+    if (!pinnedNames.empty()) {
+        std::string names;
+        for (const auto& n : pinnedNames) {
+            if (!names.empty()) names += ", ";
+            names += n;
+        }
+        LOG_INFO << "DRMOutputManager: refresh rate pinned by display.conf on " << names
+                 << " - excluded from harmonization";
+    }
+
+    if (connectedIndices.size() < 2) {
+        return;  // Nothing to harmonize with 0-1 free outputs
+    }
+
+    // Check if all rates already match (within 0.5Hz tolerance)
+    double firstRate = connectors_[connectedIndices[0]].info.refreshRate;
+    bool allMatch = true;
+    for (size_t idx : connectedIndices) {
+        if (std::abs(connectors_[idx].info.refreshRate - firstRate) > 0.5) {
+            allMatch = false;
+            break;
+        }
+    }
+    if (allMatch) {
+        LOG_VERBOSE << "DRMOutputManager: All outputs already at " << firstRate << "Hz";
+        return;
+    }
+
+    // Find the highest refresh rate that ALL outputs support at their selected resolution
+    double bestCommonRate = 0.0;
+    std::vector<const drmModeModeInfo*> bestCommonModes(connectedIndices.size(), nullptr);
+
+    // For each connected output, build a list of available refresh rates at the selected resolution
+    // Then find the highest rate that's available on ALL outputs
+    // Start by collecting all rates from the first output
+    auto& firstConn = connectors_[connectedIndices[0]];
+    for (int m = 0; m < firstConn.connector->count_modes; ++m) {
+        const drmModeModeInfo* mode = &firstConn.connector->modes[m];
+        if (mode->hdisplay != firstConn.currentMode.hdisplay ||
+            mode->vdisplay != firstConn.currentMode.vdisplay) {
+            continue;
+        }
+        double rate = (mode->htotal && mode->vtotal)
+            ? (double)mode->clock * 1000.0 / ((double)mode->htotal * (double)mode->vtotal)
+            : 0.0;
+        if (rate <= 0.0) continue;
+
+        // Check if all other outputs support this rate at their resolution
+        bool allSupport = true;
+        std::vector<const drmModeModeInfo*> matchingModes(connectedIndices.size(), nullptr);
+        matchingModes[0] = mode;
+
+        for (size_t j = 1; j < connectedIndices.size(); ++j) {
+            auto& conn = connectors_[connectedIndices[j]];
+            const drmModeModeInfo* match = nullptr;
+
+            for (int k = 0; k < conn.connector->count_modes; ++k) {
+                const drmModeModeInfo* m2 = &conn.connector->modes[k];
+                if (m2->hdisplay != conn.currentMode.hdisplay ||
+                    m2->vdisplay != conn.currentMode.vdisplay) {
+                    continue;
+                }
+                double r2 = (m2->htotal && m2->vtotal)
+                    ? (double)m2->clock * 1000.0 / ((double)m2->htotal * (double)m2->vtotal)
+                    : 0.0;
+                if (std::abs(r2 - rate) <= 0.5) {
+                    match = m2;
+                    break;
+                }
+            }
+            if (!match) {
+                allSupport = false;
+                break;
+            }
+            matchingModes[j] = match;
+        }
+
+        if (allSupport && rate > bestCommonRate) {
+            bestCommonRate = rate;
+            for (size_t j = 0; j < connectedIndices.size(); ++j) {
+                bestCommonModes[j] = matchingModes[j];
+            }
+        }
+    }
+
+    if (bestCommonRate <= 0.0) {
+        // No common rate found — log warning with per-output actual rates
+        std::string rateInfo;
+        for (size_t idx : connectedIndices) {
+            if (!rateInfo.empty()) rateInfo += ", ";
+            rateInfo += connectors_[idx].info.name + "=" +
+                        std::to_string(connectors_[idx].info.refreshRate) + "Hz";
+        }
+        LOG_WARNING << "DRMOutputManager: Cannot harmonize refresh rates, no common rate found. "
+                    << "Per-output rates: " << rateInfo;
+        return;
+    }
+
+    // Apply the common rate to each output
+    for (size_t j = 0; j < connectedIndices.size(); ++j) {
+        size_t idx = connectedIndices[j];
+        auto& conn = connectors_[idx];
+        double oldRate = conn.info.refreshRate;
+
+        conn.currentMode = *bestCommonModes[j];
+        conn.info.refreshRate = bestCommonRate;
+
+        if (std::abs(oldRate - bestCommonRate) > 0.5) {
+            LOG_INFO << "DRMOutputManager: " << conn.info.name
+                     << " refresh rate harmonized: " << oldRate << "Hz -> " << bestCommonRate << "Hz";
+        }
+    }
+
+    LOG_INFO << "DRMOutputManager: All outputs harmonized to " << bestCommonRate << "Hz";
 }
 
 uint32_t DRMOutputManager::getCrtcId(int index) const {
@@ -1224,7 +1552,10 @@ uint64_t DRMOutputManager::getPropertyValue(uint32_t objectId, uint32_t objectTy
 }
 
 void DRMOutputManager::pollHotplug() {
-    refreshOutputs();
+    // NOOP in render loop: drmModeGetConnector() sends I2C probes to each
+    // connector (~25ms each), which would stall the render loop causing
+    // visible frame drops.  Real hotplug detection should use udev/uevent
+    // notifications instead of polling.
 }
 
 // ===== Plane Management =====

@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -117,6 +116,18 @@ public:
     void setTargetFrame(int64_t frameNumber);
 
     /**
+     * Enable/disable seamless loop pre-buffering.
+     * When enabled, the decode thread pre-buffers the start of the video
+     * using virtual frame numbers (totalFrames + N) so they survive the
+     * trim logic until the loop boundary is detected, at which point they
+     * are converted to real frame numbers in-place (no seek required).
+     * @param loop      true to enable loop pre-buffering
+     * @param totalFrames total number of frames in the video (used to
+     *                    generate and detect virtual frame numbers)
+     */
+    void setLoopMode(bool loop, int64_t totalFrames);
+
+    /**
      * Get queue statistics for debugging
      */
     size_t getQueueSize() const;
@@ -188,6 +199,12 @@ private:
     
     // Frame queue
     static constexpr size_t MAX_QUEUE_SIZE = 8;  // Buffer up to 8 frames
+    // If the renderer's target runs this many frames ahead of the decoder,
+    // clear the queue and seek forward instead of chewing through the backlog
+    // sequentially while the renderer shows stale frames. Guards against
+    // CPU stalls / GPU contention. Does NOT fire at the loop boundary
+    // (handled by the backward-jump path — target wraps LOW there).
+    static constexpr int64_t FORWARD_JUMP_THRESHOLD = 15;
     std::deque<QueuedFrame> frameQueue_;
     mutable std::mutex queueMutex_;
     std::condition_variable queueCond_;
@@ -199,7 +216,33 @@ private:
     std::atomic<int64_t> lastDecodedFrame_{-1};
     std::atomic<bool> seekRequested_{false};
     std::atomic<int64_t> seekTarget_{0};
+    // Post-seek catch-up goal: set to the requested target whenever the
+    // worker processes a seek, cleared once lastDecodedFrame_ catches up.
+    // While >=0, the forward-jump check is suppressed so the decoder can
+    // walk from the keyframe-≤-target landing point up to the target
+    // without re-triggering clear+seek on every iteration.
+    // -1 means "not in post-seek catch-up window".
+    std::atomic<int64_t> seekGoal_{-1};
     
+    // Seamless loop pre-buffering
+    // When loopMode_ is true, the decode thread uses virtual frame numbers
+    // (totalFrames_ + realFrameN) for frames decoded after EOF so they are
+    // not trimmed before the loop boundary conversion happens.
+    std::atomic<bool> loopMode_{false};
+    std::atomic<int64_t> totalFrames_{0};
+    std::atomic<int64_t> virtualOffset_{0};  // Added to decoded frame numbers during pre-buffering
+    std::atomic<bool> eofReached_{false};    // Set at EOF in non-loop mode; prevents decode-and-trim churn
+    
+    // Borrowed frame: ref-counted copy returned by getFrame().
+    // Prevents use-after-free when the decode thread clears the queue
+    // while the render thread is still using a frame for GPU transfer.
+    // Valid until the next getFrame() call (always from the same thread).
+    AVFrame* borrowedFrame_ = nullptr;
+
+    // Ref the found frame into borrowedFrame_ and return it.
+    // Must be called while queueMutex_ is held.
+    AVFrame* borrowFrame(AVFrame* src);
+
     // Synchronization
     std::condition_variable seekCond_;
     std::mutex seekMutex_;

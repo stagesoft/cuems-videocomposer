@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -45,6 +44,7 @@
 #include <EGL/eglext.h>
 #include <xf86drmMode.h>
 #include <vector>
+#include <map>
 #include <cstdint>
 
 namespace videocomposer {
@@ -121,11 +121,28 @@ public:
     // ===== Page Flipping =====
     
     /**
-     * Schedule page flip (non-blocking)
+     * Schedule page flip (non-blocking).
+     * Production entry point. Falls back to SetCrtc on EBUSY/ENOSPC after
+     * 10 consecutive strikes (legacy compatibility for unstable iGPU
+     * drivers).
      * @return true on success
      */
     bool schedulePageFlip() override;
-    
+
+    /**
+     * Async measurement entry point. Like schedulePageFlip(), but returns
+     * the kernel errno directly and does NOT fall back to SetCrtc on EBUSY/
+     * ENOSPC, and does NOT touch the production failCount strike counter.
+     * Returns -ENOTSUP if the surface is still in warmup or SetCrtc-only
+     * mode (the measurement caller is expected to drive warmup via
+     * schedulePageFlip first).
+     *
+     * @return 0 on success, positive EBUSY/ENOSPC if the GBM pool is full
+     *         (caller should waitForFlip then retry), negative -<errno> on
+     *         other errors.
+     */
+    int tryAsyncFlip();
+
     /**
      * Wait for pending page flip to complete
      * Blocks until flip is done (vsync)
@@ -159,10 +176,16 @@ public:
     uint32_t prepareAtomicFlip();
     
     /**
-     * Finalize atomic flip after successful drmModeAtomicCommit
-     * Updates internal state (currentBo_, previousBo_, etc.)
+     * Finalize atomic flip after successful synchronous drmModeAtomicCommit
+     * Releases buffers immediately (safe because commit blocked until vsync)
      */
     void finalizeAtomicFlip();
+
+    /**
+     * Finalize atomic flip after successful non-blocking drmModeAtomicCommit
+     * Sets flipPending and defers buffer release to pageFlipHandler
+     */
+    void finalizeAtomicFlipAsync();
     
     /**
      * Cancel atomic flip if prepare succeeded but commit failed
@@ -255,7 +278,15 @@ public:
      * Get GBM surface
      */
     gbm_surface* getGbmSurface() const { return gbmSurface_; }
-    
+
+    /**
+     * True iff the cold-boot first-frame modeset verifier failed even after
+     * the in-process disable->re-enable retry. The render loop checks this
+     * across all surfaces and exits the process so systemd Restart=on-failure
+     * recovers (instead of looping forever on a broken modeset).
+     */
+    bool hasFatalModesetError() const { return fatalModeset_; }
+
 private:
     // Framebuffer info
     struct Framebuffer {
@@ -265,14 +296,28 @@ private:
     
     // Create a DRM framebuffer from GBM buffer
     bool createFramebuffer(gbm_bo* bo, Framebuffer& fb);
-    
+
     // Destroy framebuffer
     void destroyFramebuffer(Framebuffer& fb);
+
+    // Internal page-flip implementation shared by schedulePageFlip and
+    // tryAsyncFlip. allowSetCrtcFallback=true gives production behaviour
+    // (EBUSY → setCrtc fallback, failCount strikeout); =false is the
+    // measurement path (no setCrtc, no failCount touched, raw errno).
+    int doPageFlip(bool allowSetCrtcFallback);
     
-    // Page flip handler callback
-    static void pageFlipHandler(int fd, unsigned int frame, 
-                                unsigned int sec, unsigned int usec, 
+    // Page flip handler callback (version 2 — used for non-atomic per-surface flips)
+    static void pageFlipHandler(int fd, unsigned int frame,
+                                unsigned int sec, unsigned int usec,
                                 void* data);
+
+    // Page flip handler2 callback (version 3 — used for atomic flips, includes crtc_id)
+    static void pageFlipHandler2(int fd, unsigned int sequence,
+                                 unsigned int sec, unsigned int usec,
+                                 unsigned int crtc_id, void* data);
+
+    // Map from crtc_id to DRMSurface* for atomic flip events
+    static std::map<uint32_t, DRMSurface*> s_crtcSurfaceMap_;
     
     // ===== Members =====
     
@@ -304,6 +349,7 @@ private:
     bool modeSet_ = false;           // True if CRTC mode has been set (initial modeset done)
     int warmupFrames_ = 0;           // Frames remaining before trying page flip (Intel quirk)
     bool useSetCrtcOnly_ = false;    // Fall back to SetCrtc if page flip consistently fails
+    bool fatalModeset_ = false;      // Cold-boot first-frame verifier failed even after retry
     
     // Ownership flags (for cleanup)
     bool ownGbmDevice_ = false;      // True if we created the GBM device

@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -67,13 +66,46 @@ public:
     void setInputSource(InputSource* inputSource) { inputSource_ = inputSource; }
     
     /**
+     * Get the underlying sync source's framerate (e.g. MTC 25fps) before conversion.
+     * Returns <= 0 if unknown.
+     */
+    double getSourceFramerate() const;
+
+    /**
      * Check if a full frame SYSEX was just received - delegates to wrapped sync source
      */
     bool wasFullFrameReceived() override;
 
+    /**
+     * Delegate to wrapped sync source's getTimeMs()
+     */
+    long getTimeMs() const override;
+
+    /**
+     * Delegate to wrapped sync source's getDisplayLatencyMs()
+     */
+    long getDisplayLatencyMs() const override;
+
+    /**
+     * Get the rolling state from the last pollFrame() call.
+     * Used by shared secondary layers to read the driver's rolling state
+     * without calling pollFrame() themselves.
+     */
+    bool getCurrentRolling() const { return lastRolling_; }
+
 private:
     SyncSource* wrappedSyncSource_;  // Non-owning reference to sync source
     InputSource* inputSource_;  // Non-owning reference
+
+    // Per-instance cadence smoother state (was incorrectly static — shared across all layers)
+    int64_t   cadenceDisplayFrame_  = -1;
+    int       cadenceVsyncCount_    =  0;
+    double    cadenceVsyncPeriodMs_ = 16.667;  // initial guess
+    long long cadenceLastCallUs_    =  0;
+
+    // Cached results from last pollFrame() — used by shared secondary layers
+    int64_t lastSmoothedFrame_ = -1;  // last frame returned by pollFrame()
+    bool    lastRolling_ = false;     // last rolling state from pollFrame()
 };
 
 } // namespace videocomposer

@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -27,13 +26,21 @@
 #include "DRMBackend.h"
 #include "../OpenGLRenderer.h"
 #include "../DisplayConfigurationManager.h"
+#include "../StartupSplash.h"
 #include "../../layer/LayerManager.h"
 #include "../../layer/VideoLayer.h"
 #include "../../osd/OSDManager.h"
 #include "../../utils/Logger.h"
+#include <cerrno>
+#include <cmath>
+#include <limits>
+#include <set>
+#include <sstream>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>  // for getenv
+#include <thread>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <xf86drmMode.h>  // for atomic modesetting
@@ -44,6 +51,12 @@
 #endif
 
 namespace videocomposer {
+
+namespace {
+// Single source of truth for the runtime display-config path
+// (consumed by openWindow() and initVirtualCanvas()).
+constexpr const char* kStartupDisplayConf = "/run/cuems/display.conf";
+}
 
 DRMBackend::DRMBackend() {
     outputManager_ = std::make_unique<DRMOutputManager>();
@@ -68,6 +81,23 @@ bool DRMBackend::openWindow() {
         return false;
     }
     
+    // Load the startup display config once, here, so its resolution_policy can inform
+    // the global modeset below and its per-output/region data is reused by
+    // initVirtualCanvas() without a second parse. Global-mode precedence:
+    //   CLI --resolution  >  display.conf resolution_policy  >  prior (app config / default)
+    if (configManager_) {
+        ResolutionPolicy priorPolicy = configManager_->getResolutionPolicy();
+        if (configManager_->loadFromFile(kStartupDisplayConf)) {
+            if (resolutionExplicit_) {
+                configManager_->setResolutionPolicy(priorPolicy);            // CLI wins
+            } else if (!configManager_->wasResolutionPolicySpecified()) {
+                configManager_->setResolutionPolicy(priorPolicy);            // file set none — keep prior
+            } else {
+                LOG_INFO << "DRMBackend: applying resolution_policy from display.conf";
+            }
+        }
+    }
+
     // Apply resolution mode before creating surfaces
     // This modifies the output dimensions in outputManager_
     if (configManager_) {
@@ -82,6 +112,28 @@ bool DRMBackend::openWindow() {
             default:                         resMode = ResolutionMode::HD_1080P; break;
         }
         outputManager_->setResolutionMode(resMode);
+
+        // Hand the per-output requests down before the modeset runs. The resolution
+        // policy is global; these are what let one output be asked for a specific
+        // mode, and a refresh= here also pins that output out of refresh-rate
+        // harmonization (ClickUp 869efhv04).
+        std::map<std::string, DRMOutputManager::OutputModeOverride> overrides;
+        for (const auto& oc : configManager_->getConfiguration().outputs) {
+            if (oc.width <= 0 && oc.refreshRate <= 0.0) {
+                continue;   // nothing requested for this output
+            }
+            DRMOutputManager::OutputModeOverride ovr;
+            ovr.width       = oc.width;
+            ovr.height      = oc.height;
+            ovr.refreshRate = oc.refreshRate;
+            overrides[oc.name] = ovr;
+        }
+        if (!overrides.empty()) {
+            LOG_INFO << "DRMBackend: applying " << overrides.size()
+                     << " per-output mode request(s) from display.conf";
+        }
+        outputManager_->setOutputModeOverrides(overrides);
+
         outputManager_->applyResolutionMode();
     }
     
@@ -106,8 +158,22 @@ bool DRMBackend::openWindow() {
     
     for (const auto& outputInfo : outputs) {
         const std::string& outputName = outputInfo.name;
+
+        // An output the operator turned off gets no surface at all - no GBM/EGL
+        // buffers, no CRTC, no modeset - so a connected but unwanted port stays
+        // dark and costs nothing. Skipping it only in generateOutputRegions()
+        // would drop it from the canvas while still lighting it up (869efh2hr).
+        if (configManager_) {
+            const OutputConfiguration* oc = configManager_->getOutputConfig(outputName);
+            if (oc && !oc->enabled) {
+                LOG_INFO << "DRMBackend: " << outputName
+                         << " disabled in display.conf - no surface created";
+                continue;
+            }
+        }
+
         LOG_INFO << "DRMBackend: Creating surface for " << outputName;
-        
+
         auto surface = std::make_unique<DRMSurface>(outputManager_.get(), outputName);
         
         // Pass shared resources to subsequent surfaces
@@ -221,7 +287,7 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
     if (!initialized_ || surfaces_.empty()) {
         return;
     }
-    
+
     if (useVirtualCanvas_ && multiRenderer_) {
         renderVirtualCanvas(layerManager, osdManager);
     } else {
@@ -241,34 +307,37 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     }
     
     // Process any completed flips (non-blocking)
-    for (auto& [name, surface] : surfaces_) {
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
         surface->processFlipEvents();
     }
-    
+
     primary->makeCurrent();
-    
+
     // MultiOutputRenderer::render() handles:
     // 1. Rendering all layers to VirtualCanvas
     // 2. Blitting regions to each output surface (with blend/warp)
     // 3. Swapping buffers on each surface
     multiRenderer_->render(layerManager, osdManager);
-    
+
     primary->releaseCurrent();
-    
+
     // Wait for all pending flips to complete first
-    for (auto& [name, surface] : surfaces_) {
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
         if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
     }
-    
+
     // Check if we can use atomic modesetting with planes
     bool useAtomic = outputManager_->supportsAtomic() && surfaces_.size() > 1;
     bool allHavePlanes = true;
     bool allModesSet = true;
-    
+
     if (useAtomic) {
-        for (auto& [name, surface] : surfaces_) {
+        for (const auto& name : orderedSurfaceNames()) {
+            auto& surface = surfaces_.at(name);
             if (!surface->getPlane()) {
                 allHavePlanes = false;
             }
@@ -278,15 +347,18 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
         }
         useAtomic = allHavePlanes && allModesSet;
     }
-    
+
     if (useAtomic) {
         // ATOMIC PATH: Submit all page flips in single atomic commit
         // All outputs flip on same vsync = 60fps for any number of outputs
         atomicPageFlip();
     } else {
-        // LEGACY PATH: Sequential page flips (single output or no atomic/planes)
-        for (auto& [name, surface] : surfaces_) {
-            surface->schedulePageFlip();
+        // LEGACY PATH: Sequential page flips in physical layout order
+        // (display.conf canvas-x ascending, alphabetical fallback). The
+        // first frame on each surface goes through doPageFlip which
+        // performs the cold-boot modeset.
+        for (const auto& name : orderedSurfaceNames()) {
+            surfaces_.at(name)->schedulePageFlip();
         }
     }
 }
@@ -300,9 +372,12 @@ bool DRMBackend::atomicPageFlip() {
     
     std::vector<DRMSurface*> preparedSurfaces;
     bool success = true;
-    
-    // Prepare each surface and add to atomic request
-    for (auto& [name, surface] : surfaces_) {
+
+    // Prepare each surface and add to atomic request — physical layout order
+    // so the atomic request, the per-surface logs, and the cold-boot modeset
+    // sequence all reflect the operator's intended left-to-right monitor order.
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
         uint32_t fbId = surface->prepareAtomicFlip();
         if (fbId == 0) {
             LOG_WARNING << "DRMBackend: Failed to prepare surface " << name;
@@ -349,14 +424,18 @@ bool DRMBackend::atomicPageFlip() {
     }
     
     if (success) {
-        // Commit atomically
-        // Use ALLOW_MODESET to permit mode changes if needed
-        // Don't use PAGE_FLIP_EVENT since we handle buffer release in finalizeAtomicFlip
-        uint32_t flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
+        // Commit atomically with NONBLOCK + PAGE_FLIP_EVENT:
+        // - NONBLOCK: returns immediately instead of blocking until vsync
+        // - PAGE_FLIP_EVENT: kernel sends per-CRTC events when flip completes
+        //   (handled by pageFlipHandler2 via processFlipEvents/waitForFlip)
+        // Do NOT use ALLOW_MODESET — it forces full modeset (link training,
+        // DPMS) which takes 2+ vsyncs. Only needed for initial modeset.
+        uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
         if (outputManager_->commitAtomic(request, flags)) {
-            // Success - finalize all surfaces (releases buffers immediately)
+            // Success — mark surfaces as flip-pending; buffer release is
+            // deferred to pageFlipHandler2 when flip event fires
             for (auto* surface : preparedSurfaces) {
-                surface->finalizeAtomicFlip();
+                surface->finalizeAtomicFlipAsync();
             }
         } else {
             LOG_WARNING << "DRMBackend: Atomic commit failed";
@@ -369,7 +448,8 @@ bool DRMBackend::atomicPageFlip() {
         for (auto* surface : preparedSurfaces) {
             surface->cancelAtomicFlip();
         }
-        for (auto& [name, surface] : surfaces_) {
+        for (const auto& name : orderedSurfaceNames()) {
+            auto& surface = surfaces_.at(name);
             surface->schedulePageFlip();
         }
     }
@@ -380,14 +460,20 @@ bool DRMBackend::atomicPageFlip() {
     
 void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager) {
     (void)osdManager;  // OSD rendering handled separately
-    
-    // MPV-STYLE: Process flip events first (non-blocking), render, THEN wait
-    for (auto& [name, surface] : surfaces_) {
+
+    // MPV-STYLE: Process flip events first (non-blocking), render, THEN wait.
+    // Iterate in physical layout order so first-frame modeset (which lives
+    // inside doPageFlip via schedulePageFlip below) follows the operator's
+    // expected left-to-right sequence.
+    auto names = orderedSurfaceNames();
+    for (const auto& name : names) {
+        auto& surface = surfaces_.at(name);
         surface->processFlipEvents();
     }
-    
+
     // Render to each output
-    for (auto& [name, surface] : surfaces_) {
+    for (const auto& name : names) {
+        auto& surface = surfaces_.at(name);
         if (!surface->isInitialized()) {
             continue;
         }
@@ -549,6 +635,15 @@ size_t DRMBackend::getOutputCount() const {
     return surfaces_.size();
 }
 
+bool DRMBackend::hasFatalError() const {
+    for (const auto& [name, surface] : surfaces_) {
+        if (surface && surface->hasFatalModesetError()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool DRMBackend::configureOutputRegion(const std::string& outputName, 
                                         int canvasX, int canvasY,
                                         int canvasWidth, int canvasHeight) {
@@ -582,9 +677,14 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
     region->canvasWidth = canvasWidth;
     region->canvasHeight = canvasHeight;
     
-    LOG_INFO << "DRMBackend: Configured " << outputName 
+    LOG_INFO << "DRMBackend: Configured " << outputName
              << " region: " << canvasX << "," << canvasY
              << " " << canvasWidth << "x" << canvasHeight;
+
+    // canvasX may have changed — restore canonical left-to-right ordering
+    // before any downstream iterator (MultiOutputRenderer, computeIterationOrder)
+    // reads the vector.
+    sortOutputRegionsByCanvas();
 
     // Update MultiOutputRenderer if initialized
     if (multiRenderer_) {
@@ -599,7 +699,12 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
-    
+
+    // Region geometry just changed — re-derive iteration order so renders
+    // continue to follow the operator's intended physical layout.
+    regionsFromUserConfig_ = true;  // explicit per-output configuration
+    computeIterationOrder();
+
     return true;
 }
 
@@ -1005,20 +1110,79 @@ bool DRMBackend::initVirtualCanvas() {
     return false;
 #endif
     
-    // Build default output regions
+    // Build default output regions based on kernel enumeration order.
     buildOutputRegions();
     
+    // Try to load a startup display config. If present, it defines the
+    // canvas layout (connector → region + per-output resolution) used
+    // from the very first frame — no engine re-send needed. If absent,
+    // buildOutputRegions() above already populated DRM-detected defaults
+    // (side-by-side, kernel enumeration order).
+    //
+    // Producer today: nobody writes this file in the current shipping
+    // stack (the previous cuems-generate-display-conf was retired
+    // 2026-04-23 after the project_mappings canvas_region was
+    // repurposed from a layout directive into a UI-template hint, so
+    // reading it as pixels became incorrect). Operators can still hand-
+    // author the file for custom arrangements.
+    //
+    // FUTURE (PHASE A — urgent): the load in openWindow() should become a
+    // load-or-generate-and-save so videocomposer itself owns display.conf
+    // generation on first boot and preserves operator edits on subsequent
+    // boots. See memory project_videocomposer_display_conf_phases for the plan.
+    // display.conf was already parsed once in openWindow(); reuse that state here
+    // (regions need surfaces, which exist now) instead of re-parsing the file.
+    static const std::string startupConfPath = kStartupDisplayConf;
+    if (configManager_ && configManager_->getCanvasLayout() == CanvasLayout::CUSTOM) {
+        std::vector<OutputInfo> outputInfos;
+        for (const auto& name : getSortedOutputNames()) {
+            outputInfos.push_back(surfaces_.at(name)->getOutputInfo());
+        }
+        auto loadedRegions = configManager_->generateOutputRegions(outputInfos);
+        if (!loadedRegions.empty()) {
+            outputRegions_ = loadedRegions;
+            regionsFromUserConfig_ = true;  // operator intent applied
+            sortOutputRegionsByCanvas();
+            LOG_INFO << "DRMBackend: Applied startup display config from " << startupConfPath;
+        }
+    }
+    
+    // Apply per-output resolution overrides from display.conf on top of the global
+    // policy (applies whether the global came from --resolution or resolution_policy).
+    if (configManager_) {
+        for (const auto& name : getSortedOutputNames()) {
+            const auto* outConf = configManager_->getOutputConfig(name);
+            if (outConf && outConf->width > 0 && outConf->height > 0) {
+                auto& surface = surfaces_.at(name);
+                int curW = static_cast<int>(surface->getWidth());
+                int curH = static_cast<int>(surface->getHeight());
+                if (outConf->width != curW || outConf->height != curH) {
+                    LOG_INFO << "DRMBackend: Per-output resolution for " << name
+                             << ": " << curW << "x" << curH
+                             << " -> " << outConf->width << "x" << outConf->height;
+                    setOutputMode(name, outConf->width, outConf->height,
+                                  outConf->refreshRate);
+                }
+            }
+        }
+    }
+
     // Configure MultiOutputRenderer with surfaces and regions (matching order)
     std::vector<OutputSurface*> surfacePtrs;
     for (const auto& region : outputRegions_) {
         surfacePtrs.push_back(surfaces_.at(region.name).get());
     }
-    
+
     multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
-    
-    LOG_INFO << "DRMBackend: Virtual Canvas initialized with " 
+
+    LOG_INFO << "DRMBackend: Virtual Canvas initialized with "
              << outputRegions_.size() << " output(s)";
-    
+
+    // outputRegions_ is finalized — derive the operator-intuitive iteration
+    // order (physical canvas-x ascending, alphabetical fallback) so all
+    // subsequent modeset / render / cleanup loops follow it.
+    computeIterationOrder();
+
     return true;
 }
 
@@ -1031,9 +1195,107 @@ std::vector<std::string> DRMBackend::getSortedOutputNames() const {
     return outputOrder_;
 }
 
+void DRMBackend::sortOutputRegionsByCanvas() {
+    std::sort(outputRegions_.begin(), outputRegions_.end(),
+              [](const OutputRegion& a, const OutputRegion& b) {
+                  if (a.canvasX != b.canvasX) return a.canvasX < b.canvasX;
+                  return a.name < b.name;
+              });
+}
+
+void DRMBackend::computeIterationOrder() {
+    iterationOrder_.clear();
+
+    std::vector<std::string> names;
+    names.reserve(surfaces_.size());
+    for (const auto& [name, _] : surfaces_) names.push_back(name);
+
+    if (!regionsFromUserConfig_) {
+        // No operator intent recorded — outputRegions_ either is empty or
+        // holds buildOutputRegions auto-defaults whose canvas-x values track
+        // kernel enumeration order rather than the physical layout. Fall back
+        // to alphabetical so the order is stable, predictable, and independent
+        // of i915 DDI registration quirks.
+        std::sort(names.begin(), names.end());
+        iterationOrder_ = std::move(names);
+
+        std::ostringstream oss;
+        for (size_t i = 0; i < iterationOrder_.size(); ++i) {
+            if (i) oss << ", ";
+            oss << iterationOrder_[i];
+        }
+        LOG_INFO << "DRMBackend: surface iteration order (alphabetical fallback —"
+                 << " no operator-configured regions): " << oss.str();
+        return;
+    }
+
+    // Operator intent present. Map each surface to its canvas-x. Outputs
+    // missing from outputRegions_ (partial coverage) get sentinel INT_MAX so
+    // they sort to the end, then alphabetically among themselves.
+    std::map<std::string, int> nameToCanvasX;
+    std::vector<std::string> uncovered;
+    for (const auto& name : names) {
+        bool found = false;
+        for (const auto& reg : outputRegions_) {
+            if (reg.name == name && reg.canvasWidth > 0) {
+                nameToCanvasX[name] = reg.canvasX;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            nameToCanvasX[name] = std::numeric_limits<int>::max();
+            uncovered.push_back(name);
+        }
+    }
+
+    std::sort(names.begin(), names.end(), [&](const std::string& a, const std::string& b) {
+        int xa = nameToCanvasX[a];
+        int xb = nameToCanvasX[b];
+        if (xa != xb) return xa < xb;
+        return a < b;  // alphabetical tiebreak (and full ordering for uncovered group)
+    });
+
+    iterationOrder_ = std::move(names);
+
+    if (!uncovered.empty()) {
+        std::ostringstream oss;
+        for (size_t i = 0; i < uncovered.size(); ++i) {
+            if (i) oss << ", ";
+            oss << uncovered[i];
+        }
+        LOG_WARNING << "DRMBackend: " << uncovered.size() << " output(s) not covered by"
+                    << " display.conf, falling back to alphabetical for those: "
+                    << oss.str();
+    }
+
+    std::ostringstream oss;
+    for (size_t i = 0; i < iterationOrder_.size(); ++i) {
+        if (i) oss << ", ";
+        oss << iterationOrder_[i];
+        int x = nameToCanvasX[iterationOrder_[i]];
+        if (x != std::numeric_limits<int>::max()) {
+            oss << "@x=" << x;
+        } else {
+            oss << "@alpha";
+        }
+    }
+    LOG_INFO << "DRMBackend: surface iteration order (modeset/render/cleanup): " << oss.str();
+}
+
+std::vector<std::string> DRMBackend::orderedSurfaceNames() const {
+    if (!iterationOrder_.empty()) return iterationOrder_;
+    // Fallback: alphabetical (std::map iteration order). Used before
+    // computeIterationOrder has run, e.g. during early openWindow stages.
+    std::vector<std::string> names;
+    names.reserve(surfaces_.size());
+    for (const auto& [name, _] : surfaces_) names.push_back(name);
+    return names;
+}
+
 void DRMBackend::buildOutputRegions() {
     outputRegions_.clear();
-    
+    regionsFromUserConfig_ = false;  // auto-defaults are not operator intent
     int canvasX = 0;
     
     for (const auto& outputName : getSortedOutputNames()) {
@@ -1048,15 +1310,24 @@ void DRMBackend::buildOutputRegions() {
         );
         
         outputRegions_.push_back(region);
-        
+
         // Next output starts after this one
         canvasX += info.width;
-        
+
         LOG_INFO << "DRMBackend: Output region (" << info.name << "): "
                  << region.canvasX << "," << region.canvasY << " "
                  << region.canvasWidth << "x" << region.canvasHeight;
     }
+
+    // No sortOutputRegionsByCanvas() here on purpose: getSortedOutputNames()
+    // returns kernel enumeration order, and we assign canvasX cumulatively in
+    // that same order, so the vector is already monotonic by construction.
+    // More importantly, regionsFromUserConfig_ stays false here — those
+    // canvasX values reflect kernel enumeration, not operator-intended layout,
+    // and computeIterationOrder() deliberately falls back to alphabetical
+    // ordering for that case rather than trusting these canvasX values.
 }
+
 
 void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overlap) {
     outputRegions_.clear();
@@ -1104,23 +1375,37 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
         
         outputRegions_.push_back(region);
     }
-    
+
+    // No sortOutputRegionsByCanvas() here on purpose: canvasX/canvasY are
+    // assigned cumulatively in this loop, so the vector is already monotonic
+    // by construction. The blend-zone block above also relies on
+    // outputRegions_.back() being the *physical* predecessor of the region
+    // being pushed — that invariant only holds while construction order ==
+    // canvas order. Sorting after the fact would still leave the vector
+    // unchanged today (no-op), but if anyone ever changes the iteration
+    // source so canvasX is no longer monotonic, both the sort and the blend-
+    // zone logic would need to be reworked together: do positions first, sort,
+    // then do blend zones in a second pass walking the sorted vector pairwise.
+
     // Reconfigure if already initialized
     if (multiRenderer_ && multiRenderer_->isInitialized()) {
         // Make GL context current before any GL operations (FBO creation, etc.)
         if (!surfaces_.empty()) {
             surfaces_.begin()->second->makeCurrent();
         }
-        
+
         std::vector<OutputSurface*> surfacePtrs;
         for (const auto& region : outputRegions_) {
             surfacePtrs.push_back(surfaces_.at(region.name).get());
         }
         multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
     }
-    
-    LOG_INFO << "DRMBackend: Auto-configured " << outputRegions_.size() 
+
+    LOG_INFO << "DRMBackend: Auto-configured " << outputRegions_.size()
              << " outputs (" << arrangement << ", overlap=" << overlap << ")";
+
+    regionsFromUserConfig_ = true;  // explicit auto-arrange counts as user intent
+    computeIterationOrder();
 }
 
 bool DRMBackend::configureOutputRegion(const std::string& outputName, const OutputRegion& region) {
@@ -1129,26 +1414,33 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName, const Outp
         if (r.name == outputName) {
             r = region;
             r.name = outputName;  // Preserve name
-            
+
+            // canvasX may have changed — restore canonical left-to-right ordering
+            // before any downstream iterator (MultiOutputRenderer,
+            // computeIterationOrder) reads the vector.
+            sortOutputRegionsByCanvas();
+
             // Reconfigure if initialized
             if (multiRenderer_ && multiRenderer_->isInitialized()) {
                 // Make GL context current before any GL operations (FBO creation, etc.)
                 if (!surfaces_.empty()) {
                     surfaces_.begin()->second->makeCurrent();
                 }
-                
+
                 std::vector<OutputSurface*> surfacePtrs;
                 for (const auto& reg : outputRegions_) {
                     surfacePtrs.push_back(surfaces_.at(reg.name).get());
                 }
                 multiRenderer_->configureOutputs(outputRegions_, surfacePtrs);
             }
-            
+
             LOG_INFO << "DRMBackend: Configured output region " << outputName;
+            regionsFromUserConfig_ = true;  // explicit per-output configuration
+            computeIterationOrder();
             return true;
         }
     }
-    
+
     LOG_WARNING << "DRMBackend: Output not found: " << outputName;
     return false;
 }
@@ -1171,6 +1463,280 @@ void DRMBackend::setVideoFramerate(double fps) {
             surface->getPresentationTiming().setVideoFramerate(fps);
         }
     }
+}
+
+int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
+                                        StartupSplash* splash) {
+    constexpr int kPanelResponseMs = 5;
+    constexpr int kFallbackMs = 33;
+    constexpr double kWallClockTimeoutSec = 5.0;
+    constexpr int64_t kVsyncP95MultiplierLimit = 6;
+    constexpr size_t kMinAcceptableSamples = 30;
+    constexpr int kMaxPreFill = 6;
+
+    if (surfaces_.empty()) {
+        LOG_INFO << "DisplayLatency: no surfaces, falling back to " << kFallbackMs << " ms";
+        return kFallbackMs;
+    }
+
+    // Helper: 2 × vsync derived from a surface's actual refresh rate.
+    auto refreshFallbackMs = [](const DRMSurface* s) -> int {
+        if (!s) {
+            return kFallbackMs;
+        }
+        double hz = s->getOutputInfo().refreshRate;
+        if (hz <= 0.0) {
+            return kFallbackMs;
+        }
+        return static_cast<int>(2.0 * (1000.0 / hz) + 0.5);
+    };
+
+    DRMSurface* primary = getPrimarySurface();
+    if (primary) {
+        primary->makeCurrent();
+    }
+
+    if (splash) {
+        splash->loadFromEmbedded();  // safe to call repeatedly
+    }
+
+    // Reset & enable capture per-surface
+    for (auto& [name, surface] : surfaces_) {
+        if (!surface || !surface->isInitialized()) {
+            continue;
+        }
+        auto& pt = surface->getPresentationTiming();
+        pt.reset();
+        // Capacity = warmup + pre-fill + steady-state + drain (generous)
+        pt.enableLatencyCapture(static_cast<size_t>(warmupFrames + kMaxPreFill + sampleFrames + 8));
+    }
+
+    const int totalFrames = warmupFrames + sampleFrames;
+    auto loopStart = std::chrono::steady_clock::now();
+
+    auto wallClockExceeded = [&]() -> bool {
+        return std::chrono::steady_clock::now() - loopStart >
+               std::chrono::duration<double>(kWallClockTimeoutSec);
+    };
+
+    auto renderOne = [&](DRMSurface* s, int frameIdx) -> void {
+        int w = static_cast<int>(s->getWidth());
+        int h = static_cast<int>(s->getHeight());
+        if (splash) {
+            splash->renderMeasurementFrame(w, h, frameIdx, totalFrames);
+        } else {
+            float t = static_cast<float>(frameIdx) / static_cast<float>(std::max(1, totalFrames));
+            glViewport(0, 0, w, h);
+            glClearColor(0.5f + 0.5f * std::sin(t * 6.28318f),
+                         0.5f + 0.5f * std::sin(t * 6.28318f + 2.094f),
+                         0.5f + 0.5f * std::sin(t * 6.28318f + 4.188f),
+                         1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+    };
+
+    // ===== Phase A — Warmup (synchronous, frame-outer; unchanged from Phase 1) =====
+    bool extendedWarmupApplied = false;
+    int extraWarmup = 0;
+    int frame = 0;
+    while (frame < warmupFrames + extraWarmup) {
+        if (wallClockExceeded()) {
+            LOG_WARNING << "DisplayLatency: wall-clock timeout in warmup at frame " << frame;
+            break;
+        }
+        for (auto& [name, surface] : surfaces_) {
+            if (!surface || !surface->isInitialized()) continue;
+            if (!surface->beginFrame()) continue;
+            renderOne(surface.get(), frame);
+            surface->endFrame();
+            if (surface->isFlipPending()) surface->waitForFlip();
+            surface->schedulePageFlip();
+        }
+        for (auto& [name, surface] : surfaces_) {
+            if (surface && surface->isFlipPending()) surface->waitForFlip();
+        }
+
+        // Extended-warmup detection: at the end of warmup, if any surface
+        // has produced zero captured submit→flip pairings, we're stuck in
+        // SetCrtc-path. Extend warmup once. Lives here (frame-outer warmup
+        // phase) and uses the global frame counter — semantics preserved
+        // from Phase 1.
+        if (frame == warmupFrames - 1 && !extendedWarmupApplied) {
+            bool anyEmpty = false;
+            for (auto& [name, surface] : surfaces_) {
+                if (!surface || !surface->isInitialized()) continue;
+                auto stats = surface->getPresentationTiming().getSwapChainLatencyStats();
+                if (stats.sampleCount == 0) {
+                    anyEmpty = true;
+                    break;
+                }
+            }
+            if (anyEmpty) {
+                LOG_INFO << "DisplayLatency: no real page-flip events after "
+                         << warmupFrames << " warmup frames, extending warmup once";
+                extraWarmup = warmupFrames;
+                extendedWarmupApplied = true;
+            }
+        }
+        ++frame;
+    }
+
+    // ===== Phase B — Pre-fill (per-surface, capped, async tryAsyncFlip) =====
+    // KMS only allows ONE in-flight flip per CRTC — submitting another while
+    // one is pending returns EBUSY at the kernel layer (or -EINVAL via our
+    // own flipPending_ guard). So in practice the pre-fill exits after the
+    // first successful submit on most drivers. That's fine: the steady-state
+    // phase still measures swap_chain + kernel-queue latency correctly,
+    // since waitForFlip → render → tryAsyncFlip cycles through GBM buffers
+    // exactly as production rendering does.
+    int preFillFrameIdx = warmupFrames;
+    for (auto& [name, surface] : surfaces_) {
+        if (!surface || !surface->isInitialized()) continue;
+        if (wallClockExceeded()) break;
+        int submitted = 0;
+        while (submitted < kMaxPreFill) {
+            if (!surface->beginFrame()) break;
+            renderOne(surface.get(), preFillFrameIdx);
+            surface->endFrame();
+            int ret = surface->tryAsyncFlip();
+            if (ret == 0) {
+                ++submitted;
+                ++preFillFrameIdx;
+            } else {
+                // Any non-zero ret (EBUSY/ENOSPC/EINVAL/etc.) ⇒ done pre-filling.
+                // Steady-state will resume from a known one-in-flight state.
+                break;
+            }
+        }
+    }
+
+    // ===== Phase C — Steady-state (frame-outer, sampleFrames iterations) =====
+    int steadyFrameIdx = preFillFrameIdx;
+    for (int s_frame = 0; s_frame < sampleFrames; ++s_frame) {
+        if (wallClockExceeded()) {
+            LOG_WARNING << "DisplayLatency: wall-clock timeout in steady-state at frame " << s_frame;
+            break;
+        }
+        for (auto& [name, surface] : surfaces_) {
+            if (!surface || !surface->isInitialized()) continue;
+            // Block for the oldest pending flip — submit→flip delta = the
+            // measurement we want.
+            if (surface->isFlipPending()) surface->waitForFlip();
+            if (!surface->beginFrame()) continue;
+            renderOne(surface.get(), steadyFrameIdx);
+            surface->endFrame();
+            int ret = surface->tryAsyncFlip();
+            if (ret != 0 && ret != EBUSY && ret != ENOSPC) {
+                LOG_DEBUG << "DisplayLatency[" << name << "]: tryAsyncFlip mid-steady-state errno="
+                          << ret << " — skipping frame";
+            }
+            ++steadyFrameIdx;
+        }
+    }
+
+    // ===== Phase D — Drain (let all in-flight flips complete) =====
+    for (auto& [name, surface] : surfaces_) {
+        if (!surface || !surface->isInitialized()) continue;
+        if (wallClockExceeded()) break;
+        while (surface->isFlipPending()) {
+            surface->waitForFlip();
+        }
+    }
+
+    // ===== Phase E — Fade-out (synchronous, production schedulePageFlip path) =====
+    // Smoothly fade the aura + logo to black over kFadeFrames so the
+    // measurement window doesn't cut hard to the engine's first cue.
+    // The compensation value is already known by this point — this phase
+    // is presentation-only and never affects the returned latency.
+    constexpr int kFadeFrames = 60;  // ~1.0 s at 60 Hz
+    int fadeBaseFrame = steadyFrameIdx;
+    for (int f = 0; f < kFadeFrames; ++f) {
+        if (wallClockExceeded()) {
+            LOG_WARNING << "DisplayLatency: wall-clock timeout in fade phase at frame " << f;
+            break;
+        }
+        float intensity = 1.0f - static_cast<float>(f + 1) / static_cast<float>(kFadeFrames);
+        if (intensity < 0.0f) intensity = 0.0f;
+        for (auto& [name, surface] : surfaces_) {
+            (void)name;
+            if (!surface || !surface->isInitialized()) continue;
+            if (!surface->beginFrame()) continue;
+            if (splash) {
+                int w = static_cast<int>(surface->getWidth());
+                int h = static_cast<int>(surface->getHeight());
+                splash->renderMeasurementFrame(w, h, fadeBaseFrame + f, totalFrames, intensity);
+            } else {
+                glViewport(0, 0, static_cast<int>(surface->getWidth()),
+                           static_cast<int>(surface->getHeight()));
+                glClearColor(intensity * 0.3f, intensity * 0.2f, intensity * 0.4f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            surface->endFrame();
+            if (surface->isFlipPending()) surface->waitForFlip();
+            surface->schedulePageFlip();
+        }
+        for (auto& [name, surface] : surfaces_) {
+            if (surface && surface->isFlipPending()) surface->waitForFlip();
+        }
+    }
+
+    // ===== Aggregate: per-surface stats → per-surface total → max across surfaces =====
+    int appliedMs = 0;
+    int validSurfaces = 0;
+    int fallbackMaxMs = 0;
+    for (auto& [name, surface] : surfaces_) {
+        if (!surface || !surface->isInitialized()) {
+            continue;
+        }
+        auto& pt = surface->getPresentationTiming();
+        auto stats = pt.getSwapChainLatencyStats();
+        double hz = surface->getOutputInfo().refreshRate;
+        if (hz <= 0.0) {
+            hz = 60.0;
+        }
+        int64_t expectedVsyncNs = static_cast<int64_t>(1e9 / hz);
+        int scanoutMs = static_cast<int>((expectedVsyncNs / 1e6) + 0.5);
+        int derivedFallback = refreshFallbackMs(surface.get());
+        if (derivedFallback > fallbackMaxMs) {
+            fallbackMaxMs = derivedFallback;
+        }
+
+        if (!stats.valid || stats.sampleCount < kMinAcceptableSamples ||
+            stats.p95Ns > kVsyncP95MultiplierLimit * expectedVsyncNs) {
+            LOG_WARNING << "DisplayLatency[" << name << "]: measurement noisy (n="
+                        << stats.sampleCount << ", p95="
+                        << (stats.p95Ns / 1e6) << "ms / 6×vsync="
+                        << (kVsyncP95MultiplierLimit * expectedVsyncNs / 1e6)
+                        << "ms) — using refresh-derived fallback " << derivedFallback << "ms";
+            pt.disableLatencyCapture();
+            continue;
+        }
+
+        int swapChainMs = static_cast<int>((stats.medianNs / 1e6) + 0.5);
+        int totalMs = swapChainMs + scanoutMs + kPanelResponseMs;
+        LOG_INFO << "DisplayLatency[" << name << "]: swap_chain=median "
+                 << (stats.medianNs / 1e6) << "ms (p95 " << (stats.p95Ns / 1e6)
+                 << ", n=" << stats.sampleCount
+                 << " / expected_vsync " << (expectedVsyncNs / 1e6)
+                 << "ms) refresh=" << hz
+                 << "Hz scanout=" << scanoutMs
+                 << "ms panel=" << kPanelResponseMs
+                 << "ms => " << totalMs << "ms";
+        if (totalMs > appliedMs) {
+            appliedMs = totalMs;
+        }
+        ++validSurfaces;
+        pt.disableLatencyCapture();
+    }
+
+    if (validSurfaces == 0) {
+        int derived = (fallbackMaxMs > 0) ? fallbackMaxMs : kFallbackMs;
+        LOG_INFO << "DisplayLatency: applied = " << derived
+                 << "ms (refresh-rate-derived fallback)";
+        return derived;
+    }
+    LOG_INFO << "DisplayLatency: applied = " << appliedMs << "ms (auto)";
+    return appliedMs;
 }
 
 } // namespace videocomposer

@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -33,11 +32,11 @@ extern "C" {
 
 namespace videocomposer {
 
-FrameBuffer::FrameBuffer() : buffer_(nullptr), size_(0) {
+FrameBuffer::FrameBuffer() : buffer_(nullptr), size_(0), ownsBuffer_(true) {
 }
 
-FrameBuffer::FrameBuffer(const FrameBuffer& other) 
-    : buffer_(nullptr), size_(0), info_(other.info_) {
+FrameBuffer::FrameBuffer(const FrameBuffer& other)
+    : buffer_(nullptr), size_(0), info_(other.info_), ownsBuffer_(true) {
     // Deep copy: allocate new buffer and copy data
     if (other.buffer_ && other.size_ > 0 && other.info_.width > 0 && other.info_.height > 0) {
         if (allocate(other.info_)) {
@@ -53,6 +52,7 @@ FrameBuffer& FrameBuffer::operator=(const FrameBuffer& other) {
     if (this != &other) {
         release();
         info_ = other.info_;
+        ownsBuffer_ = true;  // deep copy always owns
         // Deep copy: allocate new buffer and copy data
         if (other.buffer_ && other.size_ > 0 && other.info_.width > 0 && other.info_.height > 0) {
             if (allocate(other.info_)) {
@@ -67,11 +67,12 @@ FrameBuffer& FrameBuffer::operator=(const FrameBuffer& other) {
 }
 
 FrameBuffer::FrameBuffer(FrameBuffer&& other) noexcept
-    : buffer_(other.buffer_), size_(other.size_), info_(other.info_) {
+    : buffer_(other.buffer_), size_(other.size_), info_(other.info_), ownsBuffer_(other.ownsBuffer_) {
     // Take ownership, leave other in valid empty state
     other.buffer_ = nullptr;
     other.size_ = 0;
     other.info_ = {};
+    other.ownsBuffer_ = true;
 }
 
 FrameBuffer& FrameBuffer::operator=(FrameBuffer&& other) noexcept {
@@ -80,10 +81,12 @@ FrameBuffer& FrameBuffer::operator=(FrameBuffer&& other) noexcept {
         buffer_ = other.buffer_;
         size_ = other.size_;
         info_ = other.info_;
+        ownsBuffer_ = other.ownsBuffer_;
         // Leave other in valid empty state
         other.buffer_ = nullptr;
         other.size_ = 0;
         other.info_ = {};
+        other.ownsBuffer_ = true;
     }
     return *this;
 }
@@ -92,6 +95,7 @@ void FrameBuffer::swap(FrameBuffer& other) noexcept {
     std::swap(buffer_, other.buffer_);
     std::swap(size_, other.size_);
     std::swap(info_, other.info_);
+    std::swap(ownsBuffer_, other.ownsBuffer_);
 }
 
 FrameBuffer::~FrameBuffer() {
@@ -144,11 +148,22 @@ bool FrameBuffer::allocate(const FrameInfo& info) {
 }
 
 void FrameBuffer::release() {
-    if (buffer_) {
+    if (buffer_ && ownsBuffer_) {
         free(buffer_);
-        buffer_ = nullptr;
     }
+    buffer_ = nullptr;
     size_ = 0;
+    ownsBuffer_ = true;
+}
+
+void FrameBuffer::copyFrom(const FrameBuffer& source) {
+    // Release any owned buffer first
+    release();
+    // Create a non-owning view: same pointer + metadata, no pixel copy
+    buffer_ = source.buffer_;
+    size_ = source.size_;
+    info_ = source.info_;
+    ownsBuffer_ = false;  // we don't own this data
 }
 
 } // namespace videocomposer

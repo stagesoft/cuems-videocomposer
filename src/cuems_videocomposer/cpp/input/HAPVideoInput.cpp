@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -213,6 +212,22 @@ bool HAPVideoInput::open(const std::string& source) {
     LOG_INFO << "HAP: Ready for playback (" << frameCount_ << " frames, no indexing needed - all keyframes)";
 
     ready_ = true;
+
+#ifdef ENABLE_HAP_DIRECT
+    // Spin up the per-stream async decode worker. Snappy + DXT runs off the
+    // render thread; on miss/cold-start we still fall back to the synchronous
+    // path on this thread (see readFrameToTexture).
+    asyncHapDecoder_ = std::make_unique<AsyncHapDecoder>();
+    if (asyncHapDecoder_->open(source)) {
+        useAsyncHapDecode_ = true;
+        LOG_INFO << "HAPVideoInput: [HAP-DECODE] async worker enabled";
+    } else {
+        LOG_WARNING << "HAPVideoInput: [HAP-DECODE] async worker init failed, sync fallback";
+        asyncHapDecoder_.reset();
+        useAsyncHapDecode_ = false;
+    }
+#endif
+
     return true;
 }
 
@@ -304,6 +319,15 @@ bool HAPVideoInput::seek(int64_t frameNumber) {
     if (!isReady()) {
         return false;
     }
+
+#ifdef ENABLE_HAP_DIRECT
+    // Forward explicit seek to the async worker so MTC full-frame and other
+    // out-of-band repositions land at the right place. The worker's own
+    // backward-jump detector handles in-sequence wraps via setTargetFrame.
+    if (useAsyncHapDecode_ && asyncHapDecoder_) {
+        asyncHapDecoder_->seek(frameNumber);
+    }
+#endif
 
     currentFrame_ = frameNumber;
     return seekToFrame(frameNumber);
@@ -523,6 +547,31 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
     }
 
 #ifdef ENABLE_HAP_DIRECT
+    // Async path: snappy + DXT decode runs on the worker thread; we only do
+    // the GPU upload here on the render thread.
+    if (useAsyncHapDecode_ && asyncHapDecoder_) {
+        asyncHapDecoder_->setTargetFrame(frameNumber);
+        int waitMs = textureBuffer.isValid() ? 5 : 200;
+        const HapDecodedFrame* qf = asyncHapDecoder_->getFrame(frameNumber, waitMs);
+        if (qf) {
+            if (uploadHapFrameToTexture(*qf, textureBuffer)) {
+                currentFrame_ = frameNumber;
+                return true;
+            }
+            LOG_WARNING << "HAPVideoInput: [HAP-DECODE] GPU upload failed frame=" << frameNumber;
+        } else {
+            if (++asyncMissCount_ % 30 == 1) {
+                LOG_WARNING << "HAPVideoInput: [HAP-DECODE] miss frame=" << frameNumber
+                            << " oldest=" << asyncHapDecoder_->getOldestFrame()
+                            << " newest=" << asyncHapDecoder_->getNewestFrame();
+            }
+            if (textureBuffer.isValid()) {
+                return true;  // hold last frame
+            }
+            // Cold-start miss: fall through to the synchronous path below.
+        }
+    }
+
     // Try direct HAP decode first (optimal path)
     AVPacket* packet = av_packet_alloc();
     if (!packet) {
@@ -532,15 +581,15 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
     if (readRawPacket(frameNumber, packet)) {
         bool success = decodeHapDirectToTexture(packet, textureBuffer);
         av_packet_free(&packet);
-        
+
         if (success) {
             currentFrame_ = frameNumber;
             return true;
         }
-        
+
         // Log fallback warning (once per file)
         if (!fallbackWarningShown_) {
-            LOG_WARNING << "HAP direct decode failed for frame " << frameNumber 
+            LOG_WARNING << "HAP direct decode failed for frame " << frameNumber
                        << ", falling back to FFmpeg RGBA path (reduced performance)";
             LOG_WARNING << "Error: " << hapDecoder_.getLastError();
             fallbackWarningShown_ = true;
@@ -552,6 +601,97 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
 
     // Fallback: FFmpeg decode to RGBA, upload as uncompressed
     return decodeWithFFmpegFallback(frameNumber, textureBuffer);
+}
+
+#ifdef ENABLE_HAP_DIRECT
+bool HAPVideoInput::uploadHapFrameToTexture(const HapDecodedFrame& qf,
+                                            GPUTextureFrameBuffer& textureBuffer) {
+    // Mirrors the texture-upload half of decodeHapDirectToTexture(). The
+    // worker has already done getVariant + decode; we only choose the right
+    // GL upload path based on the per-packet variant.
+    if (qf.textures.empty()) {
+        return false;
+    }
+
+    if (qf.variant == HapVariant::HAP_Q_ALPHA) {
+        if (qf.textures.size() != 2) {
+            LOG_WARNING << "HAPVideoInput: [HAP-DECODE] HAP_Q_ALPHA expects 2 textures, got "
+                        << qf.textures.size();
+            return false;
+        }
+        if (!textureBuffer.isValid() ||
+            textureBuffer.getPlaneType() != TexturePlaneType::HAP_Q_ALPHA) {
+            if (!textureBuffer.allocateHapQAlpha(frameInfo_)) {
+                LOG_WARNING << "HAPVideoInput: [HAP-DECODE] HAP_Q_ALPHA allocation failed";
+                return false;
+            }
+        }
+        if (!textureBuffer.uploadHapQAlphaData(
+                qf.textures[0].data.data(), qf.textures[0].size,
+                qf.textures[1].data.data(), qf.textures[1].size,
+                frameInfo_.width, frameInfo_.height)) {
+            return false;
+        }
+        textureBuffer.setHapVariant(HapVariant::HAP_Q_ALPHA);
+        return true;
+    }
+
+    if (qf.textures.size() != 1) {
+        LOG_WARNING << "HAPVideoInput: [HAP-DECODE] single-texture HAP expected 1 texture, got "
+                    << qf.textures.size();
+        return false;
+    }
+
+    GLenum glFormat;
+    HapVariant gpuVariant;
+    switch (qf.textures[0].format) {
+        case HapTextureFormat_RGB_DXT1:
+            glFormat = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+            gpuVariant = HapVariant::HAP;
+            break;
+        case HapTextureFormat_RGBA_DXT5:
+            glFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+            gpuVariant = HapVariant::HAP_ALPHA;
+            break;
+        case HapTextureFormat_YCoCg_DXT5:
+            glFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+            gpuVariant = HapVariant::HAP_Q;
+            break;
+        case HapTextureFormat_RGBA_BPTC_UNORM:
+            glFormat = GL_COMPRESSED_RGBA_BPTC_UNORM;
+            gpuVariant = HapVariant::HAP_R;
+            break;
+        default:
+            LOG_WARNING << "HAPVideoInput: [HAP-DECODE] unsupported texture format 0x"
+                        << std::hex << qf.textures[0].format;
+            return false;
+    }
+
+    if (!textureBuffer.isValid() || textureBuffer.getTextureFormat() != glFormat) {
+        if (!textureBuffer.allocate(frameInfo_, glFormat, true)) {
+            LOG_WARNING << "HAPVideoInput: [HAP-DECODE] texture allocation failed";
+            return false;
+        }
+    }
+
+    if (!textureBuffer.uploadCompressedData(
+            qf.textures[0].data.data(), qf.textures[0].size,
+            frameInfo_.width, frameInfo_.height, glFormat)) {
+        return false;
+    }
+    textureBuffer.setHapVariant(gpuVariant);
+    return true;
+}
+#endif
+
+void HAPVideoInput::setLoopMode(bool enabled) {
+#ifdef ENABLE_HAP_DIRECT
+    if (asyncHapDecoder_) {
+        asyncHapDecoder_->setLoopMode(enabled);
+    }
+#else
+    (void)enabled;
+#endif
 }
 
 void HAPVideoInput::refineHAPVariantFromFrame(AVFrame* frame) {
@@ -801,6 +941,17 @@ bool HAPVideoInput::decodeWithFFmpegFallback(int64_t frameNumber, GPUTextureFram
 }
 
 void HAPVideoInput::cleanup() {
+#ifdef ENABLE_HAP_DIRECT
+    // Stop and join the async worker BEFORE tearing down anything else.
+    // The worker owns its own MediaFileReader so it isn't tied to our codec
+    // state, but joining first keeps shutdown ordering simple.
+    if (asyncHapDecoder_) {
+        asyncHapDecoder_->close();
+        asyncHapDecoder_.reset();
+    }
+    useAsyncHapDecode_ = false;
+#endif
+
     frameCount_ = 0;
 
     // Free frame (must use av_frame_free for frames allocated with av_frame_alloc)

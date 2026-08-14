@@ -27,7 +27,7 @@ sudo apt-get install \
   libegl1-mesa-dev libgbm-dev liblo-dev python3
 ```
 
-Exact package names may differ by distro; see [debian/control](../debian/control) for the list used by the Debian package.
+Exact package names may differ by distro; see `debian/control` in the repository for the list used by the Debian package.
 
 ### Configure and build
 
@@ -74,7 +74,7 @@ You can run the executable from `build/` without installing (e.g. `./cuems-video
 ### Prerequisites
 
 - **NDI SDK** (optional but recommended for full feature set): place in `/opt/NDI SDK for Linux/` or set `NDI_SDK_DIR` to the SDK root. If not present, the package still builds but without NDI support.
-- **Build dependencies:** install with `apt-get build-dep` if the package is in your apt sources, or install the list from [debian/BUILD-INSTRUCTIONS.md](../debian/BUILD-INSTRUCTIONS.md).
+- **Build dependencies:** install with `apt-get build-dep` if the package is in your apt sources, or install the list from `debian/BUILD-INSTRUCTIONS.md` in the repository.
 
 ### Build the package
 
@@ -108,4 +108,4 @@ sudo apt-get install -f   # resolve dependencies if needed
 
 ### Full instructions and troubleshooting
 
-For detailed steps, NDI compliance verification, and troubleshooting (missing NDI SDK, build deps, runtime library path), see [debian/BUILD-INSTRUCTIONS.md](../debian/BUILD-INSTRUCTIONS.md).
+For detailed steps, NDI compliance verification, and troubleshooting (missing NDI SDK, build deps, runtime library path), see `debian/BUILD-INSTRUCTIONS.md` in the repository.

@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -25,6 +24,7 @@
 
 #include "../video/FrameBuffer.h"
 #include "../video/FrameFormat.h"
+#include "../video/GPUTextureFrameBuffer.h"
 #include <string>
 #include <cstdint>
 
@@ -149,6 +149,44 @@ public:
     virtual bool readLatestFrame(FrameBuffer& buffer) {
         return readFrame(0, buffer);
     }
+
+    // --- Shared decoder cache ---
+    // Used by driver layers to store decoded frames for secondary layers to read.
+    // Cache stores frames by value inside InputSource (not raw pointers to external buffers).
+    // Implemented in the base class — all subclasses inherit cache support automatically.
+
+    bool hasCachedFrame() const { return hasCachedFrame_; }
+    const GPUTextureFrameBuffer* getCachedGPUTexture() const { return cachedOnGPU_ ? &cachedGPU_ : nullptr; }
+    const FrameBuffer* getCachedCPUFrame() const { return !cachedOnGPU_ ? &cachedCPU_ : nullptr; }
+    int64_t getCachedFrameNumber() const { return cachedFrameNumber_; }
+    bool isCachedOnGPU() const { return cachedOnGPU_; }
+
+    void setCachedFrame(int64_t frameNumber, const GPUTextureFrameBuffer& gpu) {
+        cachedGPU_ = gpu;               // non-owning copy (ownsTexture_=false via copy ctor)
+        cachedFrameNumber_ = frameNumber;
+        cachedOnGPU_ = true;
+        hasCachedFrame_ = true;
+    }
+
+    void setCachedFrame(int64_t frameNumber, const FrameBuffer& cpu) {
+        cachedCPU_.copyFrom(cpu);        // non-owning shallow copy (pointer + metadata, NOT pixels)
+        cachedFrameNumber_ = frameNumber;
+        cachedOnGPU_ = false;
+        hasCachedFrame_ = true;
+    }
+
+    void invalidateCache() {
+        hasCachedFrame_ = false;
+        cachedFrameNumber_ = -1;
+    }
+
+private:
+    // Shared decoder cache storage (only populated when this InputSource is used as a shared driver)
+    bool hasCachedFrame_ = false;
+    int64_t cachedFrameNumber_ = -1;
+    GPUTextureFrameBuffer cachedGPU_;
+    FrameBuffer cachedCPU_;
+    bool cachedOnGPU_ = false;
 };
 
 } // namespace videocomposer

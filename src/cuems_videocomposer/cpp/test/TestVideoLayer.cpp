@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -204,13 +203,20 @@ bool test_VideoLayer_SyncUpdate() {
     syncPtr->connect();
     syncPtr->setCurrentFrame(50);
     syncPtr->setRolling(true);
-    
+
+    // A layer ignores its sync source until MTC following is switched on: the
+    // engine holds a cue and only sends /mtcfollow 1 when live MTC reaches the
+    // cue start (0499270 "layers start hidden with no MTC follow until engine
+    // enables"). Without this the layer correctly refuses to move and the
+    // assertion below sees the initial -1.
+    layer->setMtcFollow(true);
+
     layer->play();
     layer->update();
-    
+
     // Frame should be updated from sync source
     TEST_ASSERT_EQ(layer->getCurrentFrame(), 50);
-    
+
     return true;
 }
 

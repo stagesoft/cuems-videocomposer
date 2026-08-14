@@ -1,22 +1,21 @@
 /*
- * SPDX-License-Identifier: LGPL-3.0-or-later
- *
- * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
+ * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Lesser General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
@@ -86,6 +85,23 @@ public:
      * @return true if a full frame was received since last check
      */
     virtual bool wasFullFrameReceived() { return false; }
+    
+    /**
+     * Get the current timecode position in milliseconds.
+     * Used by FramerateConverterSyncSource to compute video frames directly
+     * from continuous time, avoiding double-quantization when converting
+     * between different frame rates.
+     * @return Time in milliseconds, or -1 if not available
+     */
+    virtual long getTimeMs() const { return -1; }
+
+    /**
+     * Get the display-pipeline latency compensation in milliseconds.
+     * MIDISyncSource advances pollFrame() by this amount; callers that need
+     * the raw wire-MTC position (e.g. OSD display) subtract it back.
+     * @return Latency in milliseconds (0 if not applicable)
+     */
+    virtual long getDisplayLatencyMs() const { return 0; }
 };
 
 } // namespace videocomposer
