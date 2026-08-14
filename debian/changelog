@@ -1,3 +1,19 @@
+cuems-videocomposer (0.1.2-5) unstable; urgency=medium
+
+  * Build-Depends declared three packages that do not exist in Debian
+    (libopenmp-dev, libva-drm2-dev, libva-x11-2-dev), so dpkg-checkbuilddeps
+    refused every build unless -d was passed. The libva pair was redundant
+    too — libva-dev, already listed, ships all three VA headers — and OpenMP
+    is an optional find_package() satisfied by g++'s own libgomp. Removed;
+    dpkg-checkbuilddeps now passes.
+  * test_VideoLayer_SyncUpdate had failed since layers stopped following MTC
+    by default, forcing 0.1.2-4 to be built with DEB_BUILD_OPTIONS=nocheck.
+    The default is correct (the engine sends /mtcfollow at the cue start), so
+    the test was stale; it now enables MTC following before asserting.
+    Suite: 32 passed, 0 failed. This release builds with tests enabled.
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 14 Aug 2026 20:22:10 +0200
+
 cuems-videocomposer (0.1.2-4) unstable; urgency=medium
 
   * display.conf per-output keys are applied instead of merely parsed.
