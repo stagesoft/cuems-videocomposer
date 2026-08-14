@@ -314,6 +314,37 @@ public:
     void restoreOriginalModes();
 
     /**
+     * Per-output mode request coming from the operator's display.conf.
+     *
+     * The resolution policy is global, so before this there was no way to ask a
+     * single output for a specific mode: display.conf's per-output `resolution=`
+     * and `refresh=` were parsed into OutputConfiguration and then never read
+     * (ClickUp 869efhv04). An output carrying an explicit refresh is "pinned" —
+     * harmonizeRefreshRates() then leaves it alone, because otherwise it would
+     * immediately raise it back to the highest rate every output supports, which
+     * is what made 2x4K30 impossible to request.
+     */
+    struct OutputModeOverride {
+        int width = 0;             // 0 = follow the global resolution policy
+        int height = 0;
+        double refreshRate = 0.0;  // >0 = pinned, excluded from harmonization
+    };
+
+    /**
+     * Install per-output overrides. Outputs with no entry keep policy behaviour.
+     * Must be called before applyResolutionMode() to have any effect.
+     */
+    void setOutputModeOverrides(const std::map<std::string, OutputModeOverride>& overrides) {
+        modeOverrides_ = overrides;
+    }
+
+    /** Override for an output, or nullptr when it has none. */
+    const OutputModeOverride* getOutputModeOverride(const std::string& name) const {
+        auto it = modeOverrides_.find(name);
+        return it == modeOverrides_.end() ? nullptr : &it->second;
+    }
+
+    /**
      * Harmonize refresh rates across all connected outputs.
      * Called once from applyResolutionMode() after all outputs are configured.
      * Finds the highest refresh rate that all outputs support at their selected resolution.
@@ -409,6 +440,10 @@ private:
     std::string devicePath_;
     bool atomicSupported_ = false;
     ResolutionMode resolutionMode_ = ResolutionMode::HD_1080P;  // Default to 1080p
+
+    // Per-output overrides from display.conf, keyed by connector name. Empty by
+    // default, so an installation that sets nothing keeps the previous behaviour.
+    std::map<std::string, OutputModeOverride> modeOverrides_;
     
     // DRM resources
     drmModeRes* resources_ = nullptr;

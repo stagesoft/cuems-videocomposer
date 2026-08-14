@@ -1004,7 +1004,52 @@ bool DRMOutputManager::applyResolutionModeToOutput(int index) {
     }
     
     const drmModeModeInfo* bestMode = nullptr;
-    
+
+    // An explicit per-output request in display.conf outranks the global policy.
+    // Without this the operator's `resolution=` / `refresh=` were parsed, stored,
+    // written back on save and never consulted (ClickUp 869efhv04).
+    const OutputModeOverride* ovr = getOutputModeOverride(conn->info.name);
+    if (ovr && (ovr->width > 0 || ovr->refreshRate > 0.0)) {
+        // Whichever half of the request was left unspecified keeps what the policy
+        // would have chosen, so `refresh=` alone preserves the resolution and
+        // `resolution=` alone preserves the rate.
+        int wantW = ovr->width;
+        int wantH = ovr->height;
+        if (wantW <= 0 || wantH <= 0) {
+            wantW = conn->info.width;
+            wantH = conn->info.height;
+        }
+
+        const drmModeModeInfo* requested =
+            findMode(conn->connector, wantW, wantH, ovr->refreshRate);
+        if (!requested) {
+            // Fail loudly. Silently dropping to the preferred mode is what kept the
+            // original bug invisible: the operator had no way to tell that the mode
+            // they asked for did not exist.
+            LOG_ERROR << "DRMOutputManager: " << conn->info.name
+                      << " requested " << wantW << "x" << wantH << "@"
+                      << (ovr->refreshRate > 0.0 ? std::to_string(ovr->refreshRate) : std::string("any"))
+                      << " in display.conf, but the connector has no such mode - "
+                      << "falling back to the resolution policy";
+        } else {
+            conn->info.width = requested->hdisplay;
+            conn->info.height = requested->vdisplay;
+            if (requested->htotal && requested->vtotal) {
+                conn->info.refreshRate = (double)requested->clock * 1000.0 /
+                                         ((double)requested->htotal * (double)requested->vtotal);
+            }
+            conn->currentMode = *requested;
+            conn->hasCurrentMode = true;
+
+            LOG_INFO << "DRMOutputManager: " << conn->info.name
+                     << " configured from display.conf to "
+                     << requested->hdisplay << "x" << requested->vdisplay
+                     << "@" << conn->info.refreshRate << "Hz"
+                     << (ovr->refreshRate > 0.0 ? " (refresh pinned)" : "");
+            return true;
+        }
+    }
+
     switch (resolutionMode_) {
         case ResolutionMode::NATIVE:
             bestMode = findBestMode(*conn, 0, 0, false);  // Use EDID preferred (panel's native)
@@ -1259,16 +1304,40 @@ bool DRMOutputManager::verifyCrtcMode(int fd, uint32_t crtcId,
 }
 
 void DRMOutputManager::harmonizeRefreshRates() {
-    // Collect refresh rates from all connected outputs that have a selected mode
+    // Collect refresh rates from all connected outputs that have a selected mode.
+    //
+    // An output whose display.conf section pins an explicit refresh= is excluded:
+    // harmonization always climbs to the highest rate every output supports, so
+    // including a pinned output would immediately undo the operator's request.
+    // That is precisely what made 2x4K30 impossible to ask for (ClickUp 869efhv04)
+    // — the capacity-relevant configuration on the FP530, where 60Hz drops frames
+    // and 30Hz does not. Outputs without a pin still harmonize among themselves.
     std::vector<size_t> connectedIndices;
+    std::vector<std::string> pinnedNames;
     for (size_t i = 0; i < connectors_.size(); ++i) {
-        if (connectors_[i].info.connected && connectors_[i].hasCurrentMode) {
-            connectedIndices.push_back(i);
+        if (!connectors_[i].info.connected || !connectors_[i].hasCurrentMode) {
+            continue;
         }
+        const OutputModeOverride* ovr = getOutputModeOverride(connectors_[i].info.name);
+        if (ovr && ovr->refreshRate > 0.0) {
+            pinnedNames.push_back(connectors_[i].info.name);
+            continue;
+        }
+        connectedIndices.push_back(i);
+    }
+
+    if (!pinnedNames.empty()) {
+        std::string names;
+        for (const auto& n : pinnedNames) {
+            if (!names.empty()) names += ", ";
+            names += n;
+        }
+        LOG_INFO << "DRMOutputManager: refresh rate pinned by display.conf on " << names
+                 << " - excluded from harmonization";
     }
 
     if (connectedIndices.size() < 2) {
-        return;  // Nothing to harmonize with 0-1 outputs
+        return;  // Nothing to harmonize with 0-1 free outputs
     }
 
     // Check if all rates already match (within 0.5Hz tolerance)
