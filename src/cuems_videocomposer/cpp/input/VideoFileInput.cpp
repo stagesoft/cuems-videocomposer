@@ -121,19 +121,30 @@ bool VideoFileInput::open(const std::string& source) {
     }
 
     // Open video file using MediaFileReader
+    //
+    // Every failure below used to return a bare false, so a failed load produced
+    // one message ("Failed to open <path>") for six unrelated causes. Each site
+    // now says which step refused and why - see ClickUp 869efh2ma, where a large
+    // .mov failed to load and the log could not distinguish a truncated file from
+    // an unsupported container or a codec problem.
     if (!mediaReader_.open(source)) {
+        LOG_ERROR << "VideoFileInput: cannot open " << source << ": "
+                  << mediaReader_.getLastError();
         return false;
     }
 
     // Get format context for compatibility
     formatCtx_ = mediaReader_.getFormatContext();
     if (!formatCtx_) {
+        LOG_ERROR << "VideoFileInput: no format context after opening " << source;
         return false;
     }
 
     // Find video stream using MediaFileReader
     videoStream_ = mediaReader_.findStream(AVMEDIA_TYPE_VIDEO);
     if (videoStream_ < 0) {
+        LOG_ERROR << "VideoFileInput: no video stream in " << source
+                  << " (" << mediaReader_.getStreamCount() << " streams present)";
         mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
@@ -141,6 +152,11 @@ bool VideoFileInput::open(const std::string& source) {
 
     // Open codec (try hardware first, fallback to software)
     if (!openHardwareCodec() && !openCodec()) {
+        AVCodecParameters* cp = mediaReader_.getCodecParameters(videoStream_);
+        LOG_ERROR << "VideoFileInput: no usable decoder (hardware and software both "
+                  << "failed) for codec "
+                  << (cp ? avcodec_get_name(cp->codec_id) : "unknown")
+                  << " in " << source;
         mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
@@ -149,6 +165,8 @@ bool VideoFileInput::open(const std::string& source) {
     // Get video properties
     AVStream* avStream = mediaReader_.getStream(videoStream_);
     if (!avStream) {
+        LOG_ERROR << "VideoFileInput: video stream " << videoStream_
+                  << " unavailable in " << source;
         mediaReader_.close();
         formatCtx_ = nullptr;
         return false;
@@ -202,6 +220,9 @@ bool VideoFileInput::open(const std::string& source) {
         if (!loadCachedIndex()) {
             // Cache miss or stale – run the full 3-pass indexing
             if (!indexFrames()) {
+                LOG_ERROR << "VideoFileInput: frame indexing failed for " << source
+                          << " (estimated " << frameInfo_.totalFrames << " frames, "
+                          << frameInfo_.duration << "s @ " << frameInfo_.framerate << "fps)";
                 cleanup();
                 return false;
             }
