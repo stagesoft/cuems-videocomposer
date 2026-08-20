@@ -24,6 +24,9 @@
  */
 
 #include "DRMSurface.h"
+// #region DEBUG
+#include "TraceMarker.h"
+// #endregion DEBUG
 #include "DRMOutputManager.h"
 #include "../../utils/Logger.h"
 
@@ -1158,6 +1161,9 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
     }
 
     // Normal path: use page flip for vsync
+    // #region DEBUG
+    VC_MARK("[VC] pageflip ioctl out=%s crtc=%u", outputName_.c_str(), crtcId_);
+    // #endregion DEBUG
     ret = drmModePageFlip(outputManager_->getFd(), crtcId_,
                               nextFb_.fbId, DRM_MODE_PAGE_FLIP_EVENT, this);
 
@@ -1386,6 +1392,10 @@ void DRMSurface::pageFlipHandler2(int fd, unsigned int sequence,
     }
 
     if (surface) {
+        // #region DEBUG
+        VC_MARK("[VC] flip event crtc=%u seq=%u out=%s", crtc_id, sequence,
+                surface->outputName_.c_str());
+        // #endregion DEBUG
         surface->presentationTiming_.recordFlip(sec, usec, sequence);
 
         if (surface->previousBo_ && surface->gbmSurface_) {

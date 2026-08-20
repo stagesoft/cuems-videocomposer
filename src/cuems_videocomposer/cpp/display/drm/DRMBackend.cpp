@@ -24,6 +24,9 @@
  */
 
 #include "DRMBackend.h"
+// #region DEBUG
+#include "TraceMarker.h"
+// #endregion DEBUG
 #include "../OpenGLRenderer.h"
 #include "../DisplayConfigurationManager.h"
 #include "../StartupSplash.h"
@@ -512,6 +515,13 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
     static int64_t dbg_outsideUs = 0;
     dbg_outsideUs += std::chrono::duration_cast<std::chrono::microseconds>(dbg_entry - dbg_prevEntry).count();
     dbg_iters++;
+    static const bool dbg_markerAnnounced = [] {
+        LOG_INFO << "[PACING] trace_marker: "
+                 << ::cuems::debug::TraceMarker::instance().status();
+        return true;
+    }();
+    (void)dbg_markerAnnounced;
+    VC_MARK("[VC] iter enter");
     // #endregion DEBUG
 
     // Drain whatever has already completed, without blocking.
@@ -533,6 +543,7 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
     for (const auto& [sname, s] : surfaces_) {
         if (s && s->isReadyToPresent(now)) { dbg_ready[sname]++; }
     }
+    VC_MARK("[VC] drained ready=%zu", presentSet.size());
     // #endregion DEBUG
 
     // Nothing ready yet: block until the first flip completes on ANY CRTC.
@@ -562,6 +573,7 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
         auto waitMs = std::chrono::duration_cast<std::chrono::milliseconds>(wake - now).count();
         // #region DEBUG
         auto dbg_w0 = std::chrono::steady_clock::now();
+        VC_MARK("[VC] poll enter timeout_ms=%d", static_cast<int>(std::max<int64_t>(waitMs, 1)));
         // #endregion DEBUG
         bool dbg_got = DRMSurface::waitForAnyFlip(fd, static_cast<int>(std::max<int64_t>(waitMs, 1)));
         // #region DEBUG
@@ -579,6 +591,7 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
         presentSet = collectReadySurfaces(now);
         // #region DEBUG
         if (dbg_got && presentSet.empty()) { dbg_wakesEmpty++; }
+        VC_MARK("[VC] poll exit got=%d ready=%zu", dbg_got ? 1 : 0, presentSet.size());
         // #endregion DEBUG
     }
 
@@ -603,9 +616,17 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
 
     std::vector<OutputSurface*> outs(presentSet.begin(), presentSet.end());
 
+    // #region DEBUG
+    VC_MARK("[VC] render begin n=%zu recomposite=%d hz=%.0f", outs.size(),
+            recomposite ? 1 : 0,
+            presentSet.empty() ? 0.0 : presentSet.front()->effectiveRefreshHz());
+    // #endregion DEBUG
     primary->makeCurrent();
     multiRenderer_->render(layerManager, osdManager, &outs, recomposite);
     primary->releaseCurrent();
+    // #region DEBUG
+    VC_MARK("[VC] render end");
+    // #endregion DEBUG
 
     // Atomic needs every participant eligible; otherwise this batch goes out
     // as individual page flips, which is also the cold-boot modeset path.
@@ -672,6 +693,14 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
     }
     // #endregion DEBUG
 
+    // #region DEBUG
+    {
+        std::ostringstream crtcs;
+        for (auto* surface : presentSet) { crtcs << surface->getOutputName() << ","; }
+        VC_MARK("[VC] submit enter atomic=%d n=%zu outs=%s", useAtomic ? 1 : 0,
+                presentSet.size(), crtcs.str().c_str());
+    }
+    // #endregion DEBUG
     if (useAtomic) {
         atomicPageFlipSubset(presentSet);
     } else {
@@ -679,6 +708,9 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
             surface->schedulePageFlip();
         }
     }
+    // #region DEBUG
+    VC_MARK("[VC] submit exit");
+    // #endregion DEBUG
 
     // #region DEBUG
     // Burst trace: the first iterations in full detail, to see the actual
@@ -859,6 +891,9 @@ bool DRMBackend::atomicPageFlipSubset(const std::vector<DRMSurface*>& participan
         // Do NOT use ALLOW_MODESET — it forces full modeset (link training,
         // DPMS) which takes 2+ vsyncs. Only needed for initial modeset.
         uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
+        // #region DEBUG
+        VC_MARK("[VC] atomic ioctl enter n=%zu", preparedSurfaces.size());
+        // #endregion DEBUG
         if (outputManager_->commitAtomic(request, flags)) {
             // Success — mark surfaces as flip-pending; buffer release is
             // deferred to pageFlipHandler2 when flip event fires
