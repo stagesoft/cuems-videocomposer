@@ -392,14 +392,6 @@ void DRMBackend::renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManag
 }
 
 namespace {
-// Two outputs count as the same refresh rate within this margin -- the same
-// tolerance harmonizeRefreshRates() and the mixed-rate check use. Pinning
-// refresh= in display.conf takes an output out of harmonisation, so two
-// nominally identical monitors can resolve to slightly different rates from
-// their own EDIDs; without a tolerance they would split into separate classes
-// and stop presenting together.
-constexpr double kRefreshToleranceHz = 0.5;
-
 // Ceiling on how long one render() may block waiting for a vblank. Past this
 // it returns empty-handed so the run loop can service hotplug and OSC. Far
 // longer than any real frame interval; only reached when nothing is flipping.
@@ -408,75 +400,15 @@ constexpr auto kMaxWaitPerRender = std::chrono::milliseconds(200);
 
 std::vector<DRMSurface*> DRMBackend::collectReadySurfaces(
         std::chrono::steady_clock::time_point now) {
-    std::vector<DRMSurface*> all;
+    // Physical layout order, which the per-surface logs assume.
+    std::vector<DRMSurface*> ready;
     for (const auto& name : orderedSurfaceNames()) {
         auto& surface = surfaces_.at(name);
-        if (surface) {
-            all.push_back(surface.get());
+        if (surface && surface->isReadyToPresent(now)) {
+            ready.push_back(surface.get());
         }
     }
-    if (all.empty()) {
-        return {};
-    }
-
-    std::vector<DRMSurface*> byRate(all);
-    std::sort(byRate.begin(), byRate.end(), [](DRMSurface* a, DRMSurface* b) {
-        return a->effectiveRefreshHz() < b->effectiveRefreshHz();
-    });
-
-    std::vector<DRMSurface*> ready;
-    size_t i = 0;
-    while (i < byRate.size()) {
-        const double base = byRate[i]->effectiveRefreshHz();
-        size_t j = i + 1;
-        while (j < byRate.size() &&
-               byRate[j]->effectiveRefreshHz() - base <= kRefreshToleranceHz) {
-            ++j;
-        }
-
-        // #region DEBUG
-        // Hypothesis under test: requiring the WHOLE class costs one extra
-        // wait whenever its members' vblanks are out of phase, which halves
-        // the class's achievable rate. Setting this treats every surface as
-        // its own class, trading frame coherence across a blended pair for
-        // rate -- purely to measure whether the grouping is the throttle.
-        static const bool dbg_noClasses = [] {
-            const char* e = std::getenv("VIDEOCOMPOSER_PACING_NO_CLASSES");
-            return e && (std::string(e) == "1" || std::string(e) == "true");
-        }();
-        if (dbg_noClasses) {
-            for (size_t k = i; k < j; ++k) {
-                if (byRate[k]->isReadyToPresent(now)) { ready.push_back(byRate[k]); }
-            }
-            i = j;
-            continue;
-        }
-        // #endregion DEBUG
-
-        // All or nothing per class: a class that is only half ready waits.
-        bool classReady = true;
-        for (size_t k = i; k < j; ++k) {
-            if (!byRate[k]->isReadyToPresent(now)) {
-                classReady = false;
-                break;
-            }
-        }
-        if (classReady) {
-            ready.insert(ready.end(), byRate.begin() + i, byRate.begin() + j);
-        }
-        i = j;
-    }
-
-    // Back to physical layout order, which the atomic request and the
-    // per-surface logs both assume.
-    std::vector<DRMSurface*> ordered;
-    ordered.reserve(ready.size());
-    for (auto* surface : all) {
-        if (std::find(ready.begin(), ready.end(), surface) != ready.end()) {
-            ordered.push_back(surface);
-        }
-    }
-    return ordered;
+    return ready;
 }
 
 void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
@@ -628,29 +560,16 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
     VC_MARK("[VC] render end");
     // #endregion DEBUG
 
-    // Atomic needs every participant eligible; otherwise this batch goes out
-    // as individual page flips, which is also the cold-boot modeset path.
-    bool useAtomic = outputManager_->supportsAtomic();
     // #region DEBUG
-    // Hypothesis under test: amdgpu DC serialises overlapping non-blocking
-    // atomic commits, so a second commit issued while another is in flight
-    // lands on the LATER CRTC's vblank -- which would pin both refresh classes
-    // to the slower one no matter how the pacing is scheduled. Legacy
-    // drmModePageFlip is per-CRTC and should not have that coupling.
+    // Kept as a bisection scalpel: legacy drmModePageFlip is per-CRTC by
+    // construction, so it answers "is the atomic path itself the coupling?".
+    // On amdgpu it is NOT a cure -- DC serialises legacy flips too (measured,
+    // Phase 0) -- while on i915 it is. Hence the switch, not a default.
     static const bool dbg_legacyFlip = [] {
         const char* e = std::getenv("VIDEOCOMPOSER_PACING_LEGACY_FLIP");
         return e && (std::string(e) == "1" || std::string(e) == "true");
     }();
-    if (dbg_legacyFlip) { useAtomic = false; }
     // #endregion DEBUG
-    if (useAtomic) {
-        for (auto* surface : presentSet) {
-            if (!surface->isAtomicEligible()) {
-                useAtomic = false;
-                break;
-            }
-        }
-    }
 
     // #region DEBUG
     if (recomposite) { dbg_composites++; }
@@ -693,25 +612,34 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
     }
     // #endregion DEBUG
 
-    // #region DEBUG
-    {
-        std::ostringstream crtcs;
-        for (auto* surface : presentSet) { crtcs << surface->getOutputName() << ","; }
-        VC_MARK("[VC] submit enter atomic=%d n=%zu outs=%s", useAtomic ? 1 : 0,
-                presentSet.size(), crtcs.str().c_str());
-    }
-    // #endregion DEBUG
-    if (useAtomic) {
-        atomicPageFlipSubset(presentSet);
-    } else {
-        for (auto* surface : presentSet) {
+    // One commit per CRTC, never a batch. A commit spanning several CRTCs does
+    // not complete until its LAST one has flipped, and the next commit over
+    // those CRTCs queues behind it -- so a batch ties every output in it to its
+    // most out-of-phase neighbour. Measured on the FP530 (869emcrwa), the
+    // kernel holds a commit 13.9ms at one CRTC, 22.4ms at two or three, and
+    // 34.1ms at four; a frame at 60Hz is 16.7ms. Only the single-CRTC commit
+    // still makes its vblank.
+    const bool atomicSupported = outputManager_->supportsAtomic() && !dbg_legacyFlip;
+    for (auto* surface : presentSet) {
+        // Eligibility is per surface too: an output still warming up no longer
+        // drags the rest onto the legacy path with it, and a failure on one no
+        // longer aborts the others.
+        const bool useAtomic = atomicSupported && surface->isAtomicEligible();
+        // #region DEBUG
+        // Inside the loop on purpose: one marker pair per commit, so the trace
+        // shows the per-CRTC granularity the fix is supposed to produce.
+        VC_MARK("[VC] submit enter atomic=%d out=%s", useAtomic ? 1 : 0,
+                surface->getOutputName().c_str());
+        // #endregion DEBUG
+        if (useAtomic) {
+            atomicPageFlipSubset({surface});
+        } else {
             surface->schedulePageFlip();
         }
+        // #region DEBUG
+        VC_MARK("[VC] submit exit out=%s", surface->getOutputName().c_str());
+        // #endregion DEBUG
     }
-    // #region DEBUG
-    VC_MARK("[VC] submit exit");
-    // #endregion DEBUG
-
     // #region DEBUG
     // Burst trace: the first iterations in full detail, to see the actual
     // interleave of refresh classes rather than infer it from per-second sums.

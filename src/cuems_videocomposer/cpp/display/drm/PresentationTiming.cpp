@@ -79,6 +79,8 @@ void PresentationTiming::recordFlip(unsigned int sec, unsigned int usec, unsigne
             // Calculate actual vsync duration
             current_.vsync_duration = ust_delta / msc_delta;
 
+            checkSustainedUnderrate(ust_delta, current_.ust);
+
             // Detect skipped vsyncs (msc_delta > 1 means we missed frames)
             // msc_delta of 1 = perfect, 2 = 1 skipped, etc.
             current_.skipped_vsyncs = msc_delta - 1;
@@ -198,12 +200,71 @@ void PresentationTiming::reset() {
     current_ = PresentationEntry();
     previous_ = PresentationEntry();
     totalUnexpectedDrops_ = 0;
+    presentIntervalEmaNs_ = 0;
+    presentSamples_ = 0;
+    underrateSinceNs_ = 0;
+    underrateWarned_ = false;
     // Keep expectedVsyncNs_, displayHz_, initialized_ - they're set by init()
 
     std::lock_guard<std::mutex> lock(mutex_);
     pendingSubmits_.clear();
     latencySamples_.clear();
     // captureEnabled_ / maxSamples_ preserved across reset() — caller controls them via enable/disable.
+}
+
+namespace {
+// A shortfall this size is real, not jitter: half rate is 50%, and the smallest
+// fraction seen in the field was 5/6 (83%).
+constexpr double kUnderrateFraction = 0.90;
+// Hold it this long before saying anything. Long enough that a mode change, a
+// project load or a cold-boot warmup passes through without a word.
+constexpr int64_t kUnderrateHoldNs = 10LL * 1000000000LL;
+// Enough flips for the average to mean something.
+constexpr int64_t kUnderrateMinSamples = 30;
+// Smoothing over roughly the last 16 intervals.
+constexpr int64_t kEmaShift = 4;
+}  // namespace
+
+void PresentationTiming::checkSustainedUnderrate(int64_t intervalNs, int64_t nowNs) {
+    if (expectedVsyncNs_ <= 0 || intervalNs <= 0) {
+        return;
+    }
+
+    presentIntervalEmaNs_ = (presentIntervalEmaNs_ == 0)
+        ? intervalNs
+        : presentIntervalEmaNs_ + ((intervalNs - presentIntervalEmaNs_) >> kEmaShift);
+
+    if (++presentSamples_ < kUnderrateMinSamples) {
+        return;
+    }
+
+    // Longer interval than configured means fewer frames per second.
+    const bool short_of_rate =
+        presentIntervalEmaNs_ > static_cast<int64_t>(expectedVsyncNs_ / kUnderrateFraction);
+    const int64_t now = nowNs;
+
+    if (!short_of_rate) {
+        underrateSinceNs_ = 0;
+        underrateWarned_ = false;
+        return;
+    }
+
+    if (underrateSinceNs_ == 0) {
+        underrateSinceNs_ = now;
+        return;
+    }
+    if (underrateWarned_ || (now - underrateSinceNs_) < kUnderrateHoldNs) {
+        return;
+    }
+
+    underrateWarned_ = true;
+    const double measuredHz = 1e9 / static_cast<double>(presentIntervalEmaNs_);
+    // Deliberately free of the phrase the harness greps for in the drop line
+    // above -- these are two different signals and must stay separately
+    // parseable.
+    LOG_WARNING << tag() << ": configured " << displayHz_ << "Hz but presenting at ~"
+                << measuredHz << "Hz, sustained for "
+                << ((now - underrateSinceNs_) / 1000000000LL) << "s";
 }
 
 int64_t PresentationTiming::toNanoseconds(unsigned int sec, unsigned int usec) {

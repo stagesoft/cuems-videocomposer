@@ -63,6 +63,8 @@ extern bool test_PresentationTiming_StatisticsMedianAndP95();
 extern bool test_PresentationTiming_ResetClearsState();
 extern bool test_PresentationTiming_ConcurrentSubmitFlip();
 extern bool test_PresentationTiming_SkippedVsyncsFromMscDelta();
+extern bool test_PresentationTiming_SustainedUnderrateDetected();
+extern bool test_PresentationTiming_NoUnderrateAtFullRate();
 
 using namespace videocomposer::test;
 
@@ -108,6 +110,8 @@ int main() {
     TestFramework::instance().addTest("PresentationTiming_ResetClearsState", test_PresentationTiming_ResetClearsState);
     TestFramework::instance().addTest("PresentationTiming_ConcurrentSubmitFlip", test_PresentationTiming_ConcurrentSubmitFlip);
     TestFramework::instance().addTest("PresentationTiming_SkippedVsyncsFromMscDelta", test_PresentationTiming_SkippedVsyncsFromMscDelta);
+    TestFramework::instance().addTest("PresentationTiming_SustainedUnderrateDetected", test_PresentationTiming_SustainedUnderrateDetected);
+    TestFramework::instance().addTest("PresentationTiming_NoUnderrateAtFullRate", test_PresentationTiming_NoUnderrateAtFullRate);
 
     return TestFramework::instance().runAll();
 }
