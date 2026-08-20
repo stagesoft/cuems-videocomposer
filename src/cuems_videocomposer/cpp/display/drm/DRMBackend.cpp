@@ -36,6 +36,7 @@
 #include <limits>
 #include <set>
 #include <sstream>
+#include <iomanip>
 
 #include <algorithm>
 #include <chrono>
@@ -240,6 +241,10 @@ bool DRMBackend::openWindow() {
         primary->releaseCurrent();
     }
     
+    // Last thing before declaring the backend up: this is the only point past
+    // both the enabled= filter and initVirtualCanvas()'s per-output re-modeset.
+    warnIfMixedRefreshRates("openWindow");
+
     initialized_ = true;
     LOG_INFO << "DRMBackend: Initialized with " << surfaces_.size() << " output(s)"
              << (useVirtualCanvas_ ? " (Virtual Canvas mode)" : " (Legacy mode)");
@@ -361,6 +366,63 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
             surfaces_.at(name)->schedulePageFlip();
         }
     }
+}
+
+void DRMBackend::warnIfMixedRefreshRates(const char* context) {
+    // Read from surfaces_, not from the connector list: only outputs that
+    // survived enabled= in display.conf have a surface, and harmonizeRefreshRates()
+    // does not know about that filter.
+    std::vector<std::pair<std::string, double>> rates;
+    for (const auto& [name, surface] : surfaces_) {
+        if (!surface) {
+            continue;
+        }
+        const double hz = surface->getOutputInfo().refreshRate;
+        if (hz > 0.0) {
+            rates.emplace_back(name, hz);
+        }
+    }
+
+    if (rates.size() < 2) {
+        lastMixedRefreshSignature_.clear();
+        return;
+    }
+
+    std::sort(rates.begin(), rates.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    double minHz = rates.front().second;
+    double maxHz = rates.front().second;
+    std::ostringstream signature;
+    for (size_t i = 0; i < rates.size(); ++i) {
+        minHz = std::min(minHz, rates[i].second);
+        maxHz = std::max(maxHz, rates[i].second);
+        if (i > 0) {
+            signature << ", ";
+        }
+        signature << rates[i].first << "=" << std::fixed << std::setprecision(2)
+                  << rates[i].second << "Hz";
+    }
+
+    // Same 0.5Hz tolerance harmonizeRefreshRates() uses to call two outputs equal.
+    if (maxHz - minHz <= 0.5) {
+        lastMixedRefreshSignature_.clear();
+        return;
+    }
+
+    if (signature.str() == lastMixedRefreshSignature_) {
+        return;
+    }
+    lastMixedRefreshSignature_ = signature.str();
+
+    LOG_ERROR << "DRMBackend: MIXED REFRESH RATES on enabled outputs (" << context
+              << "): " << signature.str();
+    LOG_ERROR << "  The virtual canvas flips every output in one atomic commit, so all of "
+              << "them are paced by the slowest CRTC (" << std::fixed << std::setprecision(2)
+              << minHz << "Hz). The faster outputs will present at that rate and report "
+              << "dropped frames.";
+    LOG_ERROR << "  Mitigation: give every output the same refresh= in display.conf. "
+              << "Refs ClickUp 869emcrwa.";
 }
 
 bool DRMBackend::atomicPageFlip() {
@@ -880,6 +942,8 @@ bool DRMBackend::setOutputMode(const std::string& outputName, int width, int hei
     LOG_INFO << "DRMBackend: " << outputName << " successfully changed to "
              << width << "x" << height;
     
+    warnIfMixedRefreshRates("setOutputMode");
+
     return true;
 }
 
@@ -1001,6 +1065,10 @@ bool DRMBackend::setResolutionMode(const std::string& mode) {
         }
     }
     
+    // After the whole batch: the per-output calls above may pass through a
+    // transient mix, and the signature dedup keeps this to one report.
+    warnIfMixedRefreshRates("setResolutionMode");
+
     return success;
 }
 
