@@ -309,6 +309,27 @@ private:
     
     // Atomic modesetting
     bool atomicPageFlip();  // Returns true if successful
+
+    /**
+     * Warn when the enabled outputs do not all run at the same refresh rate.
+     *
+     * renderVirtualCanvas() waits for every surface's flip and then submits a
+     * single atomic commit for all CRTCs, so a canvas that mixes refresh rates
+     * is paced by the SLOWEST one: the faster outputs really do present at the
+     * slower rate. Nothing in the pipeline says so, which is how a room can be
+     * commissioned broken (ClickUp 869emcrwa).
+     *
+     * Advisory only -- logs and returns. Failing openWindow() would fall back
+     * to HeadlessDisplay, and hasFatalError() would make systemd restart-loop;
+     * both are worse than the symptom.
+     *
+     * @param context Where the check ran from, for the log line.
+     */
+    void warnIfMixedRefreshRates(const char* context);
+
+    // Last mixed-rate signature reported, so chained mode changes do not log
+    // the same warning several times. Cleared when the rates become uniform.
+    std::string lastMixedRefreshSignature_;
     
     // Configuration
     std::string devicePath_;
