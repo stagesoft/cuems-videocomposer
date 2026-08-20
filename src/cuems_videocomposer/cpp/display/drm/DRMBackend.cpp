@@ -792,7 +792,21 @@ bool DRMBackend::setOutputMode(const std::string& outputName, int width, int hei
     LOG_INFO << "  Current surface size: " << oldWidth << "x" << oldHeight;
     
     if (width == oldWidth && height == oldHeight) {
-        LOG_INFO << "DRMBackend::setOutputMode: Already at " << width << "x" << height;
+        // Refresh-only changes never reach prepareMode()/resize(), so nothing
+        // happens and the caller is still told it succeeded. Say so instead of
+        // reporting a silent success -- switching a projector between 50 and
+        // 60 Hz at the same resolution has to go through display.conf and a
+        // service restart.
+        const double currentRefresh = surface->getOutputInfo().refreshRate;
+        if (refresh > 0.0 && std::abs(refresh - currentRefresh) > 0.5) {
+            LOG_WARNING << "DRMBackend::setOutputMode: " << outputName << " already at "
+                        << width << "x" << height << " -- refresh-only change to "
+                        << refresh << "Hz (currently " << currentRefresh
+                        << "Hz) is NOT applied; set refresh= in display.conf and "
+                        << "restart the service";
+        } else {
+            LOG_INFO << "DRMBackend::setOutputMode: Already at " << width << "x" << height;
+        }
         return true;
     }
     

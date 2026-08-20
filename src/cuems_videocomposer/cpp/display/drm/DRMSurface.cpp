@@ -661,6 +661,16 @@ gbm_resize_surface_created:
         return false;
     }
     
+    // A mode change invalidates the vsync model: displayHz_/expectedVsyncNs_
+    // still describe the old mode, so every drop figure after this point would
+    // be measured against the wrong refresh. setOutputMode's prepareMode() has
+    // already refreshed the connector info by the time it calls resize(), so
+    // getOutputInfo() reports the new rate here.
+    {
+        const double newRefresh = getOutputInfo().refreshRate;
+        presentationTiming_.init(newRefresh > 0.0 ? newRefresh : 60.0, outputName_);
+    }
+
     LOG_INFO << "DRMSurface::resize: Successfully resized to " << width << "x" << height;
     return true;
 }
