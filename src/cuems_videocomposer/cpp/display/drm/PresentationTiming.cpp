@@ -49,26 +49,6 @@ void PresentationTiming::init(double refreshHz) {
     }
 }
 
-void PresentationTiming::setVideoFramerate(double videoFps) {
-    videoFps_ = videoFps;
-
-    // Calculate expected vsyncs between flips
-    // e.g., 60Hz display / 25fps video = 2.4 vsyncs per video frame
-    if (videoFps > 0 && displayHz_ > 0) {
-        double ratio = displayHz_ / videoFps;
-        // Round up: we might see 2 or 3 vsyncs per frame for a 2.4 ratio
-        expectedVsyncsPerFrame_ = static_cast<int>(ratio + 0.5);
-        if (expectedVsyncsPerFrame_ < 1) {
-            expectedVsyncsPerFrame_ = 1;
-        }
-
-        LOG_INFO << "PresentationTiming: Video framerate set to " << videoFps
-                 << " fps (expecting ~" << expectedVsyncsPerFrame_ << " vsyncs per frame)";
-    } else {
-        expectedVsyncsPerFrame_ = 1;
-    }
-}
-
 void PresentationTiming::recordFlip(unsigned int sec, unsigned int usec, unsigned int msc) {
     // Store previous entry
     previous_ = current_;
@@ -93,24 +73,15 @@ void PresentationTiming::recordFlip(unsigned int sec, unsigned int usec, unsigne
             // msc_delta of 1 = perfect, 2 = 1 skipped, etc.
             current_.skipped_vsyncs = msc_delta - 1;
 
-            if (current_.skipped_vsyncs > 0) {
-                totalDroppedFrames_ += current_.skipped_vsyncs;
-
-                // With xjadeo-style timing (video fps < display fps), some skips are expected
-                // Only count as "unexpected" if we skip more than expected
-                // e.g., 25fps on 60Hz: expected msc_delta = 2-3, skips = 1-2
-                int64_t expectedSkips = expectedVsyncsPerFrame_ - 1;  // e.g., 2-1=1 or 3-1=2
-                int64_t unexpectedSkips = current_.skipped_vsyncs - expectedSkips;
-
-                // Allow 1 vsync tolerance for timing jitter
-                if (unexpectedSkips > 1) {
-                    totalUnexpectedDrops_ += unexpectedSkips;
-                    // Only log actual problems, not expected timing
-                    if (totalUnexpectedDrops_ <= 5 || totalUnexpectedDrops_ % 60 == 0) {
-                        LOG_WARNING << "PresentationTiming: Dropped " << unexpectedSkips
-                                   << " frame(s) beyond expected (total unexpected: "
-                                   << totalUnexpectedDrops_ << ")";
-                    }
+            // One skipped vsync is timing jitter; more than one is a real drop.
+            // This surface's own count -- every DRMSurface owns its
+            // PresentationTiming, so the number below is NOT a fleet-wide total.
+            if (current_.skipped_vsyncs > 1) {
+                totalUnexpectedDrops_ += current_.skipped_vsyncs;
+                if (totalUnexpectedDrops_ <= 5 || totalUnexpectedDrops_ % 60 == 0) {
+                    LOG_WARNING << "PresentationTiming: Dropped " << current_.skipped_vsyncs
+                               << " frame(s) beyond expected (total unexpected: "
+                               << totalUnexpectedDrops_ << ")";
                 }
             }
         } else if (msc_delta == 0) {
@@ -216,9 +187,8 @@ PresentationEntry PresentationTiming::getInfo() const {
 void PresentationTiming::reset() {
     current_ = PresentationEntry();
     previous_ = PresentationEntry();
-    totalDroppedFrames_ = 0;
     totalUnexpectedDrops_ = 0;
-    // Keep expectedVsyncNs_, displayHz_, videoFps_, expectedVsyncsPerFrame_, initialized_ - they're set by init()/setVideoFramerate()
+    // Keep expectedVsyncNs_, displayHz_, initialized_ - they're set by init()
 
     std::lock_guard<std::mutex> lock(mutex_);
     pendingSubmits_.clear();

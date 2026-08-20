@@ -214,3 +214,35 @@ bool test_PresentationTiming_ConcurrentSubmitFlip() {
     TEST_ASSERT_TRUE(stats.sampleCount > 0);
     return true;
 }
+
+// The drop counter is built directly on msc_delta: one skipped vsync is
+// jitter, more than one is a real drop. Before rc_1 this went through an
+// expectedVsyncsPerFrame_ model fed by setVideoFramerate(), which never had a
+// caller -- the divisor was always 1, so the model only ever subtracted zero.
+// Synthetic timestamps keep this free of wall-clock timing.
+bool test_PresentationTiming_SkippedVsyncsFromMscDelta() {
+    PresentationTiming pt;
+    pt.init(60.0);
+
+    pt.recordFlip(1u, 0u, 100u);            // baseline, no previous entry
+    pt.recordFlip(1u, 16667u, 101u);        // msc_delta 1 -> perfect
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(0));
+    TEST_ASSERT_FALSE(pt.isRunningBehind());
+
+    pt.recordFlip(1u, 50001u, 103u);        // msc_delta 2 -> 1 skipped: jitter
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(1));
+    TEST_ASSERT_TRUE(pt.isRunningBehind());
+
+    pt.recordFlip(1u, 100002u, 106u);       // msc_delta 3 -> 2 skipped: a drop
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(2));
+
+    pt.recordFlip(1u, 116669u, 107u);       // recovered
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(0));
+    TEST_ASSERT_FALSE(pt.isRunningBehind());
+
+    // A backwards msc (counter wrap / CRTC re-enable) must not be read as a
+    // gigantic drop -- the harness rejects those jumps for the same reason.
+    pt.recordFlip(2u, 0u, 5u);
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(0));
+    return true;
+}
