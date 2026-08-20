@@ -34,8 +34,18 @@ PresentationTiming::PresentationTiming() {
     reset();
 }
 
-void PresentationTiming::init(double refreshHz) {
+std::string PresentationTiming::tag() const {
+    if (outputName_.empty()) {
+        return "PresentationTiming";
+    }
+    return "PresentationTiming[" + outputName_ + "]";
+}
+
+void PresentationTiming::init(double refreshHz, std::string outputName) {
     reset();
+    // After reset(): reset() deliberately leaves identity alone, but setting
+    // it here keeps init() the single place that establishes both.
+    outputName_ = std::move(outputName);
 
     if (refreshHz > 0) {
         // Calculate expected vsync duration in nanoseconds
@@ -44,7 +54,7 @@ void PresentationTiming::init(double refreshHz) {
         displayHz_ = refreshHz;
         initialized_ = true;
 
-        LOG_INFO << "PresentationTiming: Initialized for " << refreshHz
+        LOG_INFO << tag() << ": Initialized for " << refreshHz
                  << "Hz (vsync=" << (expectedVsyncNs_ / 1000000.0) << "ms)";
     }
 }
@@ -79,7 +89,7 @@ void PresentationTiming::recordFlip(unsigned int sec, unsigned int usec, unsigne
             if (current_.skipped_vsyncs > 1) {
                 totalUnexpectedDrops_ += current_.skipped_vsyncs;
                 if (totalUnexpectedDrops_ <= 5 || totalUnexpectedDrops_ % 60 == 0) {
-                    LOG_WARNING << "PresentationTiming: Dropped " << current_.skipped_vsyncs
+                    LOG_WARNING << tag() << ": Dropped " << current_.skipped_vsyncs
                                << " frame(s) beyond expected (total unexpected: "
                                << totalUnexpectedDrops_ << ")";
                 }
