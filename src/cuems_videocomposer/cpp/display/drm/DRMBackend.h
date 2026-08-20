@@ -46,6 +46,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <chrono>
 
 namespace videocomposer {
 
@@ -309,6 +310,52 @@ private:
     
     // Atomic modesetting
     bool atomicPageFlip();  // Returns true if successful
+
+    /**
+     * Commit a page flip for exactly these surfaces, in the order given.
+     *
+     * Only plane properties go into the request -- never MODE_ID or ACTIVE --
+     * so a CRTC left out simply keeps scanning out the buffer it already has.
+     * That is what lets outputs on different refresh rates flip on their own
+     * vblank instead of all being held to the slowest one.
+     *
+     * Every participant must already be isAtomicEligible(): the check has to
+     * happen BEFORE prepareAtomicFlip(), which locks a GBM buffer. Dropping a
+     * surface after that point would strand the buffer, and a surface with no
+     * free buffers never becomes ready again.
+     *
+     * On any failure the whole commit is abandoned, every prepared surface is
+     * cancelled, and the participants fall back to individual page flips --
+     * libdrm has no way to withdraw a property already added to the request.
+     */
+    bool atomicPageFlipSubset(const std::vector<DRMSurface*>& participants);
+
+    // The historical render path: wait for every surface's flip, then commit
+    // all CRTCs together. Kept behind VIDEOCOMPOSER_COUPLED_PACING for A/B
+    // measurement against the decoupled path, using one binary.
+    void renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManager* osdManager);
+
+    // Per-surface pacing: each refresh-rate class presents on its own vblank.
+    void renderVirtualCanvasDecoupled(LayerManager* layerManager, OSDManager* osdManager);
+
+    /**
+     * Surfaces that may present this iteration, in physical layout order.
+     *
+     * Grouped into refresh-rate classes, and a class only presents when ALL
+     * its members are ready. Outputs sharing a rate have independent vblanks,
+     * so releasing them separately would put different canvas frames on a
+     * blended pair and split one commit into several. With a single class --
+     * every uniform-refresh install -- this reduces to the coupled behaviour.
+     */
+    std::vector<DRMSurface*> collectReadySurfaces(std::chrono::steady_clock::time_point now);
+
+    // VIDEOCOMPOSER_COUPLED_PACING=1 restores the old all-outputs barrier.
+    // TODO(869emcrwa): drop once per-surface pacing is proven on the fleet.
+    bool coupledPacing_ = false;
+
+    // Last time the canvas was composited, to bound composites to the fastest
+    // output's rate rather than the loop's iteration rate.
+    std::chrono::steady_clock::time_point lastCompositeTime_{};
 
     /**
      * Warn when the enabled outputs do not all run at the same refresh rate.

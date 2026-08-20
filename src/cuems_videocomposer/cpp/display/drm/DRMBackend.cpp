@@ -221,6 +221,15 @@ bool DRMBackend::openWindow() {
             LOG_INFO << "DRMBackend: Virtual Canvas disabled via VIDEOCOMPOSER_NO_VIRTUAL_CANVAS";
             useVirtualCanvas_ = false;
         }
+
+        // Escape hatch for A/B measurement: one binary, one md5, both pacing
+        // models. TODO(869emcrwa): remove once per-surface pacing is proven.
+        const char* coupled = std::getenv("VIDEOCOMPOSER_COUPLED_PACING");
+        coupledPacing_ = coupled && (std::string(coupled) == "1" || std::string(coupled) == "true");
+        LOG_INFO << "DRMBackend: frame pacing = "
+                 << (coupledPacing_ ? "coupled (all outputs share the slowest CRTC"
+                                      " -- VIDEOCOMPOSER_COUPLED_PACING)"
+                                    : "per-surface (each refresh-rate class flips on its own vblank)");
         
         if (useVirtualCanvas_) {
             // Virtual Canvas mode: use MultiOutputRenderer
@@ -301,6 +310,17 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
 }
 
 void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osdManager) {
+    // A single output has no mix to resolve and its own flip IS the correct
+    // clock, so it stays on the coupled path -- as does anyone who asked for
+    // the old behaviour explicitly.
+    if (coupledPacing_ || surfaces_.size() <= 1) {
+        renderVirtualCanvasCoupled(layerManager, osdManager);
+    } else {
+        renderVirtualCanvasDecoupled(layerManager, osdManager);
+    }
+}
+
+void DRMBackend::renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManager* osdManager) {
     if (!multiRenderer_) {
         return;
     }
@@ -368,6 +388,179 @@ void DRMBackend::renderVirtualCanvas(LayerManager* layerManager, OSDManager* osd
     }
 }
 
+namespace {
+// Two outputs count as the same refresh rate within this margin -- the same
+// tolerance harmonizeRefreshRates() and the mixed-rate check use. Pinning
+// refresh= in display.conf takes an output out of harmonisation, so two
+// nominally identical monitors can resolve to slightly different rates from
+// their own EDIDs; without a tolerance they would split into separate classes
+// and stop presenting together.
+constexpr double kRefreshToleranceHz = 0.5;
+
+// Ceiling on how long one render() may block waiting for a vblank. Past this
+// it returns empty-handed so the run loop can service hotplug and OSC. Far
+// longer than any real frame interval; only reached when nothing is flipping.
+constexpr auto kMaxWaitPerRender = std::chrono::milliseconds(200);
+}  // namespace
+
+std::vector<DRMSurface*> DRMBackend::collectReadySurfaces(
+        std::chrono::steady_clock::time_point now) {
+    std::vector<DRMSurface*> all;
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
+        if (surface) {
+            all.push_back(surface.get());
+        }
+    }
+    if (all.empty()) {
+        return {};
+    }
+
+    std::vector<DRMSurface*> byRate(all);
+    std::sort(byRate.begin(), byRate.end(), [](DRMSurface* a, DRMSurface* b) {
+        return a->effectiveRefreshHz() < b->effectiveRefreshHz();
+    });
+
+    std::vector<DRMSurface*> ready;
+    size_t i = 0;
+    while (i < byRate.size()) {
+        const double base = byRate[i]->effectiveRefreshHz();
+        size_t j = i + 1;
+        while (j < byRate.size() &&
+               byRate[j]->effectiveRefreshHz() - base <= kRefreshToleranceHz) {
+            ++j;
+        }
+
+        // All or nothing per class: a class that is only half ready waits.
+        bool classReady = true;
+        for (size_t k = i; k < j; ++k) {
+            if (!byRate[k]->isReadyToPresent(now)) {
+                classReady = false;
+                break;
+            }
+        }
+        if (classReady) {
+            ready.insert(ready.end(), byRate.begin() + i, byRate.begin() + j);
+        }
+        i = j;
+    }
+
+    // Back to physical layout order, which the atomic request and the
+    // per-surface logs both assume.
+    std::vector<DRMSurface*> ordered;
+    ordered.reserve(ready.size());
+    for (auto* surface : all) {
+        if (std::find(ready.begin(), ready.end(), surface) != ready.end()) {
+            ordered.push_back(surface);
+        }
+    }
+    return ordered;
+}
+
+void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
+                                              OSDManager* osdManager) {
+    if (!multiRenderer_) {
+        return;
+    }
+
+    DRMSurface* primary = getPrimarySurface();
+    if (!primary) {
+        return;
+    }
+
+    const int fd = outputManager_->getFd();
+
+    // Drain whatever has already completed, without blocking.
+    DRMSurface::waitForAnyFlip(fd, 0);
+
+    auto now = std::chrono::steady_clock::now();
+    for (auto& [name, surface] : surfaces_) {
+        if (surface) {
+            surface->expireStuckFlip(now);
+        }
+    }
+
+    std::vector<DRMSurface*> presentSet = collectReadySurfaces(now);
+
+    // Nothing ready yet: block until the first flip completes on ANY CRTC.
+    // This is the frame clock. The coupled path used the wait-for-everyone
+    // barrier for the same job, which is exactly what pinned every output to
+    // the slowest one.
+    const auto deadline = now + kMaxWaitPerRender;
+    while (presentSet.empty()) {
+        now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            // Give the run loop its turn -- hotplug and OSC are waiting.
+            return;
+        }
+
+        // Wake no later than the soonest time-gated surface, so surfaces that
+        // produce no flip events still get through on schedule.
+        auto wake = deadline;
+        for (auto& [name, surface] : surfaces_) {
+            if (surface && !surface->isFlipPending()) {
+                wake = std::min(wake, surface->timeGateDeadline());
+            }
+        }
+        wake = std::min(wake, deadline);
+        auto waitMs = std::chrono::duration_cast<std::chrono::milliseconds>(wake - now).count();
+        DRMSurface::waitForAnyFlip(fd, static_cast<int>(std::max<int64_t>(waitMs, 1)));
+
+        now = std::chrono::steady_clock::now();
+        for (auto& [name, surface] : surfaces_) {
+            if (surface) {
+                surface->expireStuckFlip(now);
+            }
+        }
+        presentSet = collectReadySurfaces(now);
+    }
+
+    // Composite at most once per fastest-output interval. Without this the
+    // canvas would be recomposited on every iteration, and with classes out of
+    // phase the loop iterates more often than the fastest output presents --
+    // more GPU work than the coupled path did, on the very configuration this
+    // is meant to fix. Blits in between reuse the canvas FBO, which keeps its
+    // contents.
+    int64_t fastestNs = INT64_MAX;
+    for (const auto& [name, surface] : surfaces_) {
+        if (surface) {
+            fastestNs = std::min(fastestNs, surface->vsyncIntervalNs());
+        }
+    }
+    const bool firstComposite = lastCompositeTime_.time_since_epoch().count() == 0;
+    const bool recomposite = firstComposite || fastestNs == INT64_MAX ||
+                             (now - lastCompositeTime_) >= std::chrono::nanoseconds(fastestNs);
+    if (recomposite) {
+        lastCompositeTime_ = now;
+    }
+
+    std::vector<OutputSurface*> outs(presentSet.begin(), presentSet.end());
+
+    primary->makeCurrent();
+    multiRenderer_->render(layerManager, osdManager, &outs, recomposite);
+    primary->releaseCurrent();
+
+    // Atomic needs every participant eligible; otherwise this batch goes out
+    // as individual page flips, which is also the cold-boot modeset path.
+    bool useAtomic = outputManager_->supportsAtomic();
+    if (useAtomic) {
+        for (auto* surface : presentSet) {
+            if (!surface->isAtomicEligible()) {
+                useAtomic = false;
+                break;
+            }
+        }
+    }
+
+    if (useAtomic) {
+        atomicPageFlipSubset(presentSet);
+    } else {
+        for (auto* surface : presentSet) {
+            surface->schedulePageFlip();
+        }
+    }
+}
+
 void DRMBackend::warnIfMixedRefreshRates(const char* context) {
     // Read from surfaces_, not from the connector list: only outputs that
     // survived enabled= in display.conf have a surface, and harmonizeRefreshRates()
@@ -415,17 +608,44 @@ void DRMBackend::warnIfMixedRefreshRates(const char* context) {
     }
     lastMixedRefreshSignature_ = signature.str();
 
+    if (!coupledPacing_ && surfaces_.size() > 1) {
+        // Per-surface pacing handles this: each class flips on its own vblank.
+        // Still worth stating, because it is a configuration worth noticing.
+        LOG_INFO << "DRMBackend: mixed refresh rates on enabled outputs (" << context
+                 << "): " << signature.str()
+                 << " -- per-surface pacing active, each output flips at its own rate";
+        return;
+    }
+
     LOG_ERROR << "DRMBackend: MIXED REFRESH RATES on enabled outputs (" << context
               << "): " << signature.str();
     LOG_ERROR << "  The virtual canvas flips every output in one atomic commit, so all of "
               << "them are paced by the slowest CRTC (" << std::fixed << std::setprecision(2)
               << minHz << "Hz). The faster outputs will present at that rate and report "
               << "dropped frames.";
-    LOG_ERROR << "  Mitigation: give every output the same refresh= in display.conf. "
-              << "Refs ClickUp 869emcrwa.";
+    LOG_ERROR << "  Mitigation: give every output the same refresh= in display.conf, or "
+              << "unset VIDEOCOMPOSER_COUPLED_PACING. Refs ClickUp 869emcrwa.";
 }
 
 bool DRMBackend::atomicPageFlip() {
+    // Coupled path: every surface participates, so this is the historical
+    // behaviour unchanged -- including falling all of them back to individual
+    // page flips if the commit fails.
+    std::vector<DRMSurface*> all;
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
+        if (surface) {
+            all.push_back(surface.get());
+        }
+    }
+    return atomicPageFlipSubset(all);
+}
+
+bool DRMBackend::atomicPageFlipSubset(const std::vector<DRMSurface*>& participants) {
+    if (participants.empty()) {
+        return true;  // nothing to present this pass
+    }
+
     drmModeAtomicReq* request = outputManager_->createAtomicRequest();
     if (!request) {
         LOG_WARNING << "DRMBackend: Failed to create atomic request";
@@ -435,25 +655,28 @@ bool DRMBackend::atomicPageFlip() {
     std::vector<DRMSurface*> preparedSurfaces;
     bool success = true;
 
-    // Prepare each surface and add to atomic request — physical layout order
-    // so the atomic request, the per-surface logs, and the cold-boot modeset
-    // sequence all reflect the operator's intended left-to-right monitor order.
-    for (const auto& name : orderedSurfaceNames()) {
-        auto& surface = surfaces_.at(name);
-        uint32_t fbId = surface->prepareAtomicFlip();
-        if (fbId == 0) {
-            LOG_WARNING << "DRMBackend: Failed to prepare surface " << name;
-            success = false;
-            break;
-        }
-        preparedSurfaces.push_back(surface.get());
-        
+    // Callers pass surfaces in physical layout order, so the atomic request,
+    // the per-surface logs, and the cold-boot modeset sequence all reflect the
+    // operator's intended left-to-right monitor order.
+    for (auto* surface : participants) {
+        const std::string& name = surface->getOutputName();
+
+        // Eligibility first: prepareAtomicFlip() locks a GBM buffer, and a
+        // surface dropped after that point would strand it.
         DRMPlane* plane = surface->getPlane();
         if (!plane || !plane->propertiesLoaded) {
             LOG_WARNING << "DRMBackend: No plane for surface " << name;
             success = false;
             break;
         }
+
+        uint32_t fbId = surface->prepareAtomicFlip();
+        if (fbId == 0) {
+            LOG_WARNING << "DRMBackend: Failed to prepare surface " << name;
+            success = false;
+            break;
+        }
+        preparedSurfaces.push_back(surface);
         
         // Set plane properties for atomic commit
         // FB_ID - the framebuffer to display
@@ -506,12 +729,13 @@ bool DRMBackend::atomicPageFlip() {
     }
     
     if (!success) {
-        // Cancel prepared surfaces and fall back to legacy
+        // Cancel prepared surfaces and fall back to legacy. Only the
+        // participants: surfaces left out of this commit are mid-interval on
+        // their own rate and must not be flipped early.
         for (auto* surface : preparedSurfaces) {
             surface->cancelAtomicFlip();
         }
-        for (const auto& name : orderedSurfaceNames()) {
-            auto& surface = surfaces_.at(name);
+        for (auto* surface : participants) {
             surface->schedulePageFlip();
         }
     }
