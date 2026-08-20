@@ -335,17 +335,23 @@ private:
     // measurement against the decoupled path, using one binary.
     void renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManager* osdManager);
 
-    // Per-surface pacing: each refresh-rate class presents on its own vblank.
+    // Per-surface pacing: each output presents on its own vblank.
     void renderVirtualCanvasDecoupled(LayerManager* layerManager, OSDManager* osdManager);
 
     /**
      * Surfaces that may present this iteration, in physical layout order.
      *
-     * Grouped into refresh-rate classes, and a class only presents when ALL
-     * its members are ready. Outputs sharing a rate have independent vblanks,
-     * so releasing them separately would put different canvas frames on a
-     * blended pair and split one commit into several. With a single class --
-     * every uniform-refresh install -- this reduces to the coupled behaviour.
+     * Each surface answers for itself. An earlier version grouped them into
+     * refresh-rate classes and held a class back until every member was ready,
+     * to keep a blended pair on one canvas frame -- but that coherence was
+     * never real: a commit spanning several CRTCs still latches each one at ITS
+     * own vblank, so the pair was always separated by the physical phase
+     * offset. What the grouping did buy was the defect: the batched commit tied
+     * the group to its most out-of-phase member and cost it a vblank every
+     * vblank. Outputs that genuinely run in phase still land on the same vblank
+     * here, without being grouped -- they simply come ready together, blit the
+     * same canvas generation (the FBO is reused between composites) and commit
+     * microseconds apart. See 869emcrwa.
      */
     std::vector<DRMSurface*> collectReadySurfaces(std::chrono::steady_clock::time_point now);
 
