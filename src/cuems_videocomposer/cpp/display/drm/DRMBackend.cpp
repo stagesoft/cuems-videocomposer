@@ -470,17 +470,38 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
 
     const int fd = outputManager_->getFd();
 
+    // #region DEBUG
+    // Per-surface pacing instrumentation (ClickUp 869emcrwa). Answers the two
+    // questions the design rests on: does each output present at its OWN rate,
+    // and is compositing still bounded by the fastest one rather than by the
+    // loop's iteration rate? Grep the journal for "[PACING]".
+    static std::map<std::string, int> dbg_presents;
+    static int dbg_iters = 0;
+    static int dbg_composites = 0;
+    static int dbg_blocked = 0;
+    static int dbg_expired = 0;
+    static int dbg_emptyReturn = 0;
+    static auto dbg_last = std::chrono::steady_clock::now();
+    dbg_iters++;
+    // #endregion DEBUG
+
     // Drain whatever has already completed, without blocking.
     DRMSurface::waitForAnyFlip(fd, 0);
 
     auto now = std::chrono::steady_clock::now();
     for (auto& [name, surface] : surfaces_) {
         if (surface) {
-            surface->expireStuckFlip(now);
+            // #region DEBUG
+            if (surface->expireStuckFlip(now)) { dbg_expired++; }
+            // #endregion DEBUG
         }
     }
 
     std::vector<DRMSurface*> presentSet = collectReadySurfaces(now);
+
+    // #region DEBUG
+    if (presentSet.empty()) { dbg_blocked++; }
+    // #endregion DEBUG
 
     // Nothing ready yet: block until the first flip completes on ANY CRTC.
     // This is the frame clock. The coupled path used the wait-for-everyone
@@ -491,6 +512,9 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
         now = std::chrono::steady_clock::now();
         if (now >= deadline) {
             // Give the run loop its turn -- hotplug and OSC are waiting.
+            // #region DEBUG
+            dbg_emptyReturn++;
+            // #endregion DEBUG
             return;
         }
 
@@ -551,6 +575,28 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
             }
         }
     }
+
+    // #region DEBUG
+    if (recomposite) { dbg_composites++; }
+    for (auto* surface : presentSet) { dbg_presents[surface->getOutputName()]++; }
+    {
+        auto dbg_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - dbg_last).count();
+        if (dbg_elapsed >= 1000) {
+            std::ostringstream perOut;
+            for (const auto& [name, count] : dbg_presents) {
+                perOut << " " << name << "=" << (count * 1000.0 / dbg_elapsed) << "/s";
+            }
+            LOG_INFO << "[PACING] iters=" << (dbg_iters * 1000.0 / dbg_elapsed) << "/s"
+                     << " composites=" << (dbg_composites * 1000.0 / dbg_elapsed) << "/s"
+                     << " blocked=" << dbg_blocked << " expired=" << dbg_expired
+                     << " deadline_returns=" << dbg_emptyReturn
+                     << " presents:" << perOut.str();
+            dbg_presents.clear();
+            dbg_iters = dbg_composites = dbg_blocked = dbg_expired = dbg_emptyReturn = 0;
+            dbg_last = now;
+        }
+    }
+    // #endregion DEBUG
 
     if (useAtomic) {
         atomicPageFlipSubset(presentSet);
