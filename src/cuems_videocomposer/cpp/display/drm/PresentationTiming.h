@@ -163,6 +163,23 @@ public:
     LatencyStats getSwapChainLatencyStats() const;
 
     /**
+     * True once this output has been presenting below its configured rate for
+     * long enough to be reported. Clears when the cadence recovers.
+     */
+    bool hasSustainedUnderrate() const { return underrateWarned_; }
+
+    /**
+     * Smoothed rate actually being presented, in Hz. Zero before the first
+     * interval is known. Compare this against the configured rate, not against
+     * the vsync duration: an output can sit on a perfectly healthy 60Hz vsync
+     * and still present 30 frames a second, which is exactly the defect this
+     * was added for.
+     */
+    double getMeasuredHz() const {
+        return presentIntervalEmaNs_ > 0 ? 1e9 / static_cast<double>(presentIntervalEmaNs_) : 0.0;
+    }
+
+    /**
      * Reset statistics, including any captured submit→flip samples and pending
      * submits. Capture-enabled state is preserved.
      */
@@ -178,12 +195,29 @@ private:
     double displayHz_ = 0.0;           // Display refresh rate
     bool initialized_ = false;
 
+    // Sustained under-rate detection. The mixed-refresh defect (869emcrwa) ran
+    // outputs at half their configured rate for months with nothing in any log
+    // saying so: the drop counter stayed at zero because no vsync was SKIPPED --
+    // the flips simply arrived half as often. Comparing the measured cadence
+    // against the configured one is what makes that visible, and it is the one
+    // check that would have caught it from the journal alone.
+    int64_t presentIntervalEmaNs_ = 0;  // smoothed flip-to-flip interval
+    int64_t presentSamples_ = 0;        // flips seen since init
+    int64_t underrateSinceNs_ = 0;      // when the shortfall began (0 = not in one)
+    bool underrateWarned_ = false;      // one warning per episode, not per flip
+
     // Submit↔flip latency capture (off by default, no production overhead)
     mutable std::mutex mutex_;
     bool captureEnabled_ = false;
     size_t maxSamples_ = 0;
     std::deque<int64_t> pendingSubmits_;   // monotonic ns of unmatched submits
     std::vector<int64_t> latencySamples_;  // flip_ns - submit_ns
+
+    // Warn when the measured cadence stays below the configured rate. Called
+    // from recordFlip(), so a surface presenting without flip events
+    // (SetCrtc-only, warmup) never reaches it and cannot be judged on a
+    // cadence nobody measured.
+    void checkSustainedUnderrate(int64_t intervalNs, int64_t nowNs);
 
     // Log prefix: "PresentationTiming[HDMI-A-1]" when the output is known,
     // matching the DisplayLatency[<name>] format used at startup.

@@ -389,14 +389,6 @@ void DRMBackend::renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManag
 }
 
 namespace {
-// Two outputs count as the same refresh rate within this margin -- the same
-// tolerance harmonizeRefreshRates() and the mixed-rate check use. Pinning
-// refresh= in display.conf takes an output out of harmonisation, so two
-// nominally identical monitors can resolve to slightly different rates from
-// their own EDIDs; without a tolerance they would split into separate classes
-// and stop presenting together.
-constexpr double kRefreshToleranceHz = 0.5;
-
 // Ceiling on how long one render() may block waiting for a vblank. Past this
 // it returns empty-handed so the run loop can service hotplug and OSC. Far
 // longer than any real frame interval; only reached when nothing is flipping.
@@ -405,56 +397,15 @@ constexpr auto kMaxWaitPerRender = std::chrono::milliseconds(200);
 
 std::vector<DRMSurface*> DRMBackend::collectReadySurfaces(
         std::chrono::steady_clock::time_point now) {
-    std::vector<DRMSurface*> all;
+    // Physical layout order, which the per-surface logs assume.
+    std::vector<DRMSurface*> ready;
     for (const auto& name : orderedSurfaceNames()) {
         auto& surface = surfaces_.at(name);
-        if (surface) {
-            all.push_back(surface.get());
+        if (surface && surface->isReadyToPresent(now)) {
+            ready.push_back(surface.get());
         }
     }
-    if (all.empty()) {
-        return {};
-    }
-
-    std::vector<DRMSurface*> byRate(all);
-    std::sort(byRate.begin(), byRate.end(), [](DRMSurface* a, DRMSurface* b) {
-        return a->effectiveRefreshHz() < b->effectiveRefreshHz();
-    });
-
-    std::vector<DRMSurface*> ready;
-    size_t i = 0;
-    while (i < byRate.size()) {
-        const double base = byRate[i]->effectiveRefreshHz();
-        size_t j = i + 1;
-        while (j < byRate.size() &&
-               byRate[j]->effectiveRefreshHz() - base <= kRefreshToleranceHz) {
-            ++j;
-        }
-
-        // All or nothing per class: a class that is only half ready waits.
-        bool classReady = true;
-        for (size_t k = i; k < j; ++k) {
-            if (!byRate[k]->isReadyToPresent(now)) {
-                classReady = false;
-                break;
-            }
-        }
-        if (classReady) {
-            ready.insert(ready.end(), byRate.begin() + i, byRate.begin() + j);
-        }
-        i = j;
-    }
-
-    // Back to physical layout order, which the atomic request and the
-    // per-surface logs both assume.
-    std::vector<DRMSurface*> ordered;
-    ordered.reserve(ready.size());
-    for (auto* surface : all) {
-        if (std::find(ready.begin(), ready.end(), surface) != ready.end()) {
-            ordered.push_back(surface);
-        }
-    }
-    return ordered;
+    return ready;
 }
 
 void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
@@ -542,20 +493,21 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
 
     // Atomic needs every participant eligible; otherwise this batch goes out
     // as individual page flips, which is also the cold-boot modeset path.
-    bool useAtomic = outputManager_->supportsAtomic();
-    if (useAtomic) {
-        for (auto* surface : presentSet) {
-            if (!surface->isAtomicEligible()) {
-                useAtomic = false;
-                break;
-            }
-        }
-    }
-
-    if (useAtomic) {
-        atomicPageFlipSubset(presentSet);
-    } else {
-        for (auto* surface : presentSet) {
+    // One commit per CRTC, never a batch. A commit spanning several CRTCs does
+    // not complete until its LAST one has flipped, and the next commit over
+    // those CRTCs queues behind it -- so a batch ties every output in it to its
+    // most out-of-phase neighbour. Measured on the FP530 (869emcrwa), the
+    // kernel holds a commit 13.9ms at one CRTC, 22.4ms at two or three, and
+    // 34.1ms at four; a frame at 60Hz is 16.7ms. Only the single-CRTC commit
+    // still makes its vblank.
+    const bool atomicSupported = outputManager_->supportsAtomic();
+    for (auto* surface : presentSet) {
+        // Eligibility is per surface too: an output still warming up no longer
+        // drags the rest onto the legacy path with it, and a failure on one no
+        // longer aborts the others.
+        if (atomicSupported && surface->isAtomicEligible()) {
+            atomicPageFlipSubset({surface});
+        } else {
             surface->schedulePageFlip();
         }
     }
