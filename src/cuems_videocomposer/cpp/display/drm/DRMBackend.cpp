@@ -431,6 +431,25 @@ std::vector<DRMSurface*> DRMBackend::collectReadySurfaces(
             ++j;
         }
 
+        // #region DEBUG
+        // Hypothesis under test: requiring the WHOLE class costs one extra
+        // wait whenever its members' vblanks are out of phase, which halves
+        // the class's achievable rate. Setting this treats every surface as
+        // its own class, trading frame coherence across a blended pair for
+        // rate -- purely to measure whether the grouping is the throttle.
+        static const bool dbg_noClasses = [] {
+            const char* e = std::getenv("VIDEOCOMPOSER_PACING_NO_CLASSES");
+            return e && (std::string(e) == "1" || std::string(e) == "true");
+        }();
+        if (dbg_noClasses) {
+            for (size_t k = i; k < j; ++k) {
+                if (byRate[k]->isReadyToPresent(now)) { ready.push_back(byRate[k]); }
+            }
+            i = j;
+            continue;
+        }
+        // #endregion DEBUG
+
         // All or nothing per class: a class that is only half ready waits.
         bool classReady = true;
         for (size_t k = i; k < j; ++k) {
@@ -476,12 +495,22 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
     // and is compositing still bounded by the fastest one rather than by the
     // loop's iteration rate? Grep the journal for "[PACING]".
     static std::map<std::string, int> dbg_presents;
+    static std::map<std::string, int> dbg_ready;
     static int dbg_iters = 0;
     static int dbg_composites = 0;
     static int dbg_blocked = 0;
     static int dbg_expired = 0;
     static int dbg_emptyReturn = 0;
+    static int dbg_wakes = 0;          // despertares con evento dentro de la espera
+    static int dbg_wakesEmpty = 0;      // ...tras los cuales SIGUE sin haber nada listo
+    static int64_t dbg_waitUs = 0;     // tiempo bloqueado esperando vblank
+    static int64_t dbg_workUs = 0;     // tiempo dentro de render (sin espera)
     static auto dbg_last = std::chrono::steady_clock::now();
+    static auto dbg_prevEntry = std::chrono::steady_clock::now();
+    auto dbg_entry = std::chrono::steady_clock::now();
+    // Tiempo fuera de render(): processEvents + updateLayers del run loop.
+    static int64_t dbg_outsideUs = 0;
+    dbg_outsideUs += std::chrono::duration_cast<std::chrono::microseconds>(dbg_entry - dbg_prevEntry).count();
     dbg_iters++;
     // #endregion DEBUG
 
@@ -501,6 +530,9 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
 
     // #region DEBUG
     if (presentSet.empty()) { dbg_blocked++; }
+    for (const auto& [sname, s] : surfaces_) {
+        if (s && s->isReadyToPresent(now)) { dbg_ready[sname]++; }
+    }
     // #endregion DEBUG
 
     // Nothing ready yet: block until the first flip completes on ANY CRTC.
@@ -528,7 +560,15 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
         }
         wake = std::min(wake, deadline);
         auto waitMs = std::chrono::duration_cast<std::chrono::milliseconds>(wake - now).count();
-        DRMSurface::waitForAnyFlip(fd, static_cast<int>(std::max<int64_t>(waitMs, 1)));
+        // #region DEBUG
+        auto dbg_w0 = std::chrono::steady_clock::now();
+        // #endregion DEBUG
+        bool dbg_got = DRMSurface::waitForAnyFlip(fd, static_cast<int>(std::max<int64_t>(waitMs, 1)));
+        // #region DEBUG
+        dbg_waitUs += std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - dbg_w0).count();
+        if (dbg_got) { dbg_wakes++; }
+        // #endregion DEBUG
 
         now = std::chrono::steady_clock::now();
         for (auto& [name, surface] : surfaces_) {
@@ -537,6 +577,9 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
             }
         }
         presentSet = collectReadySurfaces(now);
+        // #region DEBUG
+        if (dbg_got && presentSet.empty()) { dbg_wakesEmpty++; }
+        // #endregion DEBUG
     }
 
     // Composite at most once per fastest-output interval. Without this the
@@ -567,6 +610,18 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
     // Atomic needs every participant eligible; otherwise this batch goes out
     // as individual page flips, which is also the cold-boot modeset path.
     bool useAtomic = outputManager_->supportsAtomic();
+    // #region DEBUG
+    // Hypothesis under test: amdgpu DC serialises overlapping non-blocking
+    // atomic commits, so a second commit issued while another is in flight
+    // lands on the LATER CRTC's vblank -- which would pin both refresh classes
+    // to the slower one no matter how the pacing is scheduled. Legacy
+    // drmModePageFlip is per-CRTC and should not have that coupling.
+    static const bool dbg_legacyFlip = [] {
+        const char* e = std::getenv("VIDEOCOMPOSER_PACING_LEGACY_FLIP");
+        return e && (std::string(e) == "1" || std::string(e) == "true");
+    }();
+    if (dbg_legacyFlip) { useAtomic = false; }
+    // #endregion DEBUG
     if (useAtomic) {
         for (auto* surface : presentSet) {
             if (!surface->isAtomicEligible()) {
@@ -586,12 +641,31 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
             for (const auto& [name, count] : dbg_presents) {
                 perOut << " " << name << "=" << (count * 1000.0 / dbg_elapsed) << "/s";
             }
+            // What rate does each surface believe it runs at, and how often is
+            // it ready? If the classes are wrong, everything downstream is.
+            std::ostringstream perRate;
+            for (const auto& [sname, s] : surfaces_) {
+                if (!s) continue;
+                perRate << " " << sname << "=" << s->effectiveRefreshHz() << "Hz"
+                        << "(ready=" << dbg_ready[sname] << ",pend="
+                        << (s->isFlipPending() ? 1 : 0) << ",free="
+                        << (s->hasFreeBuffers() ? 1 : 0) << ")";
+            }
             LOG_INFO << "[PACING] iters=" << (dbg_iters * 1000.0 / dbg_elapsed) << "/s"
                      << " composites=" << (dbg_composites * 1000.0 / dbg_elapsed) << "/s"
                      << " blocked=" << dbg_blocked << " expired=" << dbg_expired
                      << " deadline_returns=" << dbg_emptyReturn
-                     << " presents:" << perOut.str();
+                     << " presents:" << perOut.str()
+                     << " | wakes=" << (dbg_wakes * 1000.0 / dbg_elapsed) << "/s"
+                     << " wakes_still_empty=" << (dbg_wakesEmpty * 1000.0 / dbg_elapsed) << "/s"
+                     << " | wait_ms/s=" << (dbg_waitUs / 1000.0)
+                     << " work_ms/s=" << (dbg_workUs / 1000.0)
+                     << " outside_ms/s=" << (dbg_outsideUs / 1000.0)
+                     << " | rates:" << perRate.str();
+            dbg_waitUs = dbg_workUs = dbg_outsideUs = 0;
+            dbg_wakes = dbg_wakesEmpty = 0;
             dbg_presents.clear();
+            dbg_ready.clear();
             dbg_iters = dbg_composites = dbg_blocked = dbg_expired = dbg_emptyReturn = 0;
             dbg_last = now;
         }
@@ -605,6 +679,29 @@ void DRMBackend::renderVirtualCanvasDecoupled(LayerManager* layerManager,
             surface->schedulePageFlip();
         }
     }
+
+    // #region DEBUG
+    // Burst trace: the first iterations in full detail, to see the actual
+    // interleave of refresh classes rather than infer it from per-second sums.
+    {
+        static int dbg_burst = 0;
+        static auto dbg_t0 = std::chrono::steady_clock::now();
+        if (dbg_burst < 90) {
+            std::ostringstream who;
+            for (auto* s : presentSet) { who << " " << s->getOutputName(); }
+            LOG_INFO << "[BURST] n=" << dbg_burst
+                     << " t_us=" << std::chrono::duration_cast<std::chrono::microseconds>(now - dbg_t0).count()
+                     << " recomp=" << (recomposite ? 1 : 0)
+                     << " present:" << who.str();
+            dbg_burst++;
+        }
+    }
+    {
+        auto dbg_exit = std::chrono::steady_clock::now();
+        dbg_workUs += std::chrono::duration_cast<std::chrono::microseconds>(dbg_exit - dbg_entry).count();
+        dbg_prevEntry = dbg_exit;
+    }
+    // #endregion DEBUG
 }
 
 void DRMBackend::warnIfMixedRefreshRates(const char* context) {
