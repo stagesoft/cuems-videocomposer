@@ -1445,26 +1445,6 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName, const Outp
     return false;
 }
 
-int64_t DRMBackend::getTotalDroppedFrames() const {
-    int64_t total = 0;
-    for (const auto& [name, surface] : surfaces_) {
-        if (surface) {
-            total += surface->getPresentationTiming().getTotalDroppedFrames();
-        }
-    }
-    return total;
-}
-
-void DRMBackend::setVideoFramerate(double fps) {
-    // Set video framerate on all surfaces' presentation timing
-    // This tells them to expect vsync skips (e.g., 25fps on 60Hz display)
-    for (auto& [name, surface] : surfaces_) {
-        if (surface) {
-            surface->getPresentationTiming().setVideoFramerate(fps);
-        }
-    }
-}
-
 int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
                                         StartupSplash* splash) {
     constexpr int kPanelResponseMs = 5;

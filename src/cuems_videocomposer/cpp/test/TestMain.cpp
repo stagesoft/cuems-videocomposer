@@ -62,6 +62,7 @@ extern bool test_PresentationTiming_DiscardPendingSubmit();
 extern bool test_PresentationTiming_StatisticsMedianAndP95();
 extern bool test_PresentationTiming_ResetClearsState();
 extern bool test_PresentationTiming_ConcurrentSubmitFlip();
+extern bool test_PresentationTiming_SkippedVsyncsFromMscDelta();
 
 using namespace videocomposer::test;
 
@@ -106,6 +107,7 @@ int main() {
     TestFramework::instance().addTest("PresentationTiming_StatisticsMedianAndP95", test_PresentationTiming_StatisticsMedianAndP95);
     TestFramework::instance().addTest("PresentationTiming_ResetClearsState", test_PresentationTiming_ResetClearsState);
     TestFramework::instance().addTest("PresentationTiming_ConcurrentSubmitFlip", test_PresentationTiming_ConcurrentSubmitFlip);
+    TestFramework::instance().addTest("PresentationTiming_SkippedVsyncsFromMscDelta", test_PresentationTiming_SkippedVsyncsFromMscDelta);
 
     return TestFramework::instance().runAll();
 }
