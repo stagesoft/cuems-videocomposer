@@ -39,6 +39,7 @@
 #include <cstddef>
 #include <chrono>
 #include <deque>
+#include <string>
 #include <mutex>
 #include <vector>
 
@@ -91,8 +92,12 @@ public:
     /**
      * Initialize with expected refresh rate
      * @param refreshHz Display refresh rate (e.g., 60.0)
+     * @param outputName Connector this timing belongs to (e.g., "HDMI-A-1").
+     *                   Every DRMSurface owns its own PresentationTiming, so
+     *                   without it the drop warnings cannot be attributed to
+     *                   an output. Defaults to empty for tests.
      */
-    void init(double refreshHz);
+    void init(double refreshHz, std::string outputName = {});
 
     /**
      * Record a page flip event (called from DRM page flip handler)
@@ -167,6 +172,7 @@ private:
     PresentationEntry current_;
     PresentationEntry previous_;
 
+    std::string outputName_;           // Connector this timing belongs to (may be empty)
     int64_t expectedVsyncNs_ = 0;      // Expected vsync duration based on refresh rate
     int64_t totalUnexpectedDrops_ = 0; // Skipped vsyncs beyond jitter (actual problems)
     double displayHz_ = 0.0;           // Display refresh rate
@@ -178,6 +184,10 @@ private:
     size_t maxSamples_ = 0;
     std::deque<int64_t> pendingSubmits_;   // monotonic ns of unmatched submits
     std::vector<int64_t> latencySamples_;  // flip_ns - submit_ns
+
+    // Log prefix: "PresentationTiming[HDMI-A-1]" when the output is known,
+    // matching the DisplayLatency[<name>] format used at startup.
+    std::string tag() const;
 
     // Convert DRM timestamp to nanoseconds
     static int64_t toNanoseconds(unsigned int sec, unsigned int usec);

@@ -441,9 +441,9 @@ gbm_surface_created:
     // Initialize presentation timing with display refresh rate
     const OutputInfo& outputInfo = getOutputInfo();
     if (outputInfo.refreshRate > 0) {
-        presentationTiming_.init(outputInfo.refreshRate);
+        presentationTiming_.init(outputInfo.refreshRate, outputName_);
     } else {
-        presentationTiming_.init(60.0);  // Fallback to 60Hz
+        presentationTiming_.init(60.0, outputName_);  // Fallback to 60Hz
     }
     
     initialized_ = true;
