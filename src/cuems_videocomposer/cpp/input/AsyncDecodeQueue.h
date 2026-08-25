@@ -91,6 +91,37 @@ public:
     /** Classified reason for the last failed open(). */
     OpenFailure lastOpenFailure() const { return lastOpenFailure_.load(); }
 
+    /**
+     * Whether the decode thread is still producing frames.
+     *
+     * A dead queue used to be indistinguishable from a slow one: the error
+     * paths in decodeNextFrame() returned false silently, the thread retried
+     * forever, and the renderer just kept showing the last frame. False here
+     * means consecutive hard decode errors have passed the threshold and the
+     * queue needs reopening.
+     */
+    bool isHealthy() const { return consecutiveErrors_.load() < DECODE_ERROR_THRESHOLD; }
+
+    /** Consecutive hard decode errors (reset by any successfully decoded frame). */
+    int consecutiveErrors() const { return consecutiveErrors_.load(); }
+
+    /** Raw AVERROR behind the most recent hard decode error, or 0. */
+    int lastDecodeAVError() const { return lastDecodeAVError_.load(); }
+
+    /**
+     * Consecutive hard decode errors tolerated before the queue reports
+     * unhealthy.
+     *
+     * PROVISIONAL. The plan gates this number on an empirical fault-taxonomy
+     * session on the FP530 (phase F2 step 0b): which AVERRORs actually reach
+     * the decode error paths under pool exhaustion and under stream corruption,
+     * and how many a healthy stream produces transiently. Until that runs, 50
+     * is a deliberately conservative placeholder - high enough that ordinary
+     * stream hiccups cannot trip recovery, low enough that a genuinely dead
+     * queue is caught within ~a second at any sane frame rate.
+     */
+    static constexpr int DECODE_ERROR_THRESHOLD = 50;
+
     /** Raw AVERROR behind the last failed open(), or 0 if not applicable. */
     int lastOpenAVError() const { return lastOpenAVError_.load(); }
 
@@ -258,6 +289,15 @@ private:
     // Classified reason for the last failed open() (see OpenFailure).
     std::atomic<OpenFailure> lastOpenFailure_{OpenFailure::NONE};
     std::atomic<int> lastOpenAVError_{0};
+
+    // Decode-thread health. Counted inside decodeNextFrame(), which returns
+    // false for non-errors too (EOF, and "no frame after 100 packets"), so the
+    // counter cannot live at its call site.
+    std::atomic<int> consecutiveErrors_{0};
+    std::atomic<int> lastDecodeAVError_{0};
+
+    /** Count one hard decode error and log the first of a run. */
+    void recordDecodeError(int averr, const char* where);
     
     // Video properties
     int width_;
