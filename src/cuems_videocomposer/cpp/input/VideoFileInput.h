@@ -260,6 +260,43 @@ private:
     std::string healthReason_;
     void setHealth(Health health, const std::string& reason);
 
+    // --- decode-queue recovery -------------------------------------------
+    //
+    // ONE long-lived thread, parked on a condition variable, created at the
+    // first successful hardware open. Not a thread per recovery: re-assigning a
+    // joinable std::thread member terminates the process on the second one, and
+    // spawning from the vsync loop is not free under memory pressure - which is
+    // exactly the condition that triggers recovery.
+    //
+    // queueAccessMutex_ is the gate. The render thread try_locks it around ALL
+    // queue access and holds its last texture if it cannot get it; the worker
+    // holds it for the whole recovery. Without it the render thread can be
+    // borrowing a frame from a queue the worker is destroying.
+    std::unique_ptr<std::thread> recoveryThread_;
+    std::mutex queueAccessMutex_;
+    std::mutex recoveryWakeMutex_;
+    std::condition_variable recoveryWakeCond_;
+    std::atomic<bool> recoveryWake_{false};
+    std::atomic<bool> recoveryStop_{false};
+    std::atomic<bool> recoveryActive_{false};
+    std::atomic<int64_t> recoveryTargetFrame_{0};
+
+    // Loop state mirrored here so a recovery reopen can re-assert it: the
+    // queue's open() deliberately clears all latched playback state.
+    std::atomic<bool> loopModeActive_{false};
+    std::atomic<int64_t> loopTotalFrames_{0};
+
+    // Surface pool the queue is currently open on. Persists across recoveries:
+    // a layer that only survives on a reduced pool must not be handed the full
+    // one again on the next fault.
+    int queuePoolSize_ = 0;
+    size_t queueFillDepth_ = 0;
+
+    void startRecoveryWorker();
+    void stopRecoveryWorker();
+    void recoveryWorkerFunc();
+    void maybeWakeRecovery(int64_t currentFrame);
+
     // Throttle for the "frame not in queue" warning. Per-instance, NOT static:
     // a static counter is shared by every layer in the process.
     int queueMissCount_ = 0;

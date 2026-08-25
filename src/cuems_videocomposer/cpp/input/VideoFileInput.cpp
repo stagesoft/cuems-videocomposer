@@ -272,7 +272,10 @@ bool VideoFileInput::open(const std::string& source) {
             if (asyncDecodeQueue_->isHardwareDecoding()) {
                 // Tier 1: hardware queue on a full pool.
                 useAsyncDecode_ = true;
+                queuePoolSize_ = AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL;
+                queueFillDepth_ = AsyncDecodeQueue::MAX_QUEUE_SIZE;
                 setHealth(Health::ok, std::string());
+                startRecoveryWorker();
                 LOG_INFO << "Async decode queue enabled for smooth hardware decoding";
             } else {
                 // The queue opened, but on its OWN internal software decoder:
@@ -355,11 +358,17 @@ bool VideoFileInput::open(const std::string& source) {
 }
 
 void VideoFileInput::close() {
-    // Stop async decode queue first
+    // Stop the recovery worker FIRST. It owns the queue during a recovery, so
+    // tearing the queue down underneath it is a use-after-free.
+    stopRecoveryWorker();
+
+    // Stop async decode queue
     if (asyncDecodeQueue_) {
         asyncDecodeQueue_->close();
         asyncDecodeQueue_.reset();
     }
+    queuePoolSize_ = 0;
+    queueFillDepth_ = 0;
     useAsyncDecode_ = false;
 
     cleanup();
@@ -1761,6 +1770,21 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     // =========================================================================
     // DECODE PATH (mpv-style async queue - the only decoder on this path)
     // =========================================================================
+    //
+    // Recovery gate. The worker may be closing and reopening the queue right
+    // now, so NOTHING below may touch asyncDecodeQueue_ without holding this.
+    // try_lock, never lock: the render thread must never wait on a recovery
+    // that can run for seconds - it holds its last texture instead.
+    std::unique_lock<std::mutex> gate(queueAccessMutex_, std::try_to_lock);
+    if (!gate.owns_lock()) {
+        return textureBuffer.isValid();
+    }
+
+    // Recovery has been exhausted: stop asking the queue for frames at all.
+    if (health_.load() == Health::declared_failed) {
+        return textureBuffer.isValid();
+    }
+
     if (useAsyncDecode_ && asyncDecodeQueue_) {
         // Set target frame so decode thread knows where we are
         asyncDecodeQueue_->setTargetFrame(frameNumber);
@@ -1796,6 +1820,12 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
                            << asyncDecodeQueue_->getOldestFrame() << ", newest="
                            << asyncDecodeQueue_->getNewestFrame() << ")";
             }
+            // A miss is also the hook for recovery: if the decode thread has
+            // gone unhealthy behind us, this is where we notice and wake the
+            // worker. It decides whether anything actually needs doing - no
+            // joins, no sleeps and no queue teardown happen on this thread.
+            maybeWakeRecovery(frameNumber);
+
             // Hold the last displayed frame rather than blanking the layer.
             if (textureBuffer.isValid()) {
                 return true;
@@ -2124,8 +2154,199 @@ void VideoFileInput::cleanup() {
 // ============================================================================
 
 void VideoFileInput::setLoopMode(bool loop, int64_t totalFrames) {
-    if (asyncDecodeQueue_) {
+    // Mirrored so a recovery reopen can re-assert it: the queue's open()
+    // deliberately clears every latched playback state, loop mode included.
+    loopModeActive_ = loop;
+    loopTotalFrames_ = totalFrames;
+
+    // try_lock, not lock: this runs on the OSC/render path, and a recovery can
+    // hold the gate for seconds. Nothing is lost by skipping - the worker
+    // re-asserts loop mode from the mirrored values when it reopens.
+    std::unique_lock<std::mutex> gate(queueAccessMutex_, std::try_to_lock);
+    if (gate.owns_lock() && asyncDecodeQueue_) {
         asyncDecodeQueue_->setLoopMode(loop, totalFrames);
+    }
+}
+
+void VideoFileInput::startRecoveryWorker() {
+    if (recoveryThread_) {
+        return;
+    }
+    recoveryStop_ = false;
+    recoveryWake_ = false;
+    recoveryThread_ = std::make_unique<std::thread>(&VideoFileInput::recoveryWorkerFunc, this);
+}
+
+void VideoFileInput::stopRecoveryWorker() {
+    if (!recoveryThread_) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(recoveryWakeMutex_);
+        recoveryStop_ = true;
+        recoveryWake_ = true;
+    }
+    recoveryWakeCond_.notify_all();
+
+    // In the common case the worker is parked and this returns at once.
+    //
+    // DOCUMENTED LIMITATION: an unload that lands DURING an active recovery
+    // joins here on the render/main thread, and the worker may itself be inside
+    // the queue's close(), which joins a decode thread that can be sitting in
+    // vaSyncSurface. On a healthy GPU that is milliseconds. On a hung VCN ring
+    // it is not bounded - but on a hung ring Mesa is already killing this
+    // process, which is the failure this whole phase exists to make visible.
+    if (recoveryThread_->joinable()) {
+        recoveryThread_->join();
+    }
+    recoveryThread_.reset();
+    recoveryActive_ = false;
+}
+
+void VideoFileInput::maybeWakeRecovery(int64_t currentFrame) {
+    if (!asyncDecodeQueue_ || asyncDecodeQueue_->isHealthy()) {
+        return;
+    }
+    // Never wake the worker again once recovery has been exhausted, or the miss
+    // path spawns a recovery attempt every vsync forever.
+    if (health_.load() == Health::declared_failed) {
+        return;
+    }
+    if (recoveryActive_.load()) {
+        return;
+    }
+    recoveryTargetFrame_ = currentFrame;
+    {
+        std::lock_guard<std::mutex> lock(recoveryWakeMutex_);
+        recoveryWake_ = true;
+    }
+    recoveryWakeCond_.notify_one();
+}
+
+void VideoFileInput::recoveryWorkerFunc() {
+    // Attempt 1 retries on the full pool - most faults are transient and a
+    // healthy layer should come back at full capability. Attempts 2 and 3 drop
+    // to a reduced pool: pool exhaustion cannot surface at open() (the VAAPI
+    // pool is allocated lazily at first decode), so this is where a
+    // too-large-pool fault actually shows up and where a smaller one can help.
+    struct Attempt { int poolSize; size_t fillDepth; int backoffMs; };
+    const Attempt attempts[] = {
+        { AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,    AsyncDecodeQueue::MAX_QUEUE_SIZE,    1000 },
+        { AsyncDecodeQueue::EXTRA_HW_FRAMES_REDUCED, AsyncDecodeQueue::FILL_DEPTH_REDUCED, 2000 },
+        { AsyncDecodeQueue::EXTRA_HW_FRAMES_REDUCED, AsyncDecodeQueue::FILL_DEPTH_REDUCED, 4000 },
+    };
+    const int attemptCount = static_cast<int>(sizeof(attempts) / sizeof(attempts[0]));
+
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(recoveryWakeMutex_);
+            recoveryWakeCond_.wait(lock, [this] {
+                return recoveryStop_.load() || recoveryWake_.load();
+            });
+            recoveryWake_ = false;
+        }
+        if (recoveryStop_.load()) {
+            return;
+        }
+        if (!asyncDecodeQueue_ || asyncDecodeQueue_->isHealthy()) {
+            continue;
+        }
+        if (health_.load() == Health::declared_failed) {
+            continue;
+        }
+
+        recoveryActive_ = true;
+
+        // Everything below runs behind the gate: the render thread try_locks
+        // this same mutex and holds its last texture while we own it.
+        std::lock_guard<std::mutex> gate(queueAccessMutex_);
+
+        const int64_t resumeFrame = recoveryTargetFrame_.load();
+        LOG_ERROR << "VideoFileInput: decode queue unhealthy for " << currentFile_
+                  << " (" << asyncDecodeQueue_->consecutiveErrors()
+                  << " consecutive errors) - attempting recovery at frame " << resumeFrame;
+
+        // "Size persists": a layer that already came back on a reduced pool does
+        // not get handed the full one again on the next fault - that would
+        // oscillate between the two sizes for the life of the cue. Start the
+        // ladder at the reduced rung instead.
+        const int firstAttempt =
+            (queuePoolSize_ != 0 && queuePoolSize_ != AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL)
+                ? 1 : 0;
+
+        bool recovered = false;
+        for (int i = firstAttempt; i < attemptCount && !recoveryStop_.load(); ++i) {
+            // Wall-clock backoff, honoring the stop flag so an unload does not
+            // wait out the full ladder.
+            {
+                std::unique_lock<std::mutex> lock(recoveryWakeMutex_);
+                recoveryWakeCond_.wait_for(lock,
+                    std::chrono::milliseconds(attempts[i].backoffMs),
+                    [this] { return recoveryStop_.load(); });
+            }
+            if (recoveryStop_.load()) {
+                break;
+            }
+
+            // Release the frame we are still holding a VAAPI reference to
+            // before tearing down the pool it belongs to. This is a plain
+            // av_frame_unref - no GL work - which is only safe off the render
+            // thread because the gate is keeping that thread out of the
+            // EGL import meanwhile.
+#ifdef HAVE_VAAPI_INTEROP
+            if (vaapiInterop_) {
+                vaapiInterop_->releaseCurrentFrame();
+            }
+#endif
+
+            asyncDecodeQueue_->close();
+
+            const bool ok = asyncDecodeQueue_->open(currentFile_, hwDeviceCtx_,
+                                                    attempts[i].poolSize,
+                                                    attempts[i].fillDepth);
+            if (!ok) {
+                LOG_WARNING << "VideoFileInput: recovery attempt " << (i + 1) << "/"
+                            << attemptCount << " failed to reopen the decode queue for "
+                            << currentFile_;
+                continue;
+            }
+
+            // open() clears every latched playback state, so re-assert ours.
+            asyncDecodeQueue_->setLoopMode(loopModeActive_.load(), loopTotalFrames_.load());
+            asyncDecodeQueue_->setTargetFrame(resumeFrame);
+
+            queuePoolSize_ = attempts[i].poolSize;
+            queueFillDepth_ = attempts[i].fillDepth;
+            recovered = true;
+
+            const bool reduced = attempts[i].poolSize != AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL;
+            if (reduced) {
+                setHealth(Health::degraded,
+                          "decode queue recovered on a reduced surface pool");
+                LOG_WARNING << "VideoFileInput: decode queue recovered for " << currentFile_
+                            << " on a REDUCED pool (+" << attempts[i].poolSize
+                            << ", fill depth " << attempts[i].fillDepth
+                            << ") after attempt " << (i + 1);
+            } else {
+                setHealth(Health::ok, std::string());
+                LOG_INFO << "VideoFileInput: decode queue recovered for " << currentFile_
+                         << " on attempt " << (i + 1);
+            }
+            break;
+        }
+
+        if (!recovered && !recoveryStop_.load()) {
+            // Out of attempts. Stop here rather than retrying forever: the
+            // render thread stops calling getFrame() and stops waking us, the
+            // layer holds its last texture, and the operator's lever is a cue
+            // unload/reload.
+            setHealth(Health::declared_failed,
+                      "decode queue could not be recovered");
+            LOG_ERROR << "VideoFileInput: decode queue recovery exhausted for "
+                      << currentFile_ << " - holding last frame; reload the cue to retry";
+        }
+
+        recoveryActive_ = false;
     }
 }
 

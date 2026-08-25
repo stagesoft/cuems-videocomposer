@@ -76,6 +76,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
 
     lastOpenFailure_ = OpenFailure::NONE;
     lastOpenAVError_ = 0;
+    consecutiveErrors_ = 0;
+    lastDecodeAVError_ = 0;
 
     // Reset latched playback state. close() clears the queue and the thread but
     // NOT these: reopening on a recovery attempt with eofReached_ or a virtual
@@ -671,9 +673,29 @@ void AsyncDecodeQueue::decodeThreadFunc() {
     LOG_INFO << "AsyncDecodeQueue: Decode thread stopped";
 }
 
+void AsyncDecodeQueue::recordDecodeError(int averr, const char* where) {
+    lastDecodeAVError_ = averr;
+    const int n = ++consecutiveErrors_;
+    if (n == 1) {
+        // First error of a run. Say it once, loudly: this used to be the
+        // failure that produced no log line at all - the thread simply retried
+        // forever while the renderer held its last frame.
+        char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+        av_strerror(averr, errbuf, AV_ERROR_MAX_STRING_SIZE);
+        LOG_ERROR << "AsyncDecodeQueue: decode error in " << where << " for "
+                  << filename_ << ": " << errbuf << " (" << averr << ")";
+    } else if (n == DECODE_ERROR_THRESHOLD) {
+        LOG_ERROR << "AsyncDecodeQueue: " << n << " consecutive decode errors for "
+                  << filename_ << " - queue declared unhealthy, recovery may reopen it";
+    }
+}
+
 bool AsyncDecodeQueue::decodeNextFrame() {
     AVPacket* packet = av_packet_alloc();
-    if (!packet) return false;
+    if (!packet) {
+        recordDecodeError(AVERROR(ENOMEM), "av_packet_alloc");
+        return false;
+    }
     
     bool gotFrame = false;
     int maxPackets = 100;  // Safety limit
@@ -688,11 +710,12 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         } else if (ret == AVERROR(EAGAIN)) {
             // Need more input
         } else if (ret == AVERROR_EOF) {
-            // End of stream
+            // End of stream - NOT an error. This is the bare receive-EOF at the
+            // loop top; the post-drain eofReached_ path below is the other one.
             av_packet_free(&packet);
             return false;
         } else {
-            // Error
+            recordDecodeError(ret, "avcodec_receive_frame");
             av_packet_free(&packet);
             return false;
         }
@@ -789,12 +812,14 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                     continue;  // Re-read packet from seeked position
                 } else {
                     // Non-loop mode: stop decoding and hold last frames.
+                    // Clean end of stream, not a fault - do NOT count it.
                     eofReached_ = true;
                     LOG_INFO << "AsyncDecodeQueue: EOF reached, stopping decode (non-loop)";
                     av_packet_free(&packet);
                     return false;
                 }
             } else {
+                recordDecodeError(ret, "av_read_frame");
                 av_packet_free(&packet);
                 return false;
             }
@@ -811,6 +836,7 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         av_packet_unref(packet);
         
         if (ret < 0 && ret != AVERROR(EAGAIN)) {
+            recordDecodeError(ret, "avcodec_send_packet");
             av_packet_free(&packet);
             return false;
         }
@@ -819,6 +845,8 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     av_packet_free(&packet);
     
     if (!gotFrame) {
+        // Not an error: the packet budget ran out (or a stop was requested)
+        // without the decoder producing a frame. The thread simply tries again.
         return false;
     }
     
@@ -871,9 +899,13 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     qf.frameNumber = frameNum;
     qf.frame = av_frame_alloc();
     if (!qf.frame) {
+        recordDecodeError(AVERROR(ENOMEM), "av_frame_alloc");
         return false;
     }
     
+    // A decoded frame clears the error run.
+    consecutiveErrors_ = 0;
+
     // Move frame data (avoids copy for hardware frames)
     av_frame_move_ref(qf.frame, decodeFrame_);
     qf.ready = true;
