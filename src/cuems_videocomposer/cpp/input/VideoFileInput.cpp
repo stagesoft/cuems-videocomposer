@@ -104,6 +104,14 @@ bool VideoFileInput::initializeFFmpeg() {
     return true;
 }
 
+AVCodecParameters* VideoFileInput::streamCodecParams() const {
+    if (!formatCtx_ || videoStream_ < 0 ||
+        videoStream_ >= static_cast<int>(formatCtx_->nb_streams)) {
+        return nullptr;
+    }
+    return formatCtx_->streams[videoStream_]->codecpar;
+}
+
 bool VideoFileInput::open(const std::string& source) {
     if (source.empty()) {
         return false;
@@ -180,19 +188,15 @@ bool VideoFileInput::open(const std::string& source) {
         frameRateQ_.num = avStream->r_frame_rate.den;
     }
 
-    // Dimensions - get from codec context
+    // Dimensions - always from codec parameters, never from codecCtx_.
+    // The hardware path no longer opens a codec context of its own (F2), so the
+    // old codecCtx_ branch would read null there. codecpar carries the same
+    // width/height in both modes.
     int width = 0;
     int height = 0;
-    if (codecCtx_) {
-        width = codecCtx_->width;
-        height = codecCtx_->height;
-    } else {
-        // Fallback to codec parameters if codec not opened yet
-        AVCodecParameters* codecParams = mediaReader_.getCodecParameters(videoStream_);
-        if (codecParams) {
-            width = codecParams->width;
-            height = codecParams->height;
-        }
+    if (AVCodecParameters* codecParams = streamCodecParams()) {
+        width = codecParams->width;
+        height = codecParams->height;
     }
     
     // Duration
@@ -878,12 +882,13 @@ static int64_t keyframeLookupHelper(LocalFrameIndex* frameIndex, int64_t fcnt,
 bool VideoFileInput::isIntraFrameCodec() const {
     // Check if codec is intra-frame only (all frames are keyframes)
     // These codecs don't need indexing - direct seek mode works perfectly
-    if (!codecCtx_) {
+    AVCodecParameters* codecParams = streamCodecParams();
+    if (!codecParams) {
         return false;
     }
-    
-    AVCodecID codecId = codecCtx_->codec_id;
-    
+
+    AVCodecID codecId = codecParams->codec_id;
+
     switch (codecId) {
         // Professional intra-frame codecs
         case AV_CODEC_ID_PRORES:     // Apple ProRes (all variants)
@@ -972,7 +977,8 @@ bool VideoFileInput::indexFrames() {
     // Check if codec is intra-frame only (all keyframes)
     // These codecs don't need the expensive 3-pass indexing
     if (isIntraFrameCodec()) {
-        const char* codecName = codecCtx_ ? avcodec_get_name(codecCtx_->codec_id) : "unknown";
+        AVCodecParameters* logParams = streamCodecParams();
+        const char* codecName = logParams ? avcodec_get_name(logParams->codec_id) : "unknown";
         LOG_INFO << "Codec " << codecName << " is intra-frame only (all keyframes), skipping indexing";
         setupDirectSeekMode();
         return scanComplete_;
@@ -1388,6 +1394,23 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         return false;
     }
 
+    // This is the SOFTWARE read path: it decodes through videoDecoder_ and reads
+    // geometry off codecCtx_. A hardware layer has neither after F2 - codecCtx_ is
+    // null and videoDecoder_ was never opened - so the sws property reads below
+    // would dereference null. Refuse instead of crashing.
+    //
+    // Reaching this is a caller bug (LayerPlayback must not fall back to readFrame()
+    // for a GPU_HARDWARE backend), so say so once rather than silently per vsync.
+    if (useHardwareDecoding_ && !codecCtx_) {
+        static bool warnedNoSwContext = false;
+        if (!warnedNoSwContext) {
+            warnedNoSwContext = true;
+            LOG_ERROR << "VideoFileInput::readFrame called on a hardware layer with no "
+                      << "software decode context - refusing (frame " << frameNumber << ")";
+        }
+        return false;
+    }
+
     // QUICK WIN #1: Early return for same frame (xjadeo: if (!force_update && dispFrame == timestamp) return;)
     // If same frame is requested and we have valid decoded data, just re-run color conversion
     // This skips the expensive decode loop but still handles different output buffers
@@ -1760,22 +1783,29 @@ int64_t VideoFileInput::getCurrentFrame() const {
 }
 
 InputSource::CodecType VideoFileInput::detectCodec() const {
-    if (!codecCtx_) {
+    // Codec identity comes from codecpar, NOT from codecCtx_.
+    // Keying off codecCtx_ meant "SOFTWARE whenever no sync context is open",
+    // which after F2 is every hardware layer - it would route the whole fleet
+    // to CPU_SOFTWARE through getOptimalBackend().
+    AVCodecParameters* codecParams = streamCodecParams();
+    if (!codecParams) {
         return CodecType::SOFTWARE;
     }
+
+    const AVCodecID codecId = codecParams->codec_id;
 
     // Check for HAP codec
     // Note: FFmpeg may use AV_CODEC_ID_HAP for all HAP variants
     // The specific variant (HAP, HAP_Q, HAP_ALPHA) is determined by HAPVideoInput
-    if (codecCtx_->codec_id == AV_CODEC_ID_HAP) {
+    if (codecId == AV_CODEC_ID_HAP) {
         // Check for variant-specific codec IDs if available
         #ifdef AV_CODEC_ID_HAPALPHA
-        if (codecCtx_->codec_id == AV_CODEC_ID_HAPALPHA) {
+        if (codecId == AV_CODEC_ID_HAPALPHA) {
             return CodecType::HAP_ALPHA;
         }
         #endif
         #ifdef AV_CODEC_ID_HAPQ
-        if (codecCtx_->codec_id == AV_CODEC_ID_HAPQ) {
+        if (codecId == AV_CODEC_ID_HAPQ) {
             return CodecType::HAP_Q;
         }
         #endif
@@ -1784,13 +1814,13 @@ InputSource::CodecType VideoFileInput::detectCodec() const {
     }
 
     // Check for hardware-accelerated codecs
-    if (codecCtx_->codec_id == AV_CODEC_ID_H264) {
+    if (codecId == AV_CODEC_ID_H264) {
         return CodecType::H264;
     }
-    if (codecCtx_->codec_id == AV_CODEC_ID_HEVC) {
+    if (codecId == AV_CODEC_ID_HEVC) {
         return CodecType::HEVC;
     }
-    if (codecCtx_->codec_id == AV_CODEC_ID_AV1) {
+    if (codecId == AV_CODEC_ID_AV1) {
         return CodecType::AV1;
     }
 
