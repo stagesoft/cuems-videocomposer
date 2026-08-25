@@ -646,12 +646,23 @@ bool VideoFileInput::initializeHardwareDevice() {
         }
     }
 
-    // NOTE no codec is opened here any more. This function used to allocate a
+    // NOTE no decoder is opened here any more. This function used to allocate a
     // second AVCodecContext on this same file and open a synchronous hardware
     // decoder on it, with a VAAPI surface pool of its own, while the async
     // decode queue opened another. Two pools per layer against a fixed VRAM
     // carve-out is what the eviction-storm hang was measured on.
     //
+    // What that open ALSO did, incidentally, was answer "will this codec really
+    // open on this device" - the last gate before software fallback, and the
+    // only one that catches a wrapper decoder refusing a file the static gates
+    // accepted. That answer is still needed here, before indexFrames() decides
+    // which form of index to build, so it is asked explicitly and the context
+    // is freed again without ever decoding.
+    if (!probeHardwareCodecOpens(hwCodec, codecParams, hwDeviceType)) {
+        teardownHardwareDevice();
+        return false;
+    }
+
     // The error paths below therefore free the device context only - there is
     // no codec context here to free.
 
@@ -672,6 +683,87 @@ bool VideoFileInput::initializeHardwareDevice() {
     LOG_INFO << "Hardware device ready for " << codecName
              << " (" << HardwareDecoder::getName(hwDecoderType_)
              << ") - decoding runs on the async queue";
+    return true;
+}
+
+bool VideoFileInput::probeHardwareCodecOpens(const AVCodec* hwCodec,
+                                             AVCodecParameters* codecParams,
+                                             AVHWDeviceType hwDeviceType) const {
+    if (!hwCodec || !codecParams || !hwDeviceCtx_) {
+        return false;
+    }
+
+    // Which initialization method does this codec want for OUR device type?
+    // Wrapper decoders (METHOD_INTERNAL - cuvid, qsv) manage hardware
+    // themselves and must NOT be handed a hw_device_ctx; hwaccel decoders
+    // (VAAPI, VideoToolbox) require one. Getting this wrong makes the probe
+    // answer a different question than the real open.
+    bool needsHwDeviceCtx = false;
+    for (int n = 0; ; n++) {
+        const AVCodecHWConfig* cfg = avcodec_get_hw_config(hwCodec, n);
+        if (!cfg) {
+            break;
+        }
+        if (cfg->device_type != hwDeviceType) {
+            continue;
+        }
+        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_INTERNAL) {
+            needsHwDeviceCtx = false;
+            break;
+        }
+        if (cfg->methods & (AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX |
+                            AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX)) {
+            needsHwDeviceCtx = true;
+        }
+    }
+
+    AVCodecContext* probeCtx = avcodec_alloc_context3(hwCodec);
+    if (!probeCtx) {
+        return false;
+    }
+
+    probeCtx->codec_type = AVMEDIA_TYPE_VIDEO;
+    probeCtx->codec_id = hwCodec->id;
+
+    if (AVStream* avStream = const_cast<VideoFileInput*>(this)->mediaReader_.getStream(videoStream_)) {
+        probeCtx->pkt_timebase = avStream->time_base;
+    }
+
+    if (avcodec_parameters_to_context(probeCtx, codecParams) < 0) {
+        avcodec_free_context(&probeCtx);
+        return false;
+    }
+
+    probeCtx->hwaccel_flags |= AV_HWACCEL_FLAG_IGNORE_LEVEL;
+    probeCtx->hwaccel_flags |= AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH;
+#ifdef AV_HWACCEL_FLAG_UNSAFE_OUTPUT
+    probeCtx->hwaccel_flags |= AV_HWACCEL_FLAG_UNSAFE_OUTPUT;
+#endif
+
+    if (needsHwDeviceCtx) {
+        probeCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
+        if (!probeCtx->hw_device_ctx) {
+            avcodec_free_context(&probeCtx);
+            return false;
+        }
+    }
+
+    // Deliberately NO extra_hw_frames: this context never decodes, so it must
+    // not size a surface pool. Only the queue's decoder does that.
+    const int ret = avcodec_open2(probeCtx, hwCodec, nullptr);
+
+    // Free it immediately either way - the answer is all we wanted.
+    avcodec_free_context(&probeCtx);
+
+    if (ret < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+        av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
+        LOG_WARNING << "Hardware decoder would not open ("
+                    << avcodec_get_name(codecParams->codec_id) << "): " << errbuf
+                    << " (error code: " << ret << "), falling back to software";
+        return false;
+    }
+
     return true;
 }
 

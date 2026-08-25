@@ -182,6 +182,32 @@ private:
     void teardownHardwareDevice();
 
     /**
+     * Would this codec actually open on this hardware device?
+     *
+     * Opens a codec context and frees it again without ever decoding. This is
+     * NOT the decoder - it is the capability answer the deleted synchronous
+     * codec open used to give as a side effect, and the only thing that
+     * distinguishes "a decoder exists and passed every static gate" from "it
+     * will actually open". Wrapper decoders (cuvid/qsv/dxva2) refuse here; the
+     * static gates cannot see it.
+     *
+     * Costs no surfaces: the VAAPI pool is allocated lazily at first decode
+     * (ff_get_format), never at avcodec_open2 - which is also why pool
+     * exhaustion cannot be detected here. (Wrapper decoders do allocate at
+     * open, which is precisely how they refuse.)
+     *
+     * Without this probe a file whose codec open would fail indexes in hardware
+     * mode - skipping Pass 2 - and is only dropped to software later by the
+     * failure ladder, leaving a hardware-form index on a software-decoded
+     * layer.
+     *
+     * @return true if the codec opened (and was then closed again)
+     */
+    bool probeHardwareCodecOpens(const AVCodec* hwCodec,
+                                 AVCodecParameters* codecParams,
+                                 AVHWDeviceType hwDeviceType) const;
+
+    /**
      * Codec parameters straight from the demuxer - valid in BOTH decode modes.
      *
      * Identity and geometry used to be read off codecCtx_, which only ever
