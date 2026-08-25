@@ -48,11 +48,17 @@ int main(int argc, char* argv[]) {
 
         videocomposer::VideoFileInput vfi;
         // Default to AUTO so the standalone matches the inline VC path (which lets
-        // openHardwareCodec() try VAAPI first). Pass 2 of indexFrames() short-circuits
-        // on hardware decode — see VideoFileInput.cpp:935-940 — making the standalone
-        // ~8x faster end-to-end on a long-GOP H.264 (ClickUp 869dbywj2).
+        // initializeHardwareDevice() try VAAPI first). Pass 2 of indexFrames()
+        // short-circuits on hardware decode — it decodes through videoDecoder_,
+        // which is never opened on that path — making the standalone ~8x faster
+        // end-to-end on a long-GOP H.264 (ClickUp 869dbywj2).
         vfi.setHardwareDecodePreference(
             videocomposer::VideoFileInput::HardwareDecodePreference::AUTO);
+
+        // Index only: build the .idx and nothing else. Without this the open()
+        // below also spins up an async decode queue and its VAAPI surface pool
+        // to feed a renderer that does not exist here.
+        vfi.setIndexOnly(true);
 
         if (!vfi.open(path)) {
             std::cerr << "ERROR: Failed to index " << path << "\n";

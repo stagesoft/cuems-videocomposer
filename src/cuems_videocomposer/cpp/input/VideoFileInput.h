@@ -129,11 +129,23 @@ public:
 #endif
 
     /**
-     * Pre-warm the VAAPI→EGL GPU pipeline by importing frame 0.
-     * Must be called from the GL thread (main thread) after file is loaded.
-     * Eliminates ~20ms first-frame latency from one-time driver setup.
+     * Index-only mode: open the file to build/refresh its .idx and nothing else.
+     *
+     * Suppresses creation of the async decode queue, which exists to feed a
+     * renderer - the indexer has no layers and no display. The hardware device
+     * is still initialized, so indexFrames() keeps its Pass-2 short-circuit and
+     * the .idx bytes are unchanged.
+     *
+     * NOTE with no queue there is no decode path at all, so getOptimalBackend()
+     * still answers GPU_HARDWARE while nothing can actually render. That is moot
+     * in the indexer, which never asks.
      */
-    void prewarmGPUPipeline();
+    void setIndexOnly(bool indexOnly) { indexOnly_ = indexOnly; }
+    bool getIndexOnly() const { return indexOnly_; }
+
+    // Decode-path health (see InputSource::Health)
+    Health getHealth() const override;
+    std::string getHealthReason() const override;
 
 private:
     struct FrameIndex {
@@ -149,7 +161,25 @@ private:
 
     bool initializeFFmpeg();
     bool openCodec();
-    bool openHardwareCodec();
+
+    /**
+     * Initialize the hardware DEVICE (not a codec).
+     *
+     * Was openHardwareCodec(): it opened a second, synchronous decoder on the
+     * same file, with a VAAPI surface pool of its own, alongside the async
+     * queue's. Only the device context survives - it is what the queue decodes
+     * against and what the EGL interop shares.
+     *
+     * @return true when a usable hardware device was created
+     */
+    bool initializeHardwareDevice();
+
+    /**
+     * Release everything initializeHardwareDevice() created and fall back to
+     * software. Without this the software tier would run with a live VAAPI
+     * device still attached and re-allocate frames on top of its own.
+     */
+    void teardownHardwareDevice();
 
     /**
      * Codec parameters straight from the demuxer - valid in BOTH decode modes.
@@ -193,11 +223,10 @@ private:
 
     // Hardware decoding
     AVBufferRef* hwDeviceCtx_;        // Hardware device context
-    AVFrame* hwFrame_;                // Hardware frame (for hardware decoding)
     HardwareDecoder::Type hwDecoderType_;  // Type of hardware decoder in use
     bool useHardwareDecoding_;        // Whether hardware decoding is enabled
-    bool codecCtxAllocated_;          // Whether codecCtx_ was allocated separately (hardware) or is part of stream (software)
     HardwareDecodePreference hwPreference_;
+    bool indexOnly_ = false;          // Index-only mode: no decode queue (see setIndexOnly)
     
 #ifdef HAVE_VAAPI_INTEROP
     std::unique_ptr<VaapiInterop> vaapiInterop_;  // VAAPI zero-copy interop (owned per-instance)
@@ -223,30 +252,18 @@ private:
     bool ready_;
     AVRational frameRateQ_;
     
-    // Async frame pre-buffering (like mpv's decode-ahead)
-    struct CachedFrame {
-        int64_t frameNumber;
-        FrameBuffer buffer;
-        bool valid;
-    };
-    
-    static constexpr size_t FRAME_CACHE_SIZE = 4;  // Pre-buffer up to 4 frames
-    std::deque<CachedFrame> frameCache_;
-    std::mutex cacheMutex_;
-    
-    // Async decode thread
-    std::unique_ptr<std::thread> decodeThread_;
-    std::condition_variable decodeCond_;
-    std::atomic<bool> decodeThreadRunning_{false};
-    std::atomic<int64_t> decodeTargetFrame_{-1};
-    std::atomic<bool> decodeThreadStop_{false};
-    
-    void decodeThreadFunc();
-    bool decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffer);
-    void startAsyncDecode(int64_t startFrame);
-    void stopAsyncDecode();
-    CachedFrame* findCachedFrame(int64_t frameNumber);
-    
+    // Decode-path health, written by open()'s failure ladder (loader thread)
+    // and by the recovery worker; read by the render thread and by a future
+    // load-time health ping.
+    std::atomic<Health> health_{Health::ok};
+    mutable std::mutex healthReasonMutex_;
+    std::string healthReason_;
+    void setHealth(Health health, const std::string& reason);
+
+    // Throttle for the "frame not in queue" warning. Per-instance, NOT static:
+    // a static counter is shared by every layer in the process.
+    int queueMissCount_ = 0;
+
     // Hardware decode frame tracking (per-instance, NOT static)
     int64_t lastDecodedHWFrame_;
     

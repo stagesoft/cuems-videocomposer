@@ -66,12 +66,72 @@ public:
     ~AsyncDecodeQueue();
 
     /**
+     * Why the last open() attempt failed.
+     *
+     * open() returns a bare bool, which left every failure site
+     * indistinguishable to the caller - it could not tell "this file is not
+     * demuxable" (nothing to fall back to) from "the codec would not open"
+     * (software decode is worth a try). The failure ladder in
+     * VideoFileInput::open() branches on this.
+     *
+     * NOTE there is deliberately no ENOMEM/pool-exhaustion value: the VAAPI
+     * surface pool is allocated lazily at first decode (ff_get_format), never
+     * at avcodec_open2, so pool exhaustion cannot surface here. It appears on
+     * the decode thread and is handled by recovery.
+     */
+    enum class OpenFailure {
+        NONE,            // no failure recorded
+        DEMUX,           // container would not open / no stream info
+        NO_STREAM,       // no video stream in the container
+        DECODER_LOOKUP,  // no decoder for this codec id
+        CODEC_OPEN,      // avcodec_open2 refused
+        INTERNAL         // allocation / parameter-copy failure
+    };
+
+    /** Classified reason for the last failed open(). */
+    OpenFailure lastOpenFailure() const { return lastOpenFailure_.load(); }
+
+    /** Raw AVERROR behind the last failed open(), or 0 if not applicable. */
+    int lastOpenAVError() const { return lastOpenAVError_.load(); }
+
+    /** Maximum frames buffered in the queue. */
+    static constexpr size_t MAX_QUEUE_SIZE = 8;
+
+    /** Extra VAAPI surfaces requested in normal operation (MAX_QUEUE_SIZE + 3). */
+    static constexpr int EXTRA_HW_FRAMES_FULL = 11;
+
+    /**
+     * Extra VAAPI surfaces requested by a reduced-pool recovery reopen.
+     * Pairs with FILL_DEPTH_REDUCED - a smaller pool MUST come with a smaller
+     * fill depth or the decoder starves against its own pool.
+     */
+    static constexpr int EXTRA_HW_FRAMES_REDUCED = 7;
+
+    /**
+     * Fill depth floor for reduced mode.
+     *
+     * Not a free parameter: the trim window below keeps frames from
+     * current - 2 upward, so a queue allowed to fill only 1-3 frames deep
+     * locks into a permanent miss - it can never hold the frame the renderer
+     * is about to ask for, and burns the full getFrame() wait every vsync.
+     * 4 is the smallest depth that clears that window.
+     */
+    static constexpr size_t FILL_DEPTH_REDUCED = 4;
+
+    /**
      * Open video file and start decode thread
      * @param filename Path to video file
      * @param hwDeviceCtx Hardware device context (for VAAPI, can be nullptr for software)
+     * @param extraHwFrames Extra VAAPI surfaces to request (EXTRA_HW_FRAMES_FULL
+     *                      normally, EXTRA_HW_FRAMES_REDUCED for a recovery retry)
+     * @param fillDepth How many frames the decode thread may buffer ahead
+     *                  (MAX_QUEUE_SIZE normally, FILL_DEPTH_REDUCED when the
+     *                  pool is reduced). Clamped to [FILL_DEPTH_REDUCED, MAX_QUEUE_SIZE].
      * @return true on success
      */
-    bool open(const std::string& filename, AVBufferRef* hwDeviceCtx = nullptr);
+    bool open(const std::string& filename, AVBufferRef* hwDeviceCtx = nullptr,
+              int extraHwFrames = EXTRA_HW_FRAMES_FULL,
+              size_t fillDepth = MAX_QUEUE_SIZE);
 
     /**
      * Close and stop decode thread
@@ -188,6 +248,16 @@ private:
     // Hardware decoding
     AVBufferRef* hwDeviceCtx_;  // Not owned, shared from VideoFileInput
     bool useHardware_;
+
+    // Surfaces requested from the driver at the last open(), and how deep the
+    // decode thread may fill. Runtime rather than compile-time so a recovery
+    // reopen can come back on a smaller pool without rebuilding.
+    int extraHwFrames_ = EXTRA_HW_FRAMES_FULL;
+    std::atomic<size_t> fillDepth_{MAX_QUEUE_SIZE};
+
+    // Classified reason for the last failed open() (see OpenFailure).
+    std::atomic<OpenFailure> lastOpenFailure_{OpenFailure::NONE};
+    std::atomic<int> lastOpenAVError_{0};
     
     // Video properties
     int width_;
@@ -198,7 +268,6 @@ private:
     std::string filename_;
     
     // Frame queue
-    static constexpr size_t MAX_QUEUE_SIZE = 8;  // Buffer up to 8 frames
     // If the renderer's target runs this many frames ahead of the decoder,
     // clear the queue and seek forward instead of chewing through the backlog
     // sequentially while the renderer shows stale frames. Guards against
