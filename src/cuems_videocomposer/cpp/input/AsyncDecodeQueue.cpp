@@ -60,13 +60,36 @@ AsyncDecodeQueue::~AsyncDecodeQueue() {
     close();
 }
 
-bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCtx) {
+bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCtx,
+                            int extraHwFrames, size_t fillDepth) {
     close();  // Close any existing
     
     filename_ = filename;
     hwDeviceCtx_ = hwDeviceCtx;
-    
-    
+    extraHwFrames_ = extraHwFrames;
+
+    // Clamp: a fill depth below the trim window is a permanent miss, above the
+    // queue capacity is meaningless.
+    if (fillDepth < FILL_DEPTH_REDUCED) fillDepth = FILL_DEPTH_REDUCED;
+    if (fillDepth > MAX_QUEUE_SIZE)     fillDepth = MAX_QUEUE_SIZE;
+    fillDepth_ = fillDepth;
+
+    lastOpenFailure_ = OpenFailure::NONE;
+    lastOpenAVError_ = 0;
+
+    // Reset latched playback state. close() clears the queue and the thread but
+    // NOT these: reopening on a recovery attempt with eofReached_ or a virtual
+    // loop offset still set would leave the fresh queue refusing to decode, or
+    // numbering frames into a window the renderer never asks for.
+    // Loop mode is reset too - the caller re-asserts it after a successful open.
+    eofReached_ = false;
+    virtualOffset_ = 0;
+    seekGoal_ = -1;
+    seekRequested_ = false;
+    seekTarget_ = 0;
+    loopMode_ = false;
+    totalFrames_ = 0;
+
     // Open format context
     formatCtx_ = nullptr;
     int ret = avformat_open_input(&formatCtx_, filename.c_str(), nullptr, nullptr);
@@ -74,6 +97,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, sizeof(errbuf));
         LOG_ERROR << "AsyncDecodeQueue: Failed to open " << filename << ": " << errbuf;
+        lastOpenFailure_ = OpenFailure::DEMUX;
+        lastOpenAVError_ = ret;
         return false;
     }
     
@@ -82,6 +107,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     if (ret < 0) {
         LOG_ERROR << "AsyncDecodeQueue: Failed to find stream info";
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::DEMUX;
+        lastOpenAVError_ = ret;
         return false;
     }
     
@@ -97,6 +124,7 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     if (videoStream_ < 0) {
         LOG_ERROR << "AsyncDecodeQueue: No video stream found";
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::NO_STREAM;
         return false;
     }
     
@@ -132,6 +160,7 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     if (!codec) {
         LOG_ERROR << "AsyncDecodeQueue: No decoder found for codec " << codecpar->codec_id;
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::DECODER_LOOKUP;
         return false;
     }
     
@@ -140,6 +169,7 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     if (!codecCtx_) {
         LOG_ERROR << "AsyncDecodeQueue: Failed to allocate codec context";
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::INTERNAL;
         return false;
     }
     
@@ -149,6 +179,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         LOG_ERROR << "AsyncDecodeQueue: Failed to copy codec parameters";
         avcodec_free_context(&codecCtx_);
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::INTERNAL;
+        lastOpenAVError_ = ret;
         return false;
     }
     
@@ -166,10 +198,16 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         codecCtx_->thread_count = 4;
         codecCtx_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     } else {
-        // Request extra VAAPI surfaces so the queue can hold 8 frames
-        // without exhausting the pool (default pool ~17 is too small
-        // when sync fallback + EGL import also hold surfaces).
-        codecCtx_->extra_hw_frames = 16;
+        // Request extra VAAPI surfaces for the frames this queue pins outside
+        // the decoder's own DPB: MAX_QUEUE_SIZE in the queue, plus the borrowed
+        // frame, the frame being transferred, and the one the interop still
+        // holds for the previous vsync - MAX_QUEUE_SIZE + 3.
+        //
+        // This was 16, sized when a second (synchronous) decoder held surfaces
+        // of its own on the same file. That decoder is gone, and the surplus is
+        // not free: it is VRAM reserved per layer against a carve-out that the
+        // eviction-storm hang is measured against.
+        codecCtx_->extra_hw_frames = extraHwFrames_;
     }
     
     // Open codec
@@ -180,6 +218,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         LOG_ERROR << "AsyncDecodeQueue: Failed to open codec: " << errbuf;
         avcodec_free_context(&codecCtx_);
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::CODEC_OPEN;
+        lastOpenAVError_ = ret;
         return false;
     }
     
@@ -189,6 +229,7 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         LOG_ERROR << "AsyncDecodeQueue: Failed to allocate frame";
         avcodec_free_context(&codecCtx_);
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::INTERNAL;
         return false;
     }
     
@@ -224,7 +265,11 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     
     LOG_INFO << "AsyncDecodeQueue: Opened " << filename 
              << " (" << width_ << "x" << height_ << " @ " << framerate_ << "fps"
-             << ", " << (useHardware_ ? "hardware" : "software") << " decode)";
+             << ", " << (useHardware_ ? "hardware" : "software") << " decode"
+             << (useHardware_ ? ", pool +" + std::to_string(extraHwFrames_) +
+                                ", fill depth " + std::to_string(fillDepth_.load())
+                              : std::string())
+             << ")";
     
     // Start decode thread
     threadStop_ = false;
@@ -581,10 +626,14 @@ void AsyncDecodeQueue::decodeThreadFunc() {
         bool shouldDecode = false;
         if (eofReached_) {
             // Non-loop EOF: hold last frames, don't decode more until a seek clears this
-        } else if (queueSize < MAX_QUEUE_SIZE) {
+        } else if (queueSize < fillDepth_.load()) {
+            // Fill gate only. The jump thresholds, the loop-boundary
+            // discriminant and the trim window below keep the compile-time
+            // MAX_QUEUE_SIZE: they describe queue geometry, not how deep this
+            // open() is allowed to buffer.
             if (newestInQueue < 0) {
                 shouldDecode = true;
-            } else if (newestInQueue < target + static_cast<int64_t>(MAX_QUEUE_SIZE)) {
+            } else if (newestInQueue < target + static_cast<int64_t>(fillDepth_.load())) {
                 shouldDecode = true;
             }
         }
