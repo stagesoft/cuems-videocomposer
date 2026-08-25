@@ -135,6 +135,33 @@ public:
     virtual DecodeBackend getOptimalBackend() const = 0;
 
     /**
+     * Health of this input's decode path.
+     *
+     * A layer that loads but cannot produce frames used to be indistinguishable
+     * from a healthy one: the engine's OSC load is fire-and-forget, so the node
+     * reports the cue armed either way. This is the machine-readable state a
+     * load-time health ping answers from.
+     */
+    enum class Health {
+        ok,               // decoding as intended
+        sw_fallback,      // hardware refused this file; decoding in software
+        degraded,         // recovered after a decode fault, on a reduced pool
+        declared_failed,  // recovery exhausted; holding the last frame
+        load_failed       // never produced a first frame
+    };
+
+    /**
+     * Current decode health. Default ok - inputs that cannot fail this way
+     * (and those that do not track it yet) are honest to report ok.
+     */
+    virtual Health getHealth() const { return Health::ok; }
+
+    /**
+     * Human-readable detail behind getHealth(), or empty when healthy.
+     */
+    virtual std::string getHealthReason() const { return std::string(); }
+
+    /**
      * Check if this is a live stream (no seeking, continuous reading)
      * @return true for live streams (NDI, V4L2, RTSP), false for files
      */
