@@ -150,6 +150,19 @@ private:
     bool initializeFFmpeg();
     bool openCodec();
     bool openHardwareCodec();
+
+    /**
+     * Codec parameters straight from the demuxer - valid in BOTH decode modes.
+     *
+     * Identity and geometry used to be read off codecCtx_, which only ever
+     * worked because the hardware path kept a codec context of its own open.
+     * That context is gone (F2), so codecCtx_ is null for every hardware layer
+     * and codecpar is the only source that answers in both modes.
+     *
+     * @return codec parameters of the selected video stream, or nullptr when
+     *         no file is open / no video stream was selected.
+     */
+    AVCodecParameters* streamCodecParams() const;
     bool indexFrames();
     bool isIntraFrameCodec() const;  // Check if codec is intra-frame only (all keyframes)
     void setupDirectSeekMode();      // Setup direct seek mode for intra-frame codecs
