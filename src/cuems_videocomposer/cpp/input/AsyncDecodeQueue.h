@@ -30,6 +30,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <functional>
 
@@ -112,13 +113,26 @@ public:
      * Consecutive hard decode errors tolerated before the queue reports
      * unhealthy.
      *
-     * PROVISIONAL. The plan gates this number on an empirical fault-taxonomy
-     * session on the FP530 (phase F2 step 0b): which AVERRORs actually reach
-     * the decode error paths under pool exhaustion and under stream corruption,
-     * and how many a healthy stream produces transiently. Until that runs, 50
-     * is a deliberately conservative placeholder - high enough that ordinary
-     * stream hiccups cannot trip recovery, low enough that a genuinely dead
-     * queue is caught within ~a second at any sane frame rate.
+     * Sized from the fault taxonomy measured on the FP530 (Maxtang, Picasso
+     * VCN 1.0, 2048 MB carve-out), phase F2 step 0b, 2026-08-26:
+     *
+     *   - Stream corruption (in-place, length-preserving) surfaces as
+     *     AVERROR_INVALIDDATA (-1094995529) at avcodec_send_packet, and ONLY
+     *     there. It interleaves with good frames, so a partially damaged
+     *     stream never accumulates a long run - which is the intent: it is
+     *     still playing, and must not be "recovered".
+     *   - VAAPI pool exhaustion produces NO decode error at all. Driven to
+     *     12 concurrent 4K layers, VRAM pinned at ~1985/2048 MB and amdgpu
+     *     spilled to GTT (2.9 GB) rather than failing an allocation: no
+     *     ENOMEM, no EXTERNAL, no silent get_format downgrade to software
+     *     (all 12 layers stayed on the hardware path). Pool pressure escalates
+     *     straight to the ring hang, which Mesa answers with exit(1) - the
+     *     process dies, so no counter can ever observe it.
+     *
+     * So this threshold governs stream-data faults only. A genuinely dead
+     * queue errors continuously, and the decode thread's 10 ms retry wait puts
+     * 50 errors at roughly half a second - fast enough to rescue, far above
+     * the transient runs a damaged-but-playing stream produces.
      */
     static constexpr int DECODE_ERROR_THRESHOLD = 50;
 
@@ -296,8 +310,17 @@ private:
     std::atomic<int> consecutiveErrors_{0};
     std::atomic<int> lastDecodeAVError_{0};
 
-    /** Count one hard decode error and log the first of a run. */
+    /** Count one hard decode error, logging at a bounded rate. */
     void recordDecodeError(int averr, const char* where);
+
+    // Log throttle for decode errors. The health counter resets on every
+    // successfully decoded frame, so on a partially corrupt stream - errors
+    // interleaved with good frames - "first error of a run" is a new run every
+    // few frames. Measured on the FP530: ~22 ERROR lines in 12 s. Rate-limit
+    // the log and report what was suppressed; the counter itself is untouched.
+    static constexpr int DECODE_ERROR_LOG_INTERVAL_MS = 5000;
+    std::chrono::steady_clock::time_point lastDecodeErrorLog_{};
+    std::atomic<int> decodeErrorsSinceLog_{0};
     
     // Video properties
     int width_;
