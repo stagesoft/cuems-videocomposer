@@ -676,18 +676,38 @@ void AsyncDecodeQueue::decodeThreadFunc() {
 void AsyncDecodeQueue::recordDecodeError(int averr, const char* where) {
     lastDecodeAVError_ = averr;
     const int n = ++consecutiveErrors_;
-    if (n == 1) {
-        // First error of a run. Say it once, loudly: this used to be the
-        // failure that produced no log line at all - the thread simply retried
-        // forever while the renderer held its last frame.
-        char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
-        av_strerror(averr, errbuf, AV_ERROR_MAX_STRING_SIZE);
-        LOG_ERROR << "AsyncDecodeQueue: decode error in " << where << " for "
-                  << filename_ << ": " << errbuf << " (" << averr << ")";
-    } else if (n == DECODE_ERROR_THRESHOLD) {
+    const int suppressed = ++decodeErrorsSinceLog_;
+
+    // Crossing the threshold always speaks - that is the transition to
+    // unhealthy, and recovery follows it.
+    if (n == DECODE_ERROR_THRESHOLD) {
         LOG_ERROR << "AsyncDecodeQueue: " << n << " consecutive decode errors for "
                   << filename_ << " - queue declared unhealthy, recovery may reopen it";
+        lastDecodeErrorLog_ = std::chrono::steady_clock::now();
+        decodeErrorsSinceLog_ = 0;
+        return;
     }
+
+    // Otherwise report at a bounded rate. Un-throttled this floods the journal
+    // on a stream that is damaged but still decoding, because every good frame
+    // resets the run and re-arms the "first error" line.
+    const auto now = std::chrono::steady_clock::now();
+    const bool firstEver = (lastDecodeErrorLog_.time_since_epoch().count() == 0);
+    const auto sinceLog = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              now - lastDecodeErrorLog_).count();
+    if (!firstEver && sinceLog < DECODE_ERROR_LOG_INTERVAL_MS) {
+        return;
+    }
+
+    char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+    av_strerror(averr, errbuf, AV_ERROR_MAX_STRING_SIZE);
+    LOG_ERROR << "AsyncDecodeQueue: decode error in " << where << " for "
+              << filename_ << ": " << errbuf << " (" << averr << ")"
+              << (suppressed > 1
+                      ? " [" + std::to_string(suppressed) + " errors since last report]"
+                      : std::string());
+    lastDecodeErrorLog_ = now;
+    decodeErrorsSinceLog_ = 0;
 }
 
 bool AsyncDecodeQueue::decodeNextFrame() {
