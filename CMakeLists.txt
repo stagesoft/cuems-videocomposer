@@ -1117,8 +1117,19 @@ target_link_libraries(cuems-videocomposer cuems-mediadecoder)
 # instead of the flat 6 that stdout lines get. Deliberately NOT gated on
 # ENABLE_MIDI — utils/Logger.h is included nearly everywhere, so gating the
 # include dir would break an ENABLE_MIDI=OFF build that compiles fine today.
-# Per-target on purpose: cuems-videoindexer and the test binaries keep the
-# plain-stream fallback and never link cuemslogger.
+# Per-target, and the three targets differ — state it exactly, because the
+# earlier wording here claimed the test binary never links cuemslogger, which
+# is false and would mislead anyone debugging test log output:
+#   cuems-videocomposer  always links cuemslogger + defines HAVE_CUEMS_LOGGER
+#                        (this block) -> journal with real priorities.
+#   cuems-videoindexer   links neither mtcreceiver nor cuemslogger and never
+#                        gets the define -> plain-stream fallback, always.
+#   the test binary      under ENABLE_MIDI links cuemslogger explicitly AND
+#                        inherits HAVE_CUEMS_LOGGER from mtcreceiver's PUBLIC
+#                        compile definition above, so it logs through syslog
+#                        too; with ENABLE_MIDI=OFF it does neither. Its
+#                        behaviour follows that switch, it is not a decision
+#                        taken here.
 target_compile_definitions(cuems-videocomposer PRIVATE HAVE_CUEMS_LOGGER)
 target_link_libraries(cuems-videocomposer cuemslogger)
 target_include_directories(cuems-videocomposer PRIVATE src/cuemslogger)
