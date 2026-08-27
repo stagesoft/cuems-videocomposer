@@ -65,6 +65,16 @@ extern bool test_ExitReporter_FatalSignalRecordAndReraise();
 extern bool test_ExitReporter_ReportsOnlyOnce();
 extern bool test_ExitReporter_CensusLine();
 
+// RecoveryPolicy tests (G3, 869en65tm) - the arithmetic that bounds a fault
+// run. Pure and thread-free; the hardware drill is the integration proof.
+extern bool test_RecoveryPolicy_LimpingYieldsAccumulateToCap();
+extern bool test_RecoveryPolicy_GoodRunResetsTheLadder();
+extern bool test_RecoveryPolicy_JustBelowThresholdDoesNotDecay();
+extern bool test_RecoveryPolicy_DeclarationConsumesNothing();
+extern bool test_RecoveryPolicy_DecayRescuesAtTheCap();
+extern bool test_RecoveryPolicy_OneWakeIsOneEpisode();
+extern bool test_RecoveryPolicy_ZeroYieldFirstWakeAttempts();
+
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
 extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
@@ -119,6 +129,14 @@ int main() {
     TestFramework::instance().addTest("ExitReporter_FatalSignalRecordAndReraise", test_ExitReporter_FatalSignalRecordAndReraise);
     TestFramework::instance().addTest("ExitReporter_ReportsOnlyOnce", test_ExitReporter_ReportsOnlyOnce);
     TestFramework::instance().addTest("ExitReporter_CensusLine", test_ExitReporter_CensusLine);
+
+    TestFramework::instance().addTest("RecoveryPolicy_LimpingYieldsAccumulateToCap", test_RecoveryPolicy_LimpingYieldsAccumulateToCap);
+    TestFramework::instance().addTest("RecoveryPolicy_GoodRunResetsTheLadder", test_RecoveryPolicy_GoodRunResetsTheLadder);
+    TestFramework::instance().addTest("RecoveryPolicy_JustBelowThresholdDoesNotDecay", test_RecoveryPolicy_JustBelowThresholdDoesNotDecay);
+    TestFramework::instance().addTest("RecoveryPolicy_DeclarationConsumesNothing", test_RecoveryPolicy_DeclarationConsumesNothing);
+    TestFramework::instance().addTest("RecoveryPolicy_DecayRescuesAtTheCap", test_RecoveryPolicy_DecayRescuesAtTheCap);
+    TestFramework::instance().addTest("RecoveryPolicy_OneWakeIsOneEpisode", test_RecoveryPolicy_OneWakeIsOneEpisode);
+    TestFramework::instance().addTest("RecoveryPolicy_ZeroYieldFirstWakeAttempts", test_RecoveryPolicy_ZeroYieldFirstWakeAttempts);
 
     TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);
