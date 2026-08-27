@@ -25,6 +25,7 @@
 #include "InputSource.h"
 #include "HardwareDecoder.h"
 #include "AsyncDecodeQueue.h"
+#include "RecoveryPolicy.h"
 #include "../video/GPUTextureFrameBuffer.h"
 #include <cuems_mediadecoder/MediaFileReader.h>
 #include <cuems_mediadecoder/VideoDecoder.h>
@@ -312,11 +313,11 @@ private:
     std::atomic<bool> loopModeActive_{false};
     std::atomic<int64_t> loopTotalFrames_{0};
 
-    // Surface pool the queue is currently open on. Persists across recoveries:
-    // a layer that only survives on a reduced pool must not be handed the full
-    // one again on the next fault.
-    int queuePoolSize_ = 0;
-    size_t queueFillDepth_ = 0;
+    // Episode accounting for the recovery ladder: how many episodes this fault
+    // run has consumed, and when the run is over. Touched ONLY by the recovery
+    // worker between wake and park (stopRecoveryWorker() joins it), so it needs
+    // no synchronisation of its own.
+    RecoveryPolicy recoveryPolicy_;
 
     void startRecoveryWorker();
     void stopRecoveryWorker();
