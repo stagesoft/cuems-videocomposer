@@ -79,6 +79,9 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     lastOpenAVError_ = 0;
     consecutiveErrors_ = 0;
     lastDecodeAVError_ = 0;
+    // Recovery reads this as "good frames since the reopen that ended the last
+    // episode", which is only true because it is reset here. See framesDecoded().
+    framesDecoded_ = 0;
 
     // Reset latched playback state. close() clears the queue and the thread but
     // NOT these: reopening on a recovery attempt with eofReached_ or a virtual
@@ -685,17 +688,20 @@ void AsyncDecodeQueue::decodeThreadFunc() {
     LOG_INFO << "AsyncDecodeQueue: Decode thread stopped";
 }
 
-// ⚠️ STILL MISSING HERE (restored in this phase's rework commit, not this
-// cherry-pick): `exitreport::decodeErrorObserved(averr)`, F1's census hook.
-// Its home is the body below. The accounting itself has just landed with this
-// commit; the hook is deliberately held one commit longer so the rate-limit
-// change that follows applies to an unmodified body. Until it is back, every
-// death record reports `decode_errors=0` and the unit suite cannot tell —
-// TestExitReporter calls the hook directly, so it stays green either way.
 void AsyncDecodeQueue::recordDecodeError(int averr, const char* where) {
     lastDecodeAVError_ = averr;
+    // F1's live-decoder census. This is the only production caller: the unit
+    // suite drives decodeErrorObserved() directly, so a death record's
+    // decode_errors field is trustworthy only while this line is here.
+    exitreport::decodeErrorObserved(averr);
     const int n = ++consecutiveErrors_;
     const int suppressed = ++decodeErrorsSinceLog_;
+
+    // A declared-failed layer keeps erroring at its retry cadence forever.
+    // Counting continues (above); saying so does not - see quiesceErrorLog().
+    if (errorLogQuiesced_.load()) {
+        return;
+    }
 
     // Crossing the threshold always speaks - that is the transition to
     // unhealthy, and recovery follows it.
@@ -942,8 +948,13 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         return false;
     }
     
-    // A decoded frame clears the error run.
+    // A decoded frame clears the error run, and counts as recovery's evidence
+    // that this layer is actually delivering pictures again (RecoveryPolicy's
+    // decay input). Counted here, at the one point a frame is known good -
+    // decodeNextFrame() also returns false for EOF and for "no frame after 100
+    // packets", neither of which is a delivered picture.
     consecutiveErrors_ = 0;
+    ++framesDecoded_;
 
     // Move frame data (avoids copy for hardware frames)
     av_frame_move_ref(qf.frame, decodeFrame_);

@@ -106,6 +106,34 @@ public:
     /** Consecutive hard decode errors (reset by any successfully decoded frame). */
     int consecutiveErrors() const { return consecutiveErrors_.load(); }
 
+    /**
+     * Frames successfully decoded since the last open().
+     *
+     * Monotonic within one open; open() resets it. That reset is what makes it
+     * usable as recovery's decay evidence without any extra bookkeeping: at the
+     * start of an episode this already reads "good frames since the reopen that
+     * ended the previous episode". See RecoveryPolicy.h.
+     */
+    long long framesDecoded() const { return framesDecoded_.load(); }
+
+    /**
+     * Stop this queue's decode-error logging (the counters keep counting).
+     *
+     * Set once, by the recovery worker, when a layer is declared permanently
+     * failed. Without it the dead queue keeps erroring at its retry cadence and
+     * the rate limiter below faithfully emits an ERROR every 5 s for as long as
+     * the show runs - roughly 17k journal lines a day per failed layer, all
+     * uploaded to the controller, burying the one line that matters.
+     *
+     * Logging only: consecutiveErrors_ and F1's decodeErrorObserved() census
+     * keep counting, so a death record after a declaration is still truthful.
+     *
+     * Atomic because the decode thread reads it with no join relationship to
+     * the writer - unlike the worker's own episode state, whose safety comes
+     * from stopRecoveryWorker() joining.
+     */
+    void quiesceErrorLog() { errorLogQuiesced_ = true; }
+
     /** Raw AVERROR behind the most recent hard decode error, or 0. */
     int lastDecodeAVError() const { return lastDecodeAVError_.load(); }
 
@@ -133,6 +161,13 @@ public:
      * queue errors continuously, and the decode thread's 10 ms retry wait puts
      * 50 errors at roughly half a second - fast enough to rescue, far above
      * the transient runs a damaged-but-playing stream produces.
+     *
+     * Crossing it starts a recovery *episode*, not an open-ended retry loop:
+     * RecoveryPolicy bounds a fault run to RECOVERY_EPISODE_CAP episodes and
+     * then declares the layer permanently failed, because the alternative -
+     * a damaged file limping forever on ~1 Hz VAAPI context rebuilds - is the
+     * allocation-burst pattern of the ring hang this whole program is about.
+     * See cpp/input/RecoveryPolicy.h.
      */
     static constexpr int DECODE_ERROR_THRESHOLD = 50;
 
@@ -146,20 +181,17 @@ public:
     static constexpr int EXTRA_HW_FRAMES_FULL = 11;
 
     /**
-     * Extra VAAPI surfaces requested by a reduced-pool recovery reopen.
-     * Pairs with FILL_DEPTH_REDUCED - a smaller pool MUST come with a smaller
-     * fill depth or the decoder starves against its own pool.
-     */
-    static constexpr int EXTRA_HW_FRAMES_REDUCED = 7;
-
-    /**
-     * Fill depth floor for reduced mode.
+     * Fill depth floor, and open()'s clamp minimum.
      *
      * Not a free parameter: the trim window below keeps frames from
      * current - 2 upward, so a queue allowed to fill only 1-3 frames deep
      * locks into a permanent miss - it can never hold the frame the renderer
      * is about to ask for, and burns the full getFrame() wait every vsync.
      * 4 is the smallest depth that clears that window.
+     *
+     * (It used to double as the fill depth of a reduced-pool recovery reopen.
+     * That ladder is gone - see RecoveryPolicy.h and the note on
+     * EXTRA_HW_FRAMES_FULL above; this is now purely open()'s floor.)
      */
     static constexpr size_t FILL_DEPTH_REDUCED = 4;
 
@@ -168,10 +200,10 @@ public:
      * @param filename Path to video file
      * @param hwDeviceCtx Hardware device context (for VAAPI, can be nullptr for software)
      * @param extraHwFrames Extra VAAPI surfaces to request (EXTRA_HW_FRAMES_FULL
-     *                      normally, EXTRA_HW_FRAMES_REDUCED for a recovery retry)
+     *                      - recovery reopens use the full pool too)
      * @param fillDepth How many frames the decode thread may buffer ahead
-     *                  (MAX_QUEUE_SIZE normally, FILL_DEPTH_REDUCED when the
-     *                  pool is reduced). Clamped to [FILL_DEPTH_REDUCED, MAX_QUEUE_SIZE].
+     *                  (MAX_QUEUE_SIZE). Clamped to
+     *                  [FILL_DEPTH_REDUCED, MAX_QUEUE_SIZE].
      * @return true on success
      */
     bool open(const std::string& filename, AVBufferRef* hwDeviceCtx = nullptr,
@@ -295,8 +327,8 @@ private:
     bool useHardware_;
 
     // Surfaces requested from the driver at the last open(), and how deep the
-    // decode thread may fill. Runtime rather than compile-time so a recovery
-    // reopen can come back on a smaller pool without rebuilding.
+    // decode thread may fill. Runtime rather than compile-time because open()
+    // takes both as parameters; every caller now passes the full pool.
     int extraHwFrames_ = EXTRA_HW_FRAMES_FULL;
     std::atomic<size_t> fillDepth_{MAX_QUEUE_SIZE};
 
@@ -309,6 +341,16 @@ private:
     // counter cannot live at its call site.
     std::atomic<int> consecutiveErrors_{0};
     std::atomic<int> lastDecodeAVError_{0};
+
+    // Good frames since open(). Recovery's decay evidence - see framesDecoded().
+    std::atomic<long long> framesDecoded_{0};
+
+    // Set by quiesceErrorLog() when the layer is declared permanently failed.
+    // Deliberately NOT reset by open(): after a declaration nothing reopens
+    // this queue (the operator's lever is a cue reload, which builds a fresh
+    // VideoFileInput and a fresh queue), so a reset here could only ever
+    // un-silence a queue that must stay silent.
+    std::atomic<bool> errorLogQuiesced_{false};
 
     /** Count one hard decode error, logging at a bounded rate. */
     void recordDecodeError(int averr, const char* where);

@@ -145,8 +145,14 @@ public:
     enum class Health {
         ok,               // decoding as intended
         sw_fallback,      // hardware refused this file; decoding in software
-        degraded,         // recovered after a decode fault, on a reduced pool
-        declared_failed,  // recovery exhausted; holding the last frame
+        // CURRENTLY NEVER EMITTED - it has no writer. It meant "recovered onto
+        // a reduced surface pool"; that ladder was retired once measurement
+        // showed no platform we run answers pool pressure with a decode error
+        // (amdgpu evicts to GTT, the Intel iGPUs are UMA). Kept as part of the
+        // health contract surface, but do not build on it without giving it a
+        // writer first.
+        degraded,
+        declared_failed,  // recovery over; holding the last frame until reload
         load_failed       // never produced a first frame
     };
 

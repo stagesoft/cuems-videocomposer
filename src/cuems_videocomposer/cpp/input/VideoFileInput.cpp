@@ -272,8 +272,6 @@ bool VideoFileInput::open(const std::string& source) {
             if (asyncDecodeQueue_->isHardwareDecoding()) {
                 // Tier 1: hardware queue on a full pool.
                 useAsyncDecode_ = true;
-                queuePoolSize_ = AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL;
-                queueFillDepth_ = AsyncDecodeQueue::MAX_QUEUE_SIZE;
                 setHealth(Health::ok, std::string());
                 startRecoveryWorker();
                 LOG_INFO << "Async decode queue enabled for smooth hardware decoding";
@@ -367,8 +365,6 @@ void VideoFileInput::close() {
         asyncDecodeQueue_->close();
         asyncDecodeQueue_.reset();
     }
-    queuePoolSize_ = 0;
-    queueFillDepth_ = 0;
     useAsyncDecode_ = false;
 
     cleanup();
@@ -2316,18 +2312,19 @@ void VideoFileInput::maybeWakeRecovery(int64_t currentFrame) {
 }
 
 void VideoFileInput::recoveryWorkerFunc() {
-    // Attempt 1 retries on the full pool - most faults are transient and a
-    // healthy layer should come back at full capability. Attempts 2 and 3 drop
-    // to a reduced pool: pool exhaustion cannot surface at open() (the VAAPI
-    // pool is allocated lazily at first decode), so this is where a
-    // too-large-pool fault actually shows up and where a smaller one can help.
-    struct Attempt { int poolSize; size_t fillDepth; int backoffMs; };
-    const Attempt attempts[] = {
-        { AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,    AsyncDecodeQueue::MAX_QUEUE_SIZE,    1000 },
-        { AsyncDecodeQueue::EXTRA_HW_FRAMES_REDUCED, AsyncDecodeQueue::FILL_DEPTH_REDUCED, 2000 },
-        { AsyncDecodeQueue::EXTRA_HW_FRAMES_REDUCED, AsyncDecodeQueue::FILL_DEPTH_REDUCED, 4000 },
-    };
-    const int attemptCount = static_cast<int>(sizeof(attempts) / sizeof(attempts[0]));
+    // Every reopen uses the full pool. The ladder used to drop to a reduced
+    // pool on tries 2-3, on the theory that a too-large pool was the fault;
+    // measurement retired it. Pool exhaustion produces no decode error on any
+    // platform we run: amdgpu evicts to GTT rather than failing an allocation
+    // (measured at 12 concurrent 4K layers) and escalates straight to the ring
+    // hang, while the Intel iGPUs are UMA and have no carve-out to exhaust at
+    // all. So those rungs could only ever run for a fault class they could not
+    // help, and they were unreachable anyway - try 1 always succeeds for the
+    // one class that does reach recovery. The full ladder is preserved at
+    // origin/feat/f2-sync-decoder-removal @ 3ed81c0 should a platform ever turn
+    // up whose driver answers pool pressure with a decode-path error.
+    const int backoffsMs[] = { 1000, 2000, 4000 };
+    const int attemptCount = static_cast<int>(sizeof(backoffsMs) / sizeof(backoffsMs[0]));
 
     while (true) {
         {
@@ -2353,27 +2350,46 @@ void VideoFileInput::recoveryWorkerFunc() {
         // this same mutex and holds its last texture while we own it.
         std::lock_guard<std::mutex> gate(queueAccessMutex_);
 
+        // Decide the episode BEFORE announcing one. open() resets the queue's
+        // frame counter, so at this point it already reads "good frames since
+        // the reopen that ended the last episode" - exactly the policy's decay
+        // input, with no snapshot state of our own.
+        const RecoveryPolicy::Decision decision =
+            recoveryPolicy_.onWake(asyncDecodeQueue_->framesDecoded());
+
+        if (decision == RecoveryPolicy::Decision::declare) {
+            // Cap reached. Declare WITHOUT tearing down or reopening: rebuilding
+            // one more VAAPI context here would be the very churn the cap exists
+            // to stop. Then silence this queue's error log - it will keep
+            // erroring forever and the counters keep counting, but the journal
+            // must be left with one clean story, not 17k lines a day.
+            setHealth(Health::declared_failed,
+                      "recovery episode cap reached");
+            asyncDecodeQueue_->quiesceErrorLog();
+            LOG_ERROR << "VideoFileInput: recovery episode cap reached for "
+                      << currentFile_
+                      << " - layer FAILED permanently, holding last frame; "
+                         "reload the cue to retry";
+            recoveryActive_ = false;
+            continue;
+        }
+
         const int64_t resumeFrame = recoveryTargetFrame_.load();
+        // Announced only now, after the decay/cap check: fired unconditionally
+        // at the top of the wake it would also print on the declaring wake,
+        // promising a recovery that never runs.
         LOG_ERROR << "VideoFileInput: decode queue unhealthy for " << currentFile_
                   << " (" << asyncDecodeQueue_->consecutiveErrors()
                   << " consecutive errors) - attempting recovery at frame " << resumeFrame;
 
-        // "Size persists": a layer that already came back on a reduced pool does
-        // not get handed the full one again on the next fault - that would
-        // oscillate between the two sizes for the life of the cue. Start the
-        // ladder at the reduced rung instead.
-        const int firstAttempt =
-            (queuePoolSize_ != 0 && queuePoolSize_ != AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL)
-                ? 1 : 0;
-
         bool recovered = false;
-        for (int i = firstAttempt; i < attemptCount && !recoveryStop_.load(); ++i) {
+        for (int i = 0; i < attemptCount && !recoveryStop_.load(); ++i) {
             // Wall-clock backoff, honoring the stop flag so an unload does not
             // wait out the full ladder.
             {
                 std::unique_lock<std::mutex> lock(recoveryWakeMutex_);
                 recoveryWakeCond_.wait_for(lock,
-                    std::chrono::milliseconds(attempts[i].backoffMs),
+                    std::chrono::milliseconds(backoffsMs[i]),
                     [this] { return recoveryStop_.load(); });
             }
             if (recoveryStop_.load()) {
@@ -2394,8 +2410,8 @@ void VideoFileInput::recoveryWorkerFunc() {
             asyncDecodeQueue_->close();
 
             const bool ok = asyncDecodeQueue_->open(currentFile_, hwDeviceCtx_,
-                                                    attempts[i].poolSize,
-                                                    attempts[i].fillDepth);
+                                                    AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,
+                                                    AsyncDecodeQueue::MAX_QUEUE_SIZE);
             if (!ok) {
                 LOG_WARNING << "VideoFileInput: recovery attempt " << (i + 1) << "/"
                             << attemptCount << " failed to reopen the decode queue for "
@@ -2407,35 +2423,27 @@ void VideoFileInput::recoveryWorkerFunc() {
             asyncDecodeQueue_->setLoopMode(loopModeActive_.load(), loopTotalFrames_.load());
             asyncDecodeQueue_->setTargetFrame(resumeFrame);
 
-            queuePoolSize_ = attempts[i].poolSize;
-            queueFillDepth_ = attempts[i].fillDepth;
             recovered = true;
-
-            const bool reduced = attempts[i].poolSize != AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL;
-            if (reduced) {
-                setHealth(Health::degraded,
-                          "decode queue recovered on a reduced surface pool");
-                LOG_WARNING << "VideoFileInput: decode queue recovered for " << currentFile_
-                            << " on a REDUCED pool (+" << attempts[i].poolSize
-                            << ", fill depth " << attempts[i].fillDepth
-                            << ") after attempt " << (i + 1);
-            } else {
-                setHealth(Health::ok, std::string());
-                LOG_INFO << "VideoFileInput: decode queue recovered for " << currentFile_
-                         << " on attempt " << (i + 1);
-            }
+            setHealth(Health::ok, std::string());
+            LOG_INFO << "VideoFileInput: decode queue recovered for " << currentFile_
+                     << " (episode " << recoveryPolicy_.episodeNumber() << "/"
+                     << RecoveryPolicy::RECOVERY_EPISODE_CAP
+                     << " of this fault run)";
             break;
         }
 
         if (!recovered && !recoveryStop_.load()) {
-            // Out of attempts. Stop here rather than retrying forever: the
-            // render thread stops calling getFrame() and stops waking us, the
-            // layer holds its last texture, and the operator's lever is a cue
-            // unload/reload.
+            // Every reopen in this episode failed - the file itself is gone or
+            // unreadable, not merely damaged. Same end state as the cap, and
+            // deliberately the same "FAILED permanently" token so one detector
+            // (and one operator grep) catches both ways of getting here.
             setHealth(Health::declared_failed,
                       "decode queue could not be recovered");
-            LOG_ERROR << "VideoFileInput: decode queue recovery exhausted for "
-                      << currentFile_ << " - holding last frame; reload the cue to retry";
+            asyncDecodeQueue_->quiesceErrorLog();
+            LOG_ERROR << "VideoFileInput: decode queue reopens exhausted for "
+                      << currentFile_
+                      << " - layer FAILED permanently, holding last frame; "
+                         "reload the cue to retry";
         }
 
         recoveryActive_ = false;
