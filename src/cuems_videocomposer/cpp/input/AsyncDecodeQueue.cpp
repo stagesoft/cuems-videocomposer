@@ -26,6 +26,7 @@
  */
 
 #include "AsyncDecodeQueue.h"
+#include "../utils/ExitReporter.h"
 #include "../utils/Logger.h"
 #include <chrono>
 
@@ -262,7 +263,14 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     }
     
     ready_ = true;
-    
+
+    // Join the live-decoder census (F1). Paired with close() through ready_,
+    // which is the only thing that distinguishes "open() got this far" from a
+    // failed open that still calls close() on the way out.
+    if (useHardware_) {
+        exitreport::decoderOpened(extraHwFrames_);
+    }
+
     LOG_INFO << "AsyncDecodeQueue: Opened " << filename 
              << " (" << width_ << "x" << height_ << " @ " << framerate_ << "fps"
              << ", " << (useHardware_ ? "hardware" : "software") << " decode"
@@ -281,6 +289,10 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
 }
 
 void AsyncDecodeQueue::close() {
+    if (ready_ && useHardware_) {
+        exitreport::decoderClosed(extraHwFrames_);
+    }
+
     // Stop decode thread
     if (decodeThread_) {
         threadStop_ = true;
@@ -671,6 +683,17 @@ void AsyncDecodeQueue::decodeThreadFunc() {
     LOG_INFO << "AsyncDecodeQueue: Decode thread stopped";
 }
 
+// ⚠️ The census has a third hook that is NOT installed here yet:
+// `exitreport::decodeErrorObserved(averr)`. Its home is
+// `recordDecodeError()`, which belongs to the error-accounting work held back
+// from the F2 merge (it arrived with the unsound recovery worker, so the whole
+// commit was held). Until that accounting lands — phase G3 of the 869en65tm
+// program, where restoring this call site is a deliverable in *both* outcomes
+// — every death record reports `decode_errors=0`, so the field that separates
+// a decode death from an ordinary crash reads as "no decode errors" whether or
+// not there were any. The unit suite cannot catch this: TestExitReporter calls
+// decodeErrorObserved() directly, so it stays green with the production hook
+// absent. Do not read a zero in that field as evidence until G3 closes.
 bool AsyncDecodeQueue::decodeNextFrame() {
     AVPacket* packet = av_packet_alloc();
     if (!packet) return false;
