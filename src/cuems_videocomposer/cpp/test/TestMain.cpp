@@ -55,6 +55,16 @@ extern bool test_MTCDecoder();
 
 extern bool test_SMPTEUtils_Overflow24h();
 
+// ExitReporter tests (F1, 869en65tm) - most of these fork, because the paths
+// under test are exit() and fatal signals.
+extern bool test_ExitReporter_SilentBeforeRunning();
+extern bool test_ExitReporter_CleanShutdownIsInfo();
+extern bool test_ExitReporter_DirtyExitIsErrorWithCensus();
+extern bool test_ExitReporter_PeaksSurviveClose();
+extern bool test_ExitReporter_FatalSignalRecordAndReraise();
+extern bool test_ExitReporter_ReportsOnlyOnce();
+extern bool test_ExitReporter_CensusLine();
+
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
 extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
@@ -101,6 +111,14 @@ int main() {
 
     TestFramework::instance().addTest("MTCDecoder", test_MTCDecoder);
     TestFramework::instance().addTest("SMPTEUtils_Overflow24h", test_SMPTEUtils_Overflow24h);
+
+    TestFramework::instance().addTest("ExitReporter_SilentBeforeRunning", test_ExitReporter_SilentBeforeRunning);
+    TestFramework::instance().addTest("ExitReporter_CleanShutdownIsInfo", test_ExitReporter_CleanShutdownIsInfo);
+    TestFramework::instance().addTest("ExitReporter_DirtyExitIsErrorWithCensus", test_ExitReporter_DirtyExitIsErrorWithCensus);
+    TestFramework::instance().addTest("ExitReporter_PeaksSurviveClose", test_ExitReporter_PeaksSurviveClose);
+    TestFramework::instance().addTest("ExitReporter_FatalSignalRecordAndReraise", test_ExitReporter_FatalSignalRecordAndReraise);
+    TestFramework::instance().addTest("ExitReporter_ReportsOnlyOnce", test_ExitReporter_ReportsOnlyOnce);
+    TestFramework::instance().addTest("ExitReporter_CensusLine", test_ExitReporter_CensusLine);
 
     TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);

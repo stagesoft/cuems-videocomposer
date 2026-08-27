@@ -675,6 +675,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
     src/cuems_videocomposer/cpp/utils/SMPTEWrapper.cpp
     src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
+    src/cuems_videocomposer/cpp/utils/ExitReporter.cpp
     # src/cuems_videocomposer/cpp/utils/MIDIBridge.cpp - Removed (using MIDISyncSource directly)
     # Note: Logger.h is header-only, no .cpp needed
 )
@@ -872,6 +873,9 @@ set(VIDEOINDEXER_SOURCES
     src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
     src/cuems_videocomposer/cpp/video/GPUTextureFrameBuffer.cpp
     src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
+    # The decode path keeps the live-decoder census; the indexer never installs
+    # the reporter, so the counters simply go unread here.
+    src/cuems_videocomposer/cpp/utils/ExitReporter.cpp
 )
 
 # Mirror VAAPI interop inclusion from main executable
@@ -926,6 +930,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
         src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
         src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
+        src/cuems_videocomposer/cpp/test/TestExitReporter.cpp
     )
     
     # C++ implementation files needed by tests
@@ -953,6 +958,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
         src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
         src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
+        src/cuems_videocomposer/cpp/utils/ExitReporter.cpp
     )
     
     # Add mtcreceiver driver if MIDI is enabled
