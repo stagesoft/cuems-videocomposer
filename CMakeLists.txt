@@ -932,6 +932,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
         src/cuems_videocomposer/cpp/test/TestLayerPathId.cpp
         src/cuems_videocomposer/cpp/test/TestExitReporter.cpp
+        src/cuems_videocomposer/cpp/test/TestRecoveryPolicy.cpp
     )
     
     # C++ implementation files needed by tests
