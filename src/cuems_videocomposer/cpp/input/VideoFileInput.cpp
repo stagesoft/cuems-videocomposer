@@ -51,6 +51,7 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/version.h>
 #include <libavutil/frame.h>
+#include <libavutil/pixdesc.h>      // av_get_pix_fmt_name() - defect 6(b) reporting
 }
 
 namespace videocomposer {
@@ -2457,10 +2458,51 @@ void VideoFileInput::setHealth(Health health, const std::string& reason) {
 }
 
 InputSource::Health VideoFileInput::getHealth() const {
-    return health_.load();
+    const Health h = health_.load();
+    if (h != Health::ok) {
+        // Never mask a worse state. The refinement below only ever upgrades
+        // ok -> sw_fallback; declared_failed and load_failed always win.
+        return h;
+    }
+
+    // Defect 6(b): open() decided "hardware" before any frame existed, so a
+    // clip that opens on VAAPI and then decodes on the CPU reports ok. The
+    // queue knows better by its first frame; ask it.
+    //
+    // ⚠️ try_lock, NEVER lock. The rule for this member is stated at the render
+    // path below ("NOTHING may touch asyncDecodeQueue_ without holding this"),
+    // and recoveryWorkerFunc holds this same mutex across its entire backoff
+    // ladder - seconds. A blocking lock here would stall whatever thread asked,
+    // which today is the one loop that also renders. Failing the try_lock means
+    // recovery owns the queue, i.e. the layer is already in a fault that
+    // health_ reports: the un-refined answer is the right one anyway.
+    std::unique_lock<std::mutex> gate(queueAccessMutex_, std::try_to_lock);
+    if (gate.owns_lock() && asyncDecodeQueue_ &&
+        asyncDecodeQueue_->softDespiteHardwareClaim()) {
+        return Health::sw_fallback;
+    }
+    return h;
 }
 
 std::string VideoFileInput::getHealthReason() const {
+    // Same derivation as getHealth(), same gate, same never-block rule: a
+    // sw_fallback reached by derivation has no stored reason (the tier-1 path
+    // stored an empty one), so without this it would answer with silence.
+    {
+        std::unique_lock<std::mutex> gate(queueAccessMutex_, std::try_to_lock);
+        if (gate.owns_lock() && health_.load() == Health::ok && asyncDecodeQueue_ &&
+            asyncDecodeQueue_->softDespiteHardwareClaim()) {
+            const char* fmt = av_get_pix_fmt_name(
+                (AVPixelFormat)asyncDecodeQueue_->firstDecodedPixFmt());
+            return std::string("opened with hardware acceleration but frames "
+                               "decode in software (")
+                 + (fmt ? fmt : "unknown pixel format")
+                 + ") - this layer is on the CPU";
+        }
+    }
+    // Lock order: the derived branch returns BEFORE taking healthReasonMutex_,
+    // so the two mutexes are never held at once and no order needs
+    // establishing. Keep it that way.
     std::lock_guard<std::mutex> lock(healthReasonMutex_);
     return healthReason_;
 }

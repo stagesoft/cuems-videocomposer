@@ -243,7 +243,36 @@ public:
     int getHeight() const { return height_; }
     double getFramerate() const { return framerate_; }
     int64_t getFrameCount() const { return frameCount_; }
+    /**
+     * What we ASKED the decoder for: a VAAPI device was attached at open() and
+     * the codec is on the hardware whitelist.
+     *
+     * ⚠️ This is a statement of intent, not of fact. FFmpeg can accept all of
+     * that and still decode on the CPU - a 4:2:2 8-bit clip on this hardware
+     * does exactly that. For what actually happened, ask
+     * softDespiteHardwareClaim(). Defect 6(b).
+     */
     bool isHardwareDecoding() const { return useHardware_; }
+
+    /**
+     * True when we asked for hardware and the frames came back in software.
+     *
+     * Latched on the FIRST decoded frame of each open() (so a recovery reopen
+     * re-arms it - a reopen can genuinely land on a different path) and read
+     * from any thread. It does NOT cover a mid-stream hwaccel renegotiation
+     * within one open(): FFmpeg can re-invoke get_format on a profile change
+     * without reopening the decoder. That is an accepted limit, not an
+     * oversight - defect 6(b) is wrong from frame 1, and CUEMS media is
+     * single-file constant-format.
+     */
+    bool softDespiteHardwareClaim() const { return softDespiteHwClaim_.load(); }
+
+    /**
+     * The pixel format of the first decoded frame, as an int (AV_PIX_FMT_NONE
+     * until one arrives). Only used to name the format in the health reason.
+     */
+    int firstDecodedPixFmt() const { return firstDecodedPixFmt_.load(); }
+
     bool isReady() const { return ready_; }
 
     /**
@@ -352,8 +381,19 @@ private:
     // un-silence a queue that must stay silent.
     std::atomic<bool> errorLogQuiesced_{false};
 
+    // Defect 6(b): useHardware_ records what open() asked for; these record
+    // what the decoder actually produced. Written once per open() by the
+    // decode thread in noteDecodedFormat(), read from any thread.
+    std::atomic<bool> softDespiteHwClaim_{false};
+    std::atomic<int>  firstDecodedPixFmt_{AV_PIX_FMT_NONE};
+
     /** Count one hard decode error, logging at a bounded rate. */
     void recordDecodeError(int averr, const char* where);
+    /**
+     * Latch the real format of the first decoded frame of this open(), and say
+     * so loudly when it disagrees with what we asked for. Decode thread only.
+     */
+    void noteDecodedFormat(const AVFrame* frame);
 
     // Log throttle for decode errors. The health counter resets on every
     // successfully decoded frame, so on a partially corrupt stream - errors

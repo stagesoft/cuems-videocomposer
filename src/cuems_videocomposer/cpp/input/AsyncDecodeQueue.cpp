@@ -32,6 +32,7 @@
 
 extern "C" {
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>      // av_get_pix_fmt_name() - defect 6(b) reporting
 #include <libavutil/opt.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vaapi.h>
@@ -88,6 +89,12 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     // loop offset still set would leave the fresh queue refusing to decode, or
     // numbering frames into a window the renderer never asks for.
     // Loop mode is reset too - the caller re-asserts it after a successful open.
+    // Defect 6(b): re-arm the first-frame format latch. A reopen can land on a
+    // different decode path than the open before it, so a stale "we already
+    // looked" would report the previous attempt's answer forever.
+    softDespiteHwClaim_ = false;
+    firstDecodedPixFmt_ = AV_PIX_FMT_NONE;
+
     eofReached_ = false;
     virtualOffset_ = 0;
     seekGoal_ = -1;
@@ -688,6 +695,36 @@ void AsyncDecodeQueue::decodeThreadFunc() {
     LOG_INFO << "AsyncDecodeQueue: Decode thread stopped";
 }
 
+void AsyncDecodeQueue::noteDecodedFormat(const AVFrame* frame) {
+    // Decode thread only, first decoded frame of each open().
+    //
+    // useHardware_ is decided inside open(), from "a VAAPI device attached and
+    // the codec is whitelisted" - a statement of intent. This is the first
+    // moment the truth exists: a frame came back, and its format says which
+    // path produced it. The disagreement case used to be silently ignored (the
+    // two VAAPI sync sites just took their else branch), which is defect 6(b):
+    // the layer reports Health::ok and hardware while the CPU does the work,
+    // and the only thing that disagrees is the GPU's decode engine at zero.
+    if (!frame || firstDecodedPixFmt_.load() != AV_PIX_FMT_NONE) {
+        return;
+    }
+    firstDecodedPixFmt_.store(frame->format);
+
+    if (useHardware_ && frame->format != AV_PIX_FMT_VAAPI) {
+        softDespiteHwClaim_.store(true);
+        const char* fmt = av_get_pix_fmt_name((AVPixelFormat)frame->format);
+        // ERROR, not WARNING, and deliberately: this is the silent-wrong-answer
+        // class the whole 869en65tm campaign is about, and it is the only
+        // observable there is until the F9 health ping exists.
+        LOG_ERROR << "AsyncDecodeQueue: opened with hardware acceleration for "
+                  << filename_ << " but frames are decoding in SOFTWARE ("
+                  << (fmt ? fmt : "unknown pixel format")
+                  << ") - this layer is on the CPU; the GPU decode engine will "
+                     "show idle for it";
+    }
+}
+
+
 void AsyncDecodeQueue::recordDecodeError(int averr, const char* where) {
     lastDecodeAVError_ = averr;
     // F1's live-decoder census. This is the only production caller: the unit
@@ -794,6 +831,10 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                     // Apply virtual offset (should be 0 at end-of-file)
                     int64_t voff = virtualOffset_.load();
                     if (voff > 0) drainFrameNum += voff;
+
+                    // A very short clip can reach EOF with its first frame,
+                    // so the latch has to be armed from here too (defect 6(b)).
+                    noteDecodedFormat(decodeFrame_);
 
                     // Sync VAAPI surface if hardware decoding
                     if (useHardware_ && decodeFrame_->format == AV_PIX_FMT_VAAPI) {
@@ -922,6 +963,10 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         frameNum += voff;
     }
     
+    // Defect 6(b): the same comparison the sync below makes, but recorded when
+    // it FAILS instead of only acted on when it succeeds.
+    noteDecodedFormat(decodeFrame_);
+
     // For VAAPI hardware frames, sync the GPU before marking frame as ready
     // This ensures the decode is complete before we put it in the queue
     if (useHardware_ && decodeFrame_->format == AV_PIX_FMT_VAAPI) {
