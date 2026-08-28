@@ -299,8 +299,11 @@ private:
     // queue access and holds its last texture if it cannot get it; the worker
     // holds it for the whole recovery. Without it the render thread can be
     // borrowing a frame from a queue the worker is destroying.
+    // mutable: getHealth()/getHealthReason() are const and try_lock this gate to
+    // refine the answer from the queue's own state (defect 6(b)). They NEVER
+    // block on it - see those two functions.
     std::unique_ptr<std::thread> recoveryThread_;
-    std::mutex queueAccessMutex_;
+    mutable std::mutex queueAccessMutex_;
     std::mutex recoveryWakeMutex_;
     std::condition_variable recoveryWakeCond_;
     std::atomic<bool> recoveryWake_{false};

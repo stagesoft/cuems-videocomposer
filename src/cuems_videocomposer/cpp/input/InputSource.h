@@ -144,7 +144,17 @@ public:
      */
     enum class Health {
         ok,               // decoding as intended
-        sw_fallback,      // hardware refused this file; decoding in software
+        // Two ways to reach this, and they are found at different moments:
+        //   - open() asked for hardware and was refused outright (the ladder's
+        //     tier 3), known before any frame exists; or
+        //   - open() got hardware and the FIRST DECODED FRAME came back in
+        //     software anyway - a 4:2:2 clip on VAAPI does this. That one
+        //     cannot be known until a frame exists, so it is DERIVED at read
+        //     time in VideoFileInput::getHealth() rather than stored. Defect
+        //     6(b): before that derivation the layer reported ok while the CPU
+        //     did the work.
+        // Either way the layer PLAYS. sw_fallback is not a failure state.
+        sw_fallback,      // hardware refused this file, or quietly went soft
         // CURRENTLY NEVER EMITTED - it has no writer. It meant "recovered onto
         // a reduced surface pool"; that ladder was retired once measurement
         // showed no platform we run answers pool pressure with a decode error
