@@ -61,6 +61,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <malloc.h>   // G4 PROBE: malloc_trim - instrumented branch only
+#include <cstdlib>    // G4 PROBE: getenv/atoi
 
 namespace videocomposer {
 
@@ -376,8 +378,47 @@ int VideoComposerApplication::run() {
     
     LOG_INFO << "Entering video update loop @ display refresh rate (vsync-driven)";
 
+    // ---------------------------------------------------------------- G4 PROBE
+    // THROWAWAY INSTRUMENTATION - this branch is never merged (constraint 7).
+    //
+    // 869en4tqt's plateau was measured to be glibc secondary arenas: 31 of them
+    // holding 276 MB, against this box's cap of 8*nproc = 32. MALLOC_ARENA_MAX
+    // caps them and saves ~40% of RSS, but it serialises malloc across the
+    // render and decode threads, which is a real risk on a compositor that
+    // misses vsyncs for a living.
+    //
+    // malloc_trim() serialises nothing: it walks the arenas and returns their
+    // free top-of-heap to the OS. The question it answers is narrow and worth a
+    // probe - is the plateau memory RETURNABLE, or is it fragmented free-list
+    // that no trim can hand back? If returnable, a bounded mitigation exists
+    // with no allocator-contention cost at all.
+    //
+    // Off unless CUEMS_VC_MALLOC_TRIM_S is set, so ONE binary provides both the
+    // control and the trim arm and nothing else differs between them.
+    int trimEverySec = 0;
+    if (const char* trimEnv = ::getenv("CUEMS_VC_MALLOC_TRIM_S")) {
+        trimEverySec = ::atoi(trimEnv);
+    }
+    auto lastTrim = std::chrono::steady_clock::now();
+    if (trimEverySec > 0) {
+        LOG_WARNING << "G4 PROBE: malloc_trim(0) every " << trimEverySec
+                    << "s - instrumented build, do not ship";
+    }
+    // -------------------------------------------------------------------------
+
     while (running_ && shouldContinue()) {
         processEvents();
+
+        if (trimEverySec > 0) {
+            const auto trimNow = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(
+                    trimNow - lastTrim).count() >= trimEverySec) {
+                lastTrim = trimNow;
+                const int released = ::malloc_trim(0);
+                LOG_WARNING << "G4 PROBE: malloc_trim -> " << released
+                            << " (1 = memory was returned to the OS)";
+            }
+        }
 
         // Bail out if a backend has surfaced a fatal error (e.g. DRM cold-boot
         // modeset verifier failed even after the in-process retry). Without
