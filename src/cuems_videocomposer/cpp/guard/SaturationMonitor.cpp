@@ -299,18 +299,41 @@ double SaturationMonitor::readDecodeOccupancyPercent() {
     ::closedir(dir);
 
     if (!sawDecField) {
-        // i915 reports no decode engine at all - it would read a flat 0.0 %
-        // while genuinely busy, which is worse than admitting ignorance.
-        if (!announcedOccupancyUnavailable_) {
-            announcedOccupancyUnavailable_ = true;
-            LOG_INFO << "SaturationMonitor: decode occupancy unavailable on this "
-                     << "platform (no drm-engine-dec) - saturation warnings will "
-                     << "come from frame misses instead";
+        // Absence is not an answer on its own.
+        //
+        // A videocomposer that is merely running holds a DRM client for the
+        // display and no decoder at all, so drm-engine-dec is legitimately
+        // missing - on amdgpu just as much as on i915. Concluding "this
+        // platform cannot report decode occupancy" from that would declare the
+        // channel dead on the very hardware whose occupancy this campaign
+        // measured, and the flag latches, so it would stay wrong.
+        //
+        // The question is only answerable while something is actually
+        // decoding: if sessions are running and the field still never appears,
+        // the platform genuinely does not export it (i915 behaves exactly so,
+        // reading a flat 0.0 % while busy). Until then the honest state is
+        // "not observed yet", which is neither available nor unavailable, and
+        // says nothing.
+        const int decoding = hangGuard().activeFourK() + hangGuard().activeExempt();
+        if (decoding > 0) {
+            if (++decodingSamplesWithoutDecField_ >= 3) {
+                if (!announcedOccupancyUnavailable_) {
+                    announcedOccupancyUnavailable_ = true;
+                    LOG_INFO << "SaturationMonitor: decode occupancy unavailable on "
+                             << "this platform (" << decoding << " session(s) decoding, "
+                             << "no drm-engine-dec reported) - saturation warnings "
+                             << "will come from frame misses instead";
+                }
+                occupancyAvailable_.store(false);
+            }
+        } else {
+            decodingSamplesWithoutDecField_ = 0;
         }
-        occupancyAvailable_.store(false);
         lastDecNs_ = -1;
         return -1.0;
     }
+
+    decodingSamplesWithoutDecField_ = 0;
 
     occupancyAvailable_.store(true);
 
