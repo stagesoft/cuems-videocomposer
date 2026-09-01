@@ -206,7 +206,16 @@ bool VideoComposerApplication::initializeHangGuard() {
     }
 
     hangGuard().logStartupState();
-    saturationMonitor().start(hangGuard().profile());
+
+    if (config_->getBool("saturation_monitor_off", false)) {
+        // The guard is untouched: this silences the instrument, never the
+        // limit. Used to measure what the instrument itself costs.
+        LOG_WARNING << "SaturationMonitor: DISABLED by --saturation-monitor=off "
+                    << "- no saturation warnings will be produced (the hang "
+                    << "guard is unaffected)";
+    } else {
+        saturationMonitor().start(hangGuard().profile());
+    }
     return true;
 }
 
