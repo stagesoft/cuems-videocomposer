@@ -152,6 +152,7 @@ private:
     int sustainedSeconds_ = 0;
     int kmsgFd_ = -1;
     bool announcedOccupancyUnavailable_ = false;
+    int  decodingSamplesWithoutDecField_ = 0;
     bool announcedPageFaultUnavailable_ = false;
     long suppressedTransitions_ = 0;
     std::chrono::steady_clock::time_point lastTransitionLog_{};
