@@ -20,6 +20,7 @@
  */
 
 #include "LayerPlayback.h"
+#include "../guard/SaturationSignals.h"
 #include "../utils/Logger.h"
 #include "../utils/SMPTEUtils.h"
 #include "../sync/SyncSource.h"
@@ -325,16 +326,26 @@ void LayerPlayback::updateFromSyncSource() {
                 if (lastVideoFrame_ >= 0 && vsyncsSinceLast > 4) {
                     LOG_WARNING << "Frame pacing: frame " << lastVideoFrame_ << " held for " 
                                 << vsyncsSinceLast << " vsyncs (possible stall)";
+                    signals::frameHeldLong();
                 }
                 lastFrameChangeVsync_ = vsyncCount_;
                 lastVideoFrame_ = adjustedFrame;
             } else if (isSharedLayer_ && !isDecodeDriver_) {
                 // Shared secondary: cache not ready yet — skip seek (would corrupt driver's decoder)
+                signals::frameMissed();
             } else if (isHardwareDecodeLayer()) {
                 // Hardware layer: a failed load is a decode-queue miss, not a
                 // lost position. Seeking would flush the queue and restart the
                 // decoder - turning a one-vsync miss into a real stall, on every
                 // miss. Hold and retry next vsync.
+                //
+                // This branch is the saturation signal that matters. The pacing
+                // warning above only fires when a frame *did* arrive, so a
+                // wedged layer never reaches it and would report nothing at all;
+                // a frame wanted and not delivered is counted here instead. It
+                // is also GPU-agnostic, which is what makes the warnings work
+                // on the Intel nodes, where decode occupancy is never reported.
+                signals::frameMissed();
             } else {
                 // If load fails, try seeking first (helps with keyframe-based codecs)
                 LOG_WARNING << "Failed to load frame " << adjustedFrame << ", trying seek first";

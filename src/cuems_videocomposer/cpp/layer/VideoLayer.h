@@ -30,6 +30,7 @@
 #include "../video/FrameBuffer.h"
 #include "../video/GPUTextureFrameBuffer.h"
 #include <memory>
+#include <string>
 #include <cstdint>
 
 namespace videocomposer {
@@ -100,6 +101,12 @@ public:
     // Layer ID
     void setLayerId(int id) { layerId_ = id; }
     int getLayerId() const { return layerId_; }
+
+    // Cue UUID this layer was created for, when it has one. Carried so the
+    // guard's refusal messages and the load-outcome record can name the cue
+    // the operator knows, not just an internal slot number.
+    void setCueId(const std::string& cueId) { cueId_ = cueId; }
+    const std::string& getCueId() const { return cueId_; }
     
     // Time-scaling (applied to sync source frames)
     void setTimeOffset(int64_t offset);
@@ -111,9 +118,37 @@ public:
     void setWraparound(bool enabled);
     bool getWraparound() const;
     
-    // MTC follow control (enable/disable MTC following for this layer)
-    void setMtcFollow(bool enabled);
+    /**
+     * MTC follow control - and the hang guard's only decision point.
+     *
+     * Enabling is what turns a loaded layer into a decoding one, so this is
+     * where a 4K-class session is reserved against the cap. Returns false
+     * when the guard refused: the layer then stays loaded and holding its
+     * frame, following stays off, and everything already playing is
+     * untouched. Disabling always succeeds and gives the slot back.
+     */
+    bool setMtcFollow(bool enabled);
     bool getMtcFollow() const;
+
+    /**
+     * Re-run the guard decision after the input source changes.
+     *
+     * OSC arrives in whatever order it arrives: /mtcfollow 1 can land before
+     * the file has finished loading, and a layer that is already following
+     * can have its source replaced by a re-arm. In both cases the layer is
+     * only really decoding once it has a source, so the reservation is
+     * reconciled here rather than assumed at the moment the command arrived.
+     */
+    void reconcileGuardReservation();
+
+    /**
+     * Take over the guard slot of the decode driver being removed.
+     *
+     * Used when this layer is promoted to decode driver for a shared source:
+     * the decode session continues, it just has a new owner, so the slot moves
+     * with it rather than being released and re-requested.
+     */
+    void inheritGuardReservation(VideoLayer& fromLayer);
     
     // Reverse playback (multiplies timescale by -1.0 and adjusts offset)
     void reverse();
@@ -125,6 +160,22 @@ private:
 
     // Layer identification
     int layerId_;
+    std::string cueId_;
+
+    /**
+     * Whether this layer currently holds a slot in the guard's ledger.
+     *
+     * The reservation belongs to the layer, not to the input source, and that
+     * is deliberate: re-arming a cue over a loaded layer replaces the source
+     * while the layer - and its slot - persist, so a re-load is net-zero and
+     * can never be refused on account of the session it is replacing. Getting
+     * that wrong would leave an output silently showing the previous cue's
+     * media.
+     */
+    bool guardReserved_ = false;
+
+    /** Applies the guard decision for a desired follow state. */
+    bool applyGuardedFollow(bool wantFollow);
 
     // Update priority (decoupled from z-order for shared-decoder ordering)
     int updatePriority_ = 0;

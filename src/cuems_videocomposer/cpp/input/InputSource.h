@@ -178,6 +178,18 @@ public:
     virtual std::string getHealthReason() const { return std::string(); }
 
     /**
+     * Whether this source counts as a 4K-class decode session for the hang
+     * guard.
+     *
+     * Decided once, when the file is opened and its metadata is known, so the
+     * check at reveal is a counter comparison and never a probe. The default
+     * is false and that is correct for every path that does not drive the
+     * VCN: HAP layers decode DXT blobs on the CPU and upload textures, so
+     * they neither consume a decode session nor risk the ring hang.
+     */
+    virtual bool isFourKClass() const { return false; }
+
+    /**
      * Check if this is a live stream (no seeking, continuous reading)
      * @return true for live streams (NDI, V4L2, RTSP), false for files
      */

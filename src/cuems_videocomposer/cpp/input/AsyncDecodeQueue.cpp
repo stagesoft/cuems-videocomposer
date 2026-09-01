@@ -26,6 +26,7 @@
  */
 
 #include "AsyncDecodeQueue.h"
+#include "../guard/SaturationSignals.h"
 #include "../utils/ExitReporter.h"
 #include "../utils/Logger.h"
 #include <chrono>
@@ -731,6 +732,14 @@ void AsyncDecodeQueue::recordDecodeError(int averr, const char* where) {
     // suite drives decodeErrorObserved() directly, so a death record's
     // decode_errors field is trustworthy only while this line is here.
     exitreport::decodeErrorObserved(averr);
+
+    // The same event, but keyed by queue so the saturation monitor can tell
+    // one sick file from a platform-wide event. Errors on a single layer are
+    // that layer's own recovery story; two or more layers erroring within the
+    // same window is a property of the GPU, and that is what raises an alarm.
+    // `this` is only ever compared for equality, never dereferenced.
+    signals::decodeErrorOnLayer(reinterpret_cast<uint64_t>(this));
+
     const int n = ++consecutiveErrors_;
     const int suppressed = ++decodeErrorsSinceLog_;
 

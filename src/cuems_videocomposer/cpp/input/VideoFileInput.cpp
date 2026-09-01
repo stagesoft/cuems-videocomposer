@@ -210,6 +210,36 @@ bool VideoFileInput::open(const std::string& source) {
     // Use BGRA32 format for OpenGL rendering (matches original xjadeo)
     frameInfo_.format = PixelFormat::BGRA32;
 
+    // ------------------------------------------------------------------
+    // Hang-guard classification.
+    //
+    // Done here, the moment the metadata is known and before indexing, for
+    // two reasons. It is the only point where width, height and frame rate
+    // are all in hand, and it is early enough that the answer is ready long
+    // before the layer can be revealed - so the check at reveal is a counter
+    // comparison on the OSC thread and never touches this file again.
+    //
+    // Nothing is refused here. Admission is decided when a layer starts
+    // decoding, because that is the quantity the hang boundary was measured
+    // on; a load that is merely armed costs surface pools and no risk (8 held
+    // 4K sessions soaked flat for 15 minutes). What the load moment does owe
+    // the operator is notice, and that is the advisory this count feeds.
+    // ------------------------------------------------------------------
+    classification_ = HangGuard::classify(width, height, framerate);
+    if (!classificationCounted_) {
+        hangGuard().noteLoadClassified(classification_);
+        classificationCounted_ = true;
+        countedAsFourK_ = classification_.isFourKClass();
+    }
+    if (classification_.failedClosed) {
+        LOG_WARNING << "HangGuard: " << source << ": " << classification_.reason;
+    } else if (classification_.outsideEnvelope) {
+        LOG_WARNING << "SaturationMonitor: WARN outside-measured-envelope "
+                    << source << ": " << classification_.reason;
+    } else {
+        LOG_DEBUG << "HangGuard: " << source << ": " << classification_.reason;
+    }
+
     // Calculate total frames (needed before indexing decision)
     if (framerate > 0 && duration > 0) {
         frameInfo_.totalFrames = (int64_t)(duration * framerate);
@@ -357,6 +387,15 @@ bool VideoFileInput::open(const std::string& source) {
 }
 
 void VideoFileInput::close() {
+    // Give back the guard's armed count first: close() is reachable from the
+    // destructor, from a cancelled load on a loader worker and from an
+    // ordinary unload on the render thread, and every one of those paths must
+    // return the count exactly once.
+    if (classificationCounted_) {
+        hangGuard().noteLoadReleased(countedAsFourK_);
+        classificationCounted_ = false;
+    }
+
     // Stop the recovery worker FIRST. It owns the queue during a recovery, so
     // tearing the queue down underneath it is a use-after-free.
     stopRecoveryWorker();

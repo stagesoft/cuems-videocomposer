@@ -26,6 +26,7 @@
 #include "HardwareDecoder.h"
 #include "AsyncDecodeQueue.h"
 #include "RecoveryPolicy.h"
+#include "../guard/HangGuard.h"
 #include "../video/GPUTextureFrameBuffer.h"
 #include <cuems_mediadecoder/MediaFileReader.h>
 #include <cuems_mediadecoder/VideoDecoder.h>
@@ -148,7 +149,28 @@ public:
     Health getHealth() const override;
     std::string getHealthReason() const override;
 
+    // Hang guard: classified once in open(), when width/height/framerate are
+    // known and before any decode session exists.
+    bool isFourKClass() const override { return classification_.isFourKClass(); }
+    const Classification& guardClassification() const { return classification_; }
+
 private:
+    /**
+     * What the hang guard makes of this file, and whether that has been
+     * counted.
+     *
+     * The count is taken once in open(), after the metadata is read, and
+     * dropped once in close() - which the destructor also runs, so a source
+     * that is cancelled mid-project-switch or discarded after a failed
+     * hardware open still gives its count back. `classificationCounted_`
+     * makes the pair idempotent: close() is reachable more than once, and a
+     * counter that could be decremented twice would eventually go negative
+     * and silence the advisory for the rest of the process's life.
+     */
+    Classification classification_;
+    bool classificationCounted_ = false;
+    bool countedAsFourK_ = false;
+
     struct FrameIndex {
         int64_t pkt_pts;
         int64_t pkt_pos;

@@ -676,6 +676,11 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/utils/SMPTEWrapper.cpp
     src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
     src/cuems_videocomposer/cpp/utils/ExitReporter.cpp
+    # Hang guard + saturation monitor (G12)
+    src/cuems_videocomposer/cpp/guard/MachineProfile.cpp
+    src/cuems_videocomposer/cpp/guard/HangGuard.cpp
+    src/cuems_videocomposer/cpp/guard/SaturationSignals.cpp
+    src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
     # src/cuems_videocomposer/cpp/utils/MIDIBridge.cpp - Removed (using MIDISyncSource directly)
     # Note: Logger.h is header-only, no .cpp needed
 )
@@ -876,6 +881,16 @@ set(VIDEOINDEXER_SOURCES
     # The decode path keeps the live-decoder census; the indexer never installs
     # the reporter, so the counters simply go unread here.
     src/cuems_videocomposer/cpp/utils/ExitReporter.cpp
+    # Same story for the hang guard: VideoFileInput classifies every file it
+    # opens, so the symbols must be here, but the indexer never resolves a
+    # machine profile - so its guard is the monitor-only fallback and refuses
+    # nothing. That is the honest arrangement rather than an oversight: the
+    # indexer is a separate process the guard could not account for anyway,
+    # which is why it is named as a known bypass at startup.
+    src/cuems_videocomposer/cpp/guard/MachineProfile.cpp
+    src/cuems_videocomposer/cpp/guard/HangGuard.cpp
+    src/cuems_videocomposer/cpp/guard/SaturationSignals.cpp
+    src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
 )
 
 # Mirror VAAPI interop inclusion from main executable
@@ -932,6 +947,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
         src/cuems_videocomposer/cpp/test/TestExitReporter.cpp
         src/cuems_videocomposer/cpp/test/TestRecoveryPolicy.cpp
+        src/cuems_videocomposer/cpp/test/TestHangGuard.cpp
     )
     
     # C++ implementation files needed by tests
@@ -960,6 +976,10 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
         src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
         src/cuems_videocomposer/cpp/utils/ExitReporter.cpp
+        src/cuems_videocomposer/cpp/guard/MachineProfile.cpp
+        src/cuems_videocomposer/cpp/guard/HangGuard.cpp
+        src/cuems_videocomposer/cpp/guard/SaturationSignals.cpp
+        src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
     )
     
     # Add mtcreceiver driver if MIDI is enabled
