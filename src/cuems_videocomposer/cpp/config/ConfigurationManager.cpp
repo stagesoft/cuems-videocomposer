@@ -182,7 +182,8 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
             }
         } else if (arg == "--no-splash" || arg == "--nosplash") {
             setBool("no_splash", true);
-        } else if (arg.rfind("--hang-guard", 0) == 0 || arg.rfind("--vc-profile", 0) == 0) {
+        } else if (arg.rfind("--hang-guard", 0) == 0 || arg.rfind("--vc-profile", 0) == 0
+                   || arg.rfind("--saturation-monitor", 0) == 0) {
             // Operator flags for the hang guard, delivered through
             // OPERATOR_FLAGS in the unit's environment file.
             //
@@ -212,6 +213,22 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
                     setBool("hang_guard_off", false);
                 } else {
                     std::cerr << "videocomposer: --hang-guard=" << value
+                              << " is not a valid value (expected on or off)"
+                              << std::endl;
+                    return 2;
+                }
+            } else if (name == "--saturation-monitor") {
+                // Exists so the monitor's own cost can be measured against
+                // itself: same binary, same build, one flag apart. An A/B
+                // between two separately-built binaries measures the build as
+                // much as the change, which is why this is a runtime switch
+                // and not a compile-time one.
+                if (value == "off" || value == "0" || value == "false") {
+                    setBool("saturation_monitor_off", true);
+                } else if (value == "on" || value == "1" || value == "true" || value.empty()) {
+                    setBool("saturation_monitor_off", false);
+                } else {
+                    std::cerr << "videocomposer: --saturation-monitor=" << value
                               << " is not a valid value (expected on or off)"
                               << std::endl;
                     return 2;
