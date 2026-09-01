@@ -73,10 +73,22 @@ public:
     // Whether -r/--resolution was explicitly passed on the command line
     bool isResolutionExplicit() const { return resolutionExplicit_; }
 
+    /**
+     * Arguments that began with '-' and matched no known option.
+     *
+     * Kept so startup can name them. They used to be discarded silently, which
+     * meant a typo in an operator flag produced a working-looking command line
+     * and a setting that was never applied - the failure mode this codebase
+     * has been bitten by before, and the worst possible one for a flag that
+     * turns a safety feature off.
+     */
+    const std::vector<std::string>& unrecognizedOptions() const { return unrecognizedOptions_; }
+
 private:
     std::map<std::string, std::string> config_;
     std::vector<std::string> arguments_;
     std::string movieFile_;
+    std::vector<std::string> unrecognizedOptions_;
     bool resolutionExplicit_ = false;
     
     void loadDefaults();

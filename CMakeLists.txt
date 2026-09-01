@@ -675,6 +675,12 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
     src/cuems_videocomposer/cpp/utils/SMPTEWrapper.cpp
     src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
+    src/cuems_videocomposer/cpp/utils/ExitReporter.cpp
+    # Hang guard + saturation monitor (G12)
+    src/cuems_videocomposer/cpp/guard/MachineProfile.cpp
+    src/cuems_videocomposer/cpp/guard/HangGuard.cpp
+    src/cuems_videocomposer/cpp/guard/SaturationSignals.cpp
+    src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
     # src/cuems_videocomposer/cpp/utils/MIDIBridge.cpp - Removed (using MIDISyncSource directly)
     # Note: Logger.h is header-only, no .cpp needed
 )
@@ -872,6 +878,19 @@ set(VIDEOINDEXER_SOURCES
     src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
     src/cuems_videocomposer/cpp/video/GPUTextureFrameBuffer.cpp
     src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
+    # The decode path keeps the live-decoder census; the indexer never installs
+    # the reporter, so the counters simply go unread here.
+    src/cuems_videocomposer/cpp/utils/ExitReporter.cpp
+    # Same story for the hang guard: VideoFileInput classifies every file it
+    # opens, so the symbols must be here, but the indexer never resolves a
+    # machine profile - so its guard is the monitor-only fallback and refuses
+    # nothing. That is the honest arrangement rather than an oversight: the
+    # indexer is a separate process the guard could not account for anyway,
+    # which is why it is named as a known bypass at startup.
+    src/cuems_videocomposer/cpp/guard/MachineProfile.cpp
+    src/cuems_videocomposer/cpp/guard/HangGuard.cpp
+    src/cuems_videocomposer/cpp/guard/SaturationSignals.cpp
+    src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
 )
 
 # Mirror VAAPI interop inclusion from main executable
@@ -926,6 +945,9 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
         src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
         src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
+        src/cuems_videocomposer/cpp/test/TestExitReporter.cpp
+        src/cuems_videocomposer/cpp/test/TestRecoveryPolicy.cpp
+        src/cuems_videocomposer/cpp/test/TestHangGuard.cpp
     )
     
     # C++ implementation files needed by tests
@@ -953,6 +975,11 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
         src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
         src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
+        src/cuems_videocomposer/cpp/utils/ExitReporter.cpp
+        src/cuems_videocomposer/cpp/guard/MachineProfile.cpp
+        src/cuems_videocomposer/cpp/guard/HangGuard.cpp
+        src/cuems_videocomposer/cpp/guard/SaturationSignals.cpp
+        src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
     )
     
     # Add mtcreceiver driver if MIDI is enabled
@@ -1111,8 +1138,19 @@ target_link_libraries(cuems-videocomposer cuems-mediadecoder)
 # instead of the flat 6 that stdout lines get. Deliberately NOT gated on
 # ENABLE_MIDI — utils/Logger.h is included nearly everywhere, so gating the
 # include dir would break an ENABLE_MIDI=OFF build that compiles fine today.
-# Per-target on purpose: cuems-videoindexer and the test binaries keep the
-# plain-stream fallback and never link cuemslogger.
+# Per-target, and the three targets differ — state it exactly, because the
+# earlier wording here claimed the test binary never links cuemslogger, which
+# is false and would mislead anyone debugging test log output:
+#   cuems-videocomposer  always links cuemslogger + defines HAVE_CUEMS_LOGGER
+#                        (this block) -> journal with real priorities.
+#   cuems-videoindexer   links neither mtcreceiver nor cuemslogger and never
+#                        gets the define -> plain-stream fallback, always.
+#   the test binary      under ENABLE_MIDI links cuemslogger explicitly AND
+#                        inherits HAVE_CUEMS_LOGGER from mtcreceiver's PUBLIC
+#                        compile definition above, so it logs through syslog
+#                        too; with ENABLE_MIDI=OFF it does neither. Its
+#                        behaviour follows that switch, it is not a decision
+#                        taken here.
 target_compile_definitions(cuems-videocomposer PRIVATE HAVE_CUEMS_LOGGER)
 target_link_libraries(cuems-videocomposer cuemslogger)
 target_include_directories(cuems-videocomposer PRIVATE src/cuemslogger)

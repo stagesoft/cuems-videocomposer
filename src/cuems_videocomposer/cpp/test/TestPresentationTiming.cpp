@@ -214,3 +214,107 @@ bool test_PresentationTiming_ConcurrentSubmitFlip() {
     TEST_ASSERT_TRUE(stats.sampleCount > 0);
     return true;
 }
+
+// The drop counter is built directly on msc_delta: one skipped vsync is
+// jitter, more than one is a real drop. Before rc_1 this went through an
+// expectedVsyncsPerFrame_ model fed by setVideoFramerate(), which never had a
+// caller -- the divisor was always 1, so the model only ever subtracted zero.
+// Synthetic timestamps keep this free of wall-clock timing.
+namespace {
+// Feed one flip at an absolute presentation time, the way the kernel delivers
+// them: seconds + microseconds, plus the vsync counter.
+void feedFlip(PresentationTiming& pt, int64_t ustNs, unsigned int msc) {
+    pt.recordFlip(static_cast<unsigned int>(ustNs / 1000000000LL),
+                  static_cast<unsigned int>((ustNs % 1000000000LL) / 1000LL),
+                  msc);
+}
+}  // namespace
+
+// The defect this exists for (869emcrwa): an output configured at 60Hz whose
+// CRTC really does run at 60Hz, but which only gets a flip every other vblank.
+// Nothing else in the class notices -- msc advances by two, which reads as
+// ordinary jitter, and the drop counter never moves.
+bool test_PresentationTiming_SustainedUnderrateDetected() {
+    PresentationTiming pt;
+    pt.init(60.0);
+
+    const int64_t halfRateNs = 33333333;  // 30Hz cadence on a 60Hz display
+    int64_t ust = 1000000000LL;
+    unsigned int msc = 100;
+
+    // A little under the 10s hold: still silent, because a mode change or a
+    // project load must not be able to trip this.
+    for (int i = 0; i < 260; ++i) {
+        feedFlip(pt, ust, msc);
+        ust += halfRateNs;
+        msc += 2;
+    }
+    TEST_ASSERT_FALSE(pt.hasSustainedUnderrate());
+
+    // Past the hold it must speak up.
+    for (int i = 0; i < 200; ++i) {
+        feedFlip(pt, ust, msc);
+        ust += halfRateNs;
+        msc += 2;
+    }
+    TEST_ASSERT_TRUE(pt.hasSustainedUnderrate());
+    TEST_ASSERT_TRUE(pt.getMeasuredHz() > 29.0 && pt.getMeasuredHz() < 31.0);
+
+    // And it must stand down once the cadence recovers, so a fixed output does
+    // not keep warning for the rest of the show.
+    const int64_t fullRateNs = 16666667;
+    for (int i = 0; i < 60; ++i) {
+        feedFlip(pt, ust, msc);
+        ust += fullRateNs;
+        msc += 1;
+    }
+    TEST_ASSERT_FALSE(pt.hasSustainedUnderrate());
+    TEST_ASSERT_TRUE(pt.getMeasuredHz() > 55.0);
+    return true;
+}
+
+// An output presenting exactly as configured must never be accused, however
+// long it runs.
+bool test_PresentationTiming_NoUnderrateAtFullRate() {
+    PresentationTiming pt;
+    pt.init(60.0);
+
+    const int64_t fullRateNs = 16666667;
+    int64_t ust = 1000000000LL;
+    unsigned int msc = 100;
+    for (int i = 0; i < 1200; ++i) {  // 20 s
+        feedFlip(pt, ust, msc);
+        ust += fullRateNs;
+        msc += 1;
+    }
+    TEST_ASSERT_FALSE(pt.hasSustainedUnderrate());
+    TEST_ASSERT_TRUE(pt.getMeasuredHz() > 59.0 && pt.getMeasuredHz() < 61.0);
+    return true;
+}
+
+bool test_PresentationTiming_SkippedVsyncsFromMscDelta() {
+    PresentationTiming pt;
+    pt.init(60.0);
+
+    pt.recordFlip(1u, 0u, 100u);            // baseline, no previous entry
+    pt.recordFlip(1u, 16667u, 101u);        // msc_delta 1 -> perfect
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(0));
+    TEST_ASSERT_FALSE(pt.isRunningBehind());
+
+    pt.recordFlip(1u, 50001u, 103u);        // msc_delta 2 -> 1 skipped: jitter
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(1));
+    TEST_ASSERT_TRUE(pt.isRunningBehind());
+
+    pt.recordFlip(1u, 100002u, 106u);       // msc_delta 3 -> 2 skipped: a drop
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(2));
+
+    pt.recordFlip(1u, 116669u, 107u);       // recovered
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(0));
+    TEST_ASSERT_FALSE(pt.isRunningBehind());
+
+    // A backwards msc (counter wrap / CRTC re-enable) must not be read as a
+    // gigantic drop -- the harness rejects those jumps for the same reason.
+    pt.recordFlip(2u, 0u, 5u);
+    TEST_ASSERT_EQ(pt.getSkippedVsyncs(), static_cast<int64_t>(0));
+    return true;
+}

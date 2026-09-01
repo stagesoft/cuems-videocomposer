@@ -51,6 +51,7 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/version.h>
 #include <libavutil/frame.h>
+#include <libavutil/pixdesc.h>      // av_get_pix_fmt_name() - defect 6(b) reporting
 }
 
 namespace videocomposer {
@@ -66,10 +67,8 @@ VideoFileInput::VideoFileInput()
     , swsCtxFormat_(AV_PIX_FMT_NONE)
     , videoStream_(-1)
     , hwDeviceCtx_(nullptr)
-    , hwFrame_(nullptr)
     , hwDecoderType_(HardwareDecoder::Type::NONE)
     , useHardwareDecoding_(false)
-    , codecCtxAllocated_(false)
     , hwPreference_(HardwareDecodePreference::AUTO)
 #ifdef HAVE_VAAPI_INTEROP
     , vaapiInterop_(nullptr)
@@ -94,7 +93,6 @@ VideoFileInput::VideoFileInput()
 }
 
 VideoFileInput::~VideoFileInput() {
-    stopAsyncDecode();
     close();
 }
 
@@ -102,6 +100,14 @@ bool VideoFileInput::initializeFFmpeg() {
     // FFmpeg should already be initialized globally
     // This is just a placeholder for any per-instance initialization
     return true;
+}
+
+AVCodecParameters* VideoFileInput::streamCodecParams() const {
+    if (!formatCtx_ || videoStream_ < 0 ||
+        videoStream_ >= static_cast<int>(formatCtx_->nb_streams)) {
+        return nullptr;
+    }
+    return formatCtx_->streams[videoStream_]->codecpar;
 }
 
 bool VideoFileInput::open(const std::string& source) {
@@ -150,8 +156,9 @@ bool VideoFileInput::open(const std::string& source) {
         return false;
     }
 
-    // Open codec (try hardware first, fallback to software)
-    if (!openHardwareCodec() && !openCodec()) {
+    // Initialize the hardware device (no codec is opened for it), falling back
+    // to a software codec when this file cannot be decoded on hardware at all.
+    if (!initializeHardwareDevice() && !openCodec()) {
         AVCodecParameters* cp = mediaReader_.getCodecParameters(videoStream_);
         LOG_ERROR << "VideoFileInput: no usable decoder (hardware and software both "
                   << "failed) for codec "
@@ -180,19 +187,15 @@ bool VideoFileInput::open(const std::string& source) {
         frameRateQ_.num = avStream->r_frame_rate.den;
     }
 
-    // Dimensions - get from codec context
+    // Dimensions - always from codec parameters, never from codecCtx_.
+    // The hardware path no longer opens a codec context of its own (F2), so the
+    // old codecCtx_ branch would read null there. codecpar carries the same
+    // width/height in both modes.
     int width = 0;
     int height = 0;
-    if (codecCtx_) {
-        width = codecCtx_->width;
-        height = codecCtx_->height;
-    } else {
-        // Fallback to codec parameters if codec not opened yet
-        AVCodecParameters* codecParams = mediaReader_.getCodecParameters(videoStream_);
-        if (codecParams) {
-            width = codecParams->width;
-            height = codecParams->height;
-        }
+    if (AVCodecParameters* codecParams = streamCodecParams()) {
+        width = codecParams->width;
+        height = codecParams->height;
     }
     
     // Duration
@@ -206,6 +209,36 @@ bool VideoFileInput::open(const std::string& source) {
     frameInfo_.duration = duration;
     // Use BGRA32 format for OpenGL rendering (matches original xjadeo)
     frameInfo_.format = PixelFormat::BGRA32;
+
+    // ------------------------------------------------------------------
+    // Hang-guard classification.
+    //
+    // Done here, the moment the metadata is known and before indexing, for
+    // two reasons. It is the only point where width, height and frame rate
+    // are all in hand, and it is early enough that the answer is ready long
+    // before the layer can be revealed - so the check at reveal is a counter
+    // comparison on the OSC thread and never touches this file again.
+    //
+    // Nothing is refused here. Admission is decided when a layer starts
+    // decoding, because that is the quantity the hang boundary was measured
+    // on; a load that is merely armed costs surface pools and no risk (8 held
+    // 4K sessions soaked flat for 15 minutes). What the load moment does owe
+    // the operator is notice, and that is the advisory this count feeds.
+    // ------------------------------------------------------------------
+    classification_ = HangGuard::classify(width, height, framerate);
+    if (!classificationCounted_) {
+        hangGuard().noteLoadClassified(classification_);
+        classificationCounted_ = true;
+        countedAsFourK_ = classification_.isFourKClass();
+    }
+    if (classification_.failedClosed) {
+        LOG_WARNING << "HangGuard: " << source << ": " << classification_.reason;
+    } else if (classification_.outsideEnvelope) {
+        LOG_WARNING << "SaturationMonitor: WARN outside-measured-envelope "
+                    << source << ": " << classification_.reason;
+    } else {
+        LOG_DEBUG << "HangGuard: " << source << ": " << classification_.reason;
+    }
 
     // Calculate total frames (needed before indexing decision)
     if (framerate > 0 && duration > 0) {
@@ -244,63 +277,136 @@ bool VideoFileInput::open(const std::string& source) {
     ready_ = true;
     currentFrame_ = -1;
     
-    // Initialize async decode queue for hardware decoding
-    // This provides mpv-style pre-buffering for smooth playback
-    if (useHardwareDecoding_ && hwDeviceCtx_) {
+    // ------------------------------------------------------------------
+    // Decode-path failure ladder
+    //
+    // The async queue is now the ONLY decoder on the hardware path - there is
+    // no synchronous decoder behind it to quietly pick up the slack. So every
+    // way it can fail to open gets an explicit outcome here, and each outcome
+    // is recorded in LayerHealth.
+    //
+    // Ordering note: this runs after ready_ = true and after frame indexing.
+    // Every failure exit below therefore resets ready_ = false. A false return
+    // from open() leaves this instance partially initialized and the caller
+    // MUST discard it - the only production caller (AsyncVideoLoader) does,
+    // and its destructor runs close()/cleanup(). There is no support for
+    // retrying open() on the same instance.
+    // ------------------------------------------------------------------
+    if (useHardwareDecoding_ && hwDeviceCtx_ && !indexOnly_) {
+        std::string tier3Reason;   // non-empty -> drop to software decode
+        std::string tier4Reason;   // non-empty -> the load has failed outright
+
         asyncDecodeQueue_ = std::make_unique<AsyncDecodeQueue>();
-        if (asyncDecodeQueue_->open(currentFile_, hwDeviceCtx_)) {
-            useAsyncDecode_ = true;
-            LOG_INFO << "Async decode queue enabled for smooth hardware decoding";
+        if (asyncDecodeQueue_->open(currentFile_, hwDeviceCtx_,
+                                    AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,
+                                    AsyncDecodeQueue::MAX_QUEUE_SIZE)) {
+            if (asyncDecodeQueue_->isHardwareDecoding()) {
+                // Tier 1: hardware queue on a full pool.
+                useAsyncDecode_ = true;
+                setHealth(Health::ok, std::string());
+                startRecoveryWorker();
+                LOG_INFO << "Async decode queue enabled for smooth hardware decoding";
+            } else {
+                // The queue opened, but on its OWN internal software decoder:
+                // its codec whitelist is narrower than FFmpeg's generic
+                // hardware detection, so a HW-capable codec outside that list
+                // returns true here having quietly gone soft. Those frames are
+                // never consumed on this path, so treat it as a hardware
+                // refusal and take the real software route instead.
+                tier3Reason = "decode queue opened without hardware acceleration";
+            }
         } else {
-            LOG_WARNING << "Failed to initialize async decode queue, using synchronous decode";
+            const AsyncDecodeQueue::OpenFailure why = asyncDecodeQueue_->lastOpenFailure();
+            const int averr = asyncDecodeQueue_->lastOpenAVError();
+            char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+            if (averr != 0) {
+                av_strerror(averr, errbuf, AV_ERROR_MAX_STRING_SIZE);
+            }
+
+            switch (why) {
+                case AsyncDecodeQueue::OpenFailure::CODEC_OPEN:
+                case AsyncDecodeQueue::OpenFailure::DECODER_LOOKUP:
+                    // The container is fine; this decoder would not open on
+                    // this device. Software can still play it.
+                    tier3Reason = std::string("hardware decoder unavailable for this file")
+                                + (averr != 0 ? std::string(": ") + errbuf : std::string());
+                    break;
+                case AsyncDecodeQueue::OpenFailure::DEMUX:
+                case AsyncDecodeQueue::OpenFailure::NO_STREAM:
+                case AsyncDecodeQueue::OpenFailure::INTERNAL:
+                case AsyncDecodeQueue::OpenFailure::NONE:
+                default:
+                    // Nothing decodable here, or we ran out of memory doing it.
+                    // Software decode would fail the same way.
+                    tier4Reason = std::string("decode queue could not open the file")
+                                + (averr != 0 ? std::string(": ") + errbuf : std::string());
+                    break;
+            }
+        }
+
+        if (!tier3Reason.empty() || !tier4Reason.empty()) {
+            asyncDecodeQueue_->close();
             asyncDecodeQueue_.reset();
             useAsyncDecode_ = false;
+        }
+
+        if (!tier3Reason.empty()) {
+            // Tier 3: software decode - today's behavior, preserved.
+            // The device MUST go first: otherwise the software tier runs with a
+            // live VAAPI device attached and openCodec() re-allocates frames on
+            // top of the ones already allocated for it.
+            teardownHardwareDevice();
+
+            if (!openCodec()) {
+                // Tier-3 failure is a tier-4 outcome. Without this branch the
+                // layer would report a successful load and then never produce a
+                // frame - precisely the silent class LayerHealth exists to close.
+                const std::string reason = tier3Reason + "; software decode also failed";
+                LOG_ERROR << "VideoFileInput: no usable decoder for " << source
+                          << " - " << reason;
+                setHealth(Health::load_failed, reason);
+                ready_ = false;
+                return false;
+            }
+
+            LOG_WARNING << "VideoFileInput: " << tier3Reason
+                        << " - falling back to software decoding for " << source;
+            setHealth(Health::sw_fallback, tier3Reason);
+        } else if (!tier4Reason.empty()) {
+            // Tier 4: nothing to fall back to.
+            // Journal-only: the engine's OSC load is fire-and-forget, so the
+            // node still reports this cue armed. Closing that gap is F9.
+            LOG_ERROR << "VideoFileInput: " << tier4Reason << " (" << source << ")";
+            setHealth(Health::load_failed, tier4Reason);
+            ready_ = false;
+            return false;
         }
     }
 
     return true;
 }
 
-void VideoFileInput::prewarmGPUPipeline() {
-    if (!useAsyncDecode_ || !asyncDecodeQueue_ || !useHardwareDecoding_) {
-        return;
-    }
-#ifdef HAVE_VAAPI_INTEROP
-    if (!vaapiInterop_ || !vaapiInterop_->isAvailable()) {
-        return;
-    }
-
-    // Wait for the decode thread to have frame 0 ready
-    asyncDecodeQueue_->setTargetFrame(0);
-    AVFrame* warmFrame = asyncDecodeQueue_->getFrame(0, 500);
-    if (warmFrame) {
-        // Import frame 0 through the full GPU pipeline (DRM export + EGL + GL texture)
-        // This pays the one-time driver setup cost before playback starts.
-        GPUTextureFrameBuffer warmBuf;
-        if (transferHardwareFrameToGPU(warmFrame, warmBuf, true)) {
-            LOG_INFO << "Pre-warmed VAAPI→EGL pipeline for " << currentFile_;
-        }
-    }
-#endif
-}
-
 void VideoFileInput::close() {
-    // Stop async decode queue first
+    // Give back the guard's armed count first: close() is reachable from the
+    // destructor, from a cancelled load on a loader worker and from an
+    // ordinary unload on the render thread, and every one of those paths must
+    // return the count exactly once.
+    if (classificationCounted_) {
+        hangGuard().noteLoadReleased(countedAsFourK_);
+        classificationCounted_ = false;
+    }
+
+    // Stop the recovery worker FIRST. It owns the queue during a recovery, so
+    // tearing the queue down underneath it is a use-after-free.
+    stopRecoveryWorker();
+
+    // Stop async decode queue
     if (asyncDecodeQueue_) {
         asyncDecodeQueue_->close();
         asyncDecodeQueue_.reset();
     }
     useAsyncDecode_ = false;
-    
-    // Stop async decode thread first
-    stopAsyncDecode();
-    
-    // Clear frame cache
-    {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
-        frameCache_.clear();
-    }
-    
+
     cleanup();
     currentFile_.clear();
     ready_ = false;
@@ -420,9 +526,10 @@ static bool isCompatibleWithHardwareDecoder(AVCodecParameters* codecParams, Hard
     return true;
 }
 
-bool VideoFileInput::openHardwareCodec() {
-    // Try to open hardware decoder if available
-    // First, we need to detect the codec type
+bool VideoFileInput::initializeHardwareDevice() {
+    // Create the hardware DEVICE context and confirm this codec can be decoded
+    // on it. No codec is opened here: the async decode queue opens the only
+    // decoder, against the device this function creates.
     AVCodecParameters* codecParams = mediaReader_.getCodecParameters(videoStream_);
     if (!codecParams) {
         return false;
@@ -436,7 +543,7 @@ bool VideoFileInput::openHardwareCodec() {
         return false;
     }
 
-    LOG_INFO << "Attempting to open hardware decoder for codec: " << codecName;
+    LOG_INFO << "Attempting to initialize hardware device for codec: " << codecName;
 
     bool forceSpecificDecoder = false;
     HardwareDecoder::Type forcedType = HardwareDecoder::Type::NONE;
@@ -531,53 +638,11 @@ bool VideoFileInput::openHardwareCodec() {
         return false;
     }
 
-    // Check hardware config methods to determine how to initialize the decoder
-    // Following mpv's approach: check what methods the codec supports for OUR device type
-    // - METHOD_HW_DEVICE_CTX: needs hw_device_ctx set on codec context (VAAPI, VideoToolbox)
-    // - METHOD_HW_FRAMES_CTX: needs hw_frames_ctx
-    // - METHOD_INTERNAL: wrapper decoder (like cuvid, qsv) that manages hardware internally
-    bool needsHwDeviceCtx = false;
-    bool needsHwFramesCtx = false;
-    AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
-    
-    for (int n = 0; ; n++) {
-        const AVCodecHWConfig *cfg = avcodec_get_hw_config(hwCodec, n);
-        if (!cfg)
-            break;
-        
-        // Only consider configs for our target device type
-        if (cfg->device_type != hwDeviceType)
-            continue;
-        
-        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) {
-            needsHwDeviceCtx = true;
-            hwPixFmt = cfg->pix_fmt;
-            LOG_VERBOSE << "HW config: device_type=" << cfg->device_type 
-                       << " method=HW_DEVICE_CTX pix_fmt=" << av_get_pix_fmt_name(cfg->pix_fmt);
-        }
-        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX) {
-            needsHwFramesCtx = true;
-            if (hwPixFmt == AV_PIX_FMT_NONE) {
-                hwPixFmt = cfg->pix_fmt;
-            }
-            LOG_VERBOSE << "HW config: device_type=" << cfg->device_type 
-                       << " method=HW_FRAMES_CTX pix_fmt=" << av_get_pix_fmt_name(cfg->pix_fmt);
-        }
-        // AV_CODEC_HW_CONFIG_METHOD_INTERNAL means it's a wrapper decoder
-        // (like cuvid, qsv) that manages hardware internally
-        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_INTERNAL) {
-            needsHwDeviceCtx = false;
-            needsHwFramesCtx = false;
-            LOG_VERBOSE << "HW config: device_type=" << cfg->device_type 
-                       << " method=INTERNAL - wrapper decoder";
-            break;
-        }
-    }
-    
-    // If no hardware config found, fall back to our detection logic
-    if (hwPixFmt == AV_PIX_FMT_NONE) {
-        hwPixFmt = HardwareDecoder::getHardwarePixelFormat(hwDecoderType_, codecId);
-    }
+    // NOTE the hw-config probe that used to sit here (METHOD_HW_DEVICE_CTX /
+    // HW_FRAMES_CTX / INTERNAL, and the pixel format it picked) is gone with the
+    // codec open it fed: those values were only ever used to configure the
+    // synchronous codec context. The queue's own decoder negotiates the pixel
+    // format through FFmpeg's generic get_format path.
 
     // Create hardware device context (needed for frame transfers even if not for codec)
     int ret = -1;
@@ -617,157 +682,147 @@ bool VideoFileInput::openHardwareCodec() {
         }
     }
 
-    // Allocate codec context for hardware decoder
-    codecCtx_ = avcodec_alloc_context3(hwCodec);
-    if (!codecCtx_) {
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
-        return false;
-    }
-    codecCtxAllocated_ = true;  // Mark as allocated (must be freed)
-
-    // Set codec type and ID before copying parameters (following mpv's approach)
-    codecCtx_->codec_type = AVMEDIA_TYPE_VIDEO;
-    codecCtx_->codec_id = hwCodec->id;
-
-    // Set packet timebase from stream BEFORE copying parameters (required for cuvid and other hardware decoders)
-    // This prevents "Invalid pkt_timebase" warnings and ensures correct timestamp handling
-    AVStream* avStream = mediaReader_.getStream(videoStream_);
-    if (avStream) {
-        codecCtx_->pkt_timebase = avStream->time_base;
-    }
-
-    // Copy codec parameters from stream
-    if (avcodec_parameters_to_context(codecCtx_, codecParams) < 0) {
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
+    // NOTE no decoder is opened here any more. This function used to allocate a
+    // second AVCodecContext on this same file and open a synchronous hardware
+    // decoder on it, with a VAAPI surface pool of its own, while the async
+    // decode queue opened another. Two pools per layer against a fixed VRAM
+    // carve-out is what the eviction-storm hang was measured on.
+    //
+    // What that open ALSO did, incidentally, was answer "will this codec really
+    // open on this device" - the last gate before software fallback, and the
+    // only one that catches a wrapper decoder refusing a file the static gates
+    // accepted. That answer is still needed here, before indexFrames() decides
+    // which form of index to build, so it is asked explicitly and the context
+    // is freed again without ever decoding.
+    if (!probeHardwareCodecOpens(hwCodec, codecParams, hwDeviceType)) {
+        teardownHardwareDevice();
         return false;
     }
 
-    // Set hardware acceleration flags (following mpv's approach)
-    codecCtx_->hwaccel_flags |= AV_HWACCEL_FLAG_IGNORE_LEVEL;
-    codecCtx_->hwaccel_flags |= AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH;
-#ifdef AV_HWACCEL_FLAG_UNSAFE_OUTPUT
-    // This flag primarily exists for nvdec which has a very limited output frame pool
-    // We copy frames anyway, so we don't need this extra implicit copy
-    codecCtx_->hwaccel_flags |= AV_HWACCEL_FLAG_UNSAFE_OUTPUT;
-#endif
+    // The error paths below therefore free the device context only - there is
+    // no codec context here to free.
 
-    // Set hardware device context and pixel format callback based on codec requirements
-    // This applies uniformly to all decoder types (cuvid, vaapi, qsv, etc.)
-    // Wrapper decoders (with METHOD_INTERNAL) manage hardware internally
-    // and don't need hw_device_ctx set on the codec context
-    if (needsHwDeviceCtx || needsHwFramesCtx) {
-        // Set hardware device context
-        if (needsHwDeviceCtx) {
-            codecCtx_->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
-            if (!codecCtx_->hw_device_ctx) {
-                avcodec_free_context(&codecCtx_);
-                codecCtx_ = nullptr;
-                av_buffer_unref(&hwDeviceCtx_);
-                hwDeviceCtx_ = nullptr;
-                return false;
-            }
-        }
-        
-        // Set hardware pixel format callback if we have a valid pixel format
-        if (hwPixFmt == AV_PIX_FMT_NONE) {
-            avcodec_free_context(&codecCtx_);
-            codecCtx_ = nullptr;
-            av_buffer_unref(&hwDeviceCtx_);
-            hwDeviceCtx_ = nullptr;
-            return false;
-        }
-
-        // Set hardware pixel format callback
-        // Store hwPixFmt value in opaque (cast value to pointer, not storing a pointer)
-        codecCtx_->opaque = reinterpret_cast<void*>(static_cast<intptr_t>(hwPixFmt));
-        codecCtx_->get_format = [](AVCodecContext* ctx, const AVPixelFormat* pix_fmts) -> AVPixelFormat {
-            // Cast opaque back to the enum value (it's a value stored as pointer, not a pointer)
-            AVPixelFormat hwPixFmt = static_cast<AVPixelFormat>(reinterpret_cast<intptr_t>(ctx->opaque));
-            for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-                if (*p == hwPixFmt) {
-                    return *p;
-                }
-            }
-            return AV_PIX_FMT_NONE;
-        };
-    }
-    // Wrapper decoders (with METHOD_INTERNAL, like cuvid) handle hardware and pixel format
-    // selection internally, but we keep hwDeviceCtx_ for frame transfers
-    
-    // CRITICAL: Request extra surfaces for zero-copy rendering (like mpv does)
-    // The default pool size is determined by the decoder (usually ~17 for H.264)
-    // But with EGL image lifecycle delays (we keep textures/EGL images alive for 1 frame),
-    // we need extra surfaces to prevent pool exhaustion
-    // MPV uses hwdec_extra_frames=6, we use more to account for our architecture
-    codecCtx_->extra_hw_frames = 20;  // Request 20 extra surfaces
-
-    // Open hardware codec
-    ret = avcodec_open2(codecCtx_, hwCodec, nullptr);
-    if (ret < 0) {
-        char errbuf[AV_ERROR_MAX_STRING_SIZE];
-        av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
-        
-        // Provide more helpful error messages for specific codecs
-        if (codecId == AV_CODEC_ID_AV1 && hwDecoderType_ == HardwareDecoder::Type::CUDA) {
-            LOG_WARNING << "AV1 CUDA hardware decoding not supported by this GPU. "
-                        << "AV1 CUDA requires Ada Lovelace architecture (RTX 40 series or newer). "
-                        << "Falling back to software decoding.";
-        } else {
-            LOG_WARNING << "Failed to open hardware decoder " << hwCodecName 
-                        << ": " << errbuf << " (error code: " << ret << "), falling back to software";
-        }
-        
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
-        return false;
-    }
-    
-    LOG_INFO << "Successfully opened hardware decoder: " << hwCodecName 
-             << " (" << HardwareDecoder::getName(hwDecoderType_) << ")";
-
-    // Allocate frames
+    // Allocate frames (shared scratch, kept for the software read path)
     frame_ = av_frame_alloc();
     if (!frame_) {
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
-        return false;
-    }
-
-    hwFrame_ = av_frame_alloc();
-    if (!hwFrame_) {
-        av_frame_free(&frame_);
-        frame_ = nullptr;
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
+        teardownHardwareDevice();
         return false;
     }
 
     frameFMT_ = av_frame_alloc();
     if (!frameFMT_) {
-        av_frame_free(&frame_);
-        frame_ = nullptr;
-        av_frame_free(&hwFrame_);
-        hwFrame_ = nullptr;
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
+        teardownHardwareDevice();
         return false;
     }
 
     useHardwareDecoding_ = true;
-    LOG_INFO << "Using HARDWARE decoding for " << codecName;
+    LOG_INFO << "Hardware device ready for " << codecName
+             << " (" << HardwareDecoder::getName(hwDecoderType_)
+             << ") - decoding runs on the async queue";
     return true;
+}
+
+bool VideoFileInput::probeHardwareCodecOpens(const AVCodec* hwCodec,
+                                             AVCodecParameters* codecParams,
+                                             AVHWDeviceType hwDeviceType) const {
+    if (!hwCodec || !codecParams || !hwDeviceCtx_) {
+        return false;
+    }
+
+    // Which initialization method does this codec want for OUR device type?
+    // Wrapper decoders (METHOD_INTERNAL - cuvid, qsv) manage hardware
+    // themselves and must NOT be handed a hw_device_ctx; hwaccel decoders
+    // (VAAPI, VideoToolbox) require one. Getting this wrong makes the probe
+    // answer a different question than the real open.
+    bool needsHwDeviceCtx = false;
+    for (int n = 0; ; n++) {
+        const AVCodecHWConfig* cfg = avcodec_get_hw_config(hwCodec, n);
+        if (!cfg) {
+            break;
+        }
+        if (cfg->device_type != hwDeviceType) {
+            continue;
+        }
+        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_INTERNAL) {
+            needsHwDeviceCtx = false;
+            break;
+        }
+        if (cfg->methods & (AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX |
+                            AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX)) {
+            needsHwDeviceCtx = true;
+        }
+    }
+
+    AVCodecContext* probeCtx = avcodec_alloc_context3(hwCodec);
+    if (!probeCtx) {
+        return false;
+    }
+
+    probeCtx->codec_type = AVMEDIA_TYPE_VIDEO;
+    probeCtx->codec_id = hwCodec->id;
+
+    if (AVStream* avStream = const_cast<VideoFileInput*>(this)->mediaReader_.getStream(videoStream_)) {
+        probeCtx->pkt_timebase = avStream->time_base;
+    }
+
+    if (avcodec_parameters_to_context(probeCtx, codecParams) < 0) {
+        avcodec_free_context(&probeCtx);
+        return false;
+    }
+
+    probeCtx->hwaccel_flags |= AV_HWACCEL_FLAG_IGNORE_LEVEL;
+    probeCtx->hwaccel_flags |= AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH;
+#ifdef AV_HWACCEL_FLAG_UNSAFE_OUTPUT
+    probeCtx->hwaccel_flags |= AV_HWACCEL_FLAG_UNSAFE_OUTPUT;
+#endif
+
+    if (needsHwDeviceCtx) {
+        probeCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
+        if (!probeCtx->hw_device_ctx) {
+            avcodec_free_context(&probeCtx);
+            return false;
+        }
+    }
+
+    // Deliberately NO extra_hw_frames: this context never decodes, so it must
+    // not size a surface pool. Only the queue's decoder does that.
+    const int ret = avcodec_open2(probeCtx, hwCodec, nullptr);
+
+    // Free it immediately either way - the answer is all we wanted.
+    avcodec_free_context(&probeCtx);
+
+    if (ret < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+        av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
+        LOG_WARNING << "Hardware decoder would not open ("
+                    << avcodec_get_name(codecParams->codec_id) << "): " << errbuf
+                    << " (error code: " << ret << "), falling back to software";
+        return false;
+    }
+
+    return true;
+}
+
+void VideoFileInput::teardownHardwareDevice() {
+    // Undo initializeHardwareDevice() completely before the software tier runs.
+    // Leaving the VAAPI device alive would keep a driver context (and its
+    // display) open on a layer that is about to decode on the CPU, and
+    // openCodec() would allocate frame_/frameFMT_ a second time on top of the
+    // ones allocated here.
+    if (frameFMT_) {
+        av_frame_free(&frameFMT_);
+        frameFMT_ = nullptr;
+    }
+    if (frame_) {
+        av_frame_free(&frame_);
+        frame_ = nullptr;
+    }
+    if (hwDeviceCtx_) {
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+    }
+    useHardwareDecoding_ = false;
+    hwDecoderType_ = HardwareDecoder::Type::NONE;
 }
 
 bool VideoFileInput::openCodec() {
@@ -789,7 +844,6 @@ bool VideoFileInput::openCodec() {
 
     // Get codec context from VideoDecoder
     codecCtx_ = videoDecoder_.getCodecContext();
-    codecCtxAllocated_ = false;  // Managed by VideoDecoder
     
     LOG_INFO << "Successfully opened software decoder: " << codecName;
 
@@ -878,12 +932,13 @@ static int64_t keyframeLookupHelper(LocalFrameIndex* frameIndex, int64_t fcnt,
 bool VideoFileInput::isIntraFrameCodec() const {
     // Check if codec is intra-frame only (all frames are keyframes)
     // These codecs don't need indexing - direct seek mode works perfectly
-    if (!codecCtx_) {
+    AVCodecParameters* codecParams = streamCodecParams();
+    if (!codecParams) {
         return false;
     }
-    
-    AVCodecID codecId = codecCtx_->codec_id;
-    
+
+    AVCodecID codecId = codecParams->codec_id;
+
     switch (codecId) {
         // Professional intra-frame codecs
         case AV_CODEC_ID_PRORES:     // Apple ProRes (all variants)
@@ -972,7 +1027,8 @@ bool VideoFileInput::indexFrames() {
     // Check if codec is intra-frame only (all keyframes)
     // These codecs don't need the expensive 3-pass indexing
     if (isIntraFrameCodec()) {
-        const char* codecName = codecCtx_ ? avcodec_get_name(codecCtx_->codec_id) : "unknown";
+        AVCodecParameters* logParams = streamCodecParams();
+        const char* codecName = logParams ? avcodec_get_name(logParams->codec_id) : "unknown";
         LOG_INFO << "Codec " << codecName << " is intra-frame only (all keyframes), skipping indexing";
         setupDirectSeekMode();
         return scanComplete_;
@@ -1388,6 +1444,23 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         return false;
     }
 
+    // This is the SOFTWARE read path: it decodes through videoDecoder_ and reads
+    // geometry off codecCtx_. A hardware layer has neither after F2 - codecCtx_ is
+    // null and videoDecoder_ was never opened - so the sws property reads below
+    // would dereference null. Refuse instead of crashing.
+    //
+    // Reaching this is a caller bug (LayerPlayback must not fall back to readFrame()
+    // for a GPU_HARDWARE backend), so say so once rather than silently per vsync.
+    if (useHardwareDecoding_ && !codecCtx_) {
+        static bool warnedNoSwContext = false;
+        if (!warnedNoSwContext) {
+            warnedNoSwContext = true;
+            LOG_ERROR << "VideoFileInput::readFrame called on a hardware layer with no "
+                      << "software decode context - refusing (frame " << frameNumber << ")";
+        }
+        return false;
+    }
+
     // QUICK WIN #1: Early return for same frame (xjadeo: if (!force_update && dispFrame == timestamp) return;)
     // If same frame is requested and we have valid decoded data, just re-run color conversion
     // This skips the expensive decode loop but still handles different output buffers
@@ -1416,33 +1489,6 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         }
     }
 
-    // Check frame cache first (async pre-buffered frames)
-    if (!useHardwareDecoding_) {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
-        CachedFrame* cached = findCachedFrame(frameNumber);
-        if (cached && cached->valid) {
-            // Found in cache - copy to output buffer
-            if (!buffer.isValid() || buffer.info().width != cached->buffer.info().width ||
-                buffer.info().height != cached->buffer.info().height) {
-                buffer.allocate(cached->buffer.info());
-            }
-            memcpy(buffer.data(), cached->buffer.data(), 
-                   cached->buffer.info().width * cached->buffer.info().height * 4);
-            currentFrame_ = frameNumber;
-            
-            // Remove from cache (frame consumed)
-            frameCache_.erase(
-                std::remove_if(frameCache_.begin(), frameCache_.end(),
-                    [frameNumber](const CachedFrame& cf) { return cf.frameNumber == frameNumber; }),
-                frameCache_.end());
-            
-            // Start async decode for next frames
-            startAsyncDecode(frameNumber);
-            
-            return true;
-        }
-    }
-
     // Check if we need to seek (optimize for sequential frame access)
     bool needSeek = false;
     if (currentFrame_ < 0 || currentFrame_ != frameNumber) {
@@ -1453,12 +1499,6 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
         } else {
             // Non-sequential frame - need to seek
             needSeek = true;
-            
-            // Clear cache on seek (frames are no longer valid)
-            if (!useHardwareDecoding_) {
-                std::lock_guard<std::mutex> lock(cacheMutex_);
-                frameCache_.clear();
-            }
         }
     }
     
@@ -1712,12 +1752,7 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     }
 
     currentFrame_ = frameNumber;
-    
-    // Start async decode for next frames (software decoding only)
-    if (!useHardwareDecoding_) {
-        startAsyncDecode(frameNumber);
-    }
-    
+
     return true;
 }
 
@@ -1760,22 +1795,29 @@ int64_t VideoFileInput::getCurrentFrame() const {
 }
 
 InputSource::CodecType VideoFileInput::detectCodec() const {
-    if (!codecCtx_) {
+    // Codec identity comes from codecpar, NOT from codecCtx_.
+    // Keying off codecCtx_ meant "SOFTWARE whenever no sync context is open",
+    // which after F2 is every hardware layer - it would route the whole fleet
+    // to CPU_SOFTWARE through getOptimalBackend().
+    AVCodecParameters* codecParams = streamCodecParams();
+    if (!codecParams) {
         return CodecType::SOFTWARE;
     }
+
+    const AVCodecID codecId = codecParams->codec_id;
 
     // Check for HAP codec
     // Note: FFmpeg may use AV_CODEC_ID_HAP for all HAP variants
     // The specific variant (HAP, HAP_Q, HAP_ALPHA) is determined by HAPVideoInput
-    if (codecCtx_->codec_id == AV_CODEC_ID_HAP) {
+    if (codecId == AV_CODEC_ID_HAP) {
         // Check for variant-specific codec IDs if available
         #ifdef AV_CODEC_ID_HAPALPHA
-        if (codecCtx_->codec_id == AV_CODEC_ID_HAPALPHA) {
+        if (codecId == AV_CODEC_ID_HAPALPHA) {
             return CodecType::HAP_ALPHA;
         }
         #endif
         #ifdef AV_CODEC_ID_HAPQ
-        if (codecCtx_->codec_id == AV_CODEC_ID_HAPQ) {
+        if (codecId == AV_CODEC_ID_HAPQ) {
             return CodecType::HAP_Q;
         }
         #endif
@@ -1784,13 +1826,13 @@ InputSource::CodecType VideoFileInput::detectCodec() const {
     }
 
     // Check for hardware-accelerated codecs
-    if (codecCtx_->codec_id == AV_CODEC_ID_H264) {
+    if (codecId == AV_CODEC_ID_H264) {
         return CodecType::H264;
     }
-    if (codecCtx_->codec_id == AV_CODEC_ID_HEVC) {
+    if (codecId == AV_CODEC_ID_HEVC) {
         return CodecType::HEVC;
     }
-    if (codecCtx_->codec_id == AV_CODEC_ID_AV1) {
+    if (codecId == AV_CODEC_ID_AV1) {
         return CodecType::AV1;
     }
 
@@ -1815,30 +1857,20 @@ InputSource::DecodeBackend VideoFileInput::getOptimalBackend() const {
     
     // Hardware-accelerated codecs (H.264, HEVC, AV1) can use GPU hardware decoder
     if (codec == CodecType::H264 || codec == CodecType::HEVC || codec == CodecType::AV1) {
-        // Check if hardware decoder is available for this codec
-        if (!codecCtx_) {
-            // Codec context not yet opened, check if hardware decoder exists
-            AVCodecID codecId = AV_CODEC_ID_NONE;
-            if (codec == CodecType::H264) {
-                codecId = AV_CODEC_ID_H264;
-            } else if (codec == CodecType::HEVC) {
-                codecId = AV_CODEC_ID_HEVC;
-            } else if (codec == CodecType::AV1) {
-                codecId = AV_CODEC_ID_AV1;
-            }
-            
-            if (codecId != AV_CODEC_ID_NONE && HardwareDecoder::isAvailableForCodec(codecId)) {
-                return DecodeBackend::GPU_HARDWARE;
-            }
-        } else {
-            // Codec context is open, check if we're using hardware decoding
-            if (useHardwareDecoding_) {
-                return DecodeBackend::GPU_HARDWARE;
-            }
-        }
-        
-        // Hardware decoder not available, use software
-        return DecodeBackend::CPU_SOFTWARE;
+        // useHardwareDecoding_ is authoritative: it is what open() actually
+        // settled on for THIS file, after the compatibility gates and the
+        // failure ladder had their say.
+        //
+        // The capability probe that used to stand in when codecCtx_ was null is
+        // deliberately gone. It answered "does a hardware decoder exist for this
+        // codec id", which is a property of the machine, not of the file - so a
+        // 10-bit H.264 rejected by the compatibility gate and correctly running
+        // in software would still be reported GPU_HARDWARE, sending the caller
+        // down a path this input cannot serve. And with the sync decoder removed
+        // codecCtx_ is null for every hardware layer, so that branch would now
+        // be the common case rather than the exception.
+        return useHardwareDecoding_ ? DecodeBackend::GPU_HARDWARE
+                                    : DecodeBackend::CPU_SOFTWARE;
     }
     
     // Software codecs use CPU
@@ -1864,267 +1896,79 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
 #endif
 
     // =========================================================================
-    // ASYNC DECODE PATH (mpv-style)
-    // Use async queue if available - provides pre-buffered frames for smooth playback
+    // DECODE PATH (mpv-style async queue - the only decoder on this path)
     // =========================================================================
+    //
+    // Recovery gate. The worker may be closing and reopening the queue right
+    // now, so NOTHING below may touch asyncDecodeQueue_ without holding this.
+    // try_lock, never lock: the render thread must never wait on a recovery
+    // that can run for seconds - it holds its last texture instead.
+    std::unique_lock<std::mutex> gate(queueAccessMutex_, std::try_to_lock);
+    if (!gate.owns_lock()) {
+        return textureBuffer.isValid();
+    }
+
+    // Recovery has been exhausted: stop asking the queue for frames at all.
+    if (health_.load() == Health::declared_failed) {
+        return textureBuffer.isValid();
+    }
+
     if (useAsyncDecode_ && asyncDecodeQueue_) {
         // Set target frame so decode thread knows where we are
         asyncDecodeQueue_->setTargetFrame(frameNumber);
-        
-        // On the very first frame request the decode thread needs time to cold-start
-        // the VAAPI pipeline (~50ms for 4K). Wait longer so we never fall through to
-        // the synchronous path which blocks the render thread for the full decode time.
-        int waitMs = textureBuffer.isValid() ? 5 : 200;
+
+        // Cold start needs the decode thread to spin up the VAAPI pipeline
+        // (~50ms for 4K), but this wait runs ON THE RENDER THREAD and blocks
+        // every other layer's output while it holds. The old 200ms was sized to
+        // avoid falling through to the synchronous decoder; there is nothing to
+        // fall through to now, so wait a fraction of a frame and simply retry on
+        // the next vsync - the queue keeps cold-starting in the background
+        // either way.
+        const int waitMs = textureBuffer.isValid() ? 5 : 20;
         AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, waitMs);
-        
+
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
-            bool success = transferHardwareFrameToGPU(queuedFrame, textureBuffer, true);  // skipSync: already synced by async queue
-            if (success) {
+            if (transferHardwareFrameToGPU(queuedFrame, textureBuffer, true)) {  // skipSync: already synced by async queue
                 return true;
-            } else {
-                LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;
+            }
+            LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;
+            // A failed transfer must not blank a layer that is already showing
+            // something: hold the last good texture and try again next vsync.
+            if (textureBuffer.isValid()) {
+                return true;
             }
         } else {
-            // Frame not ready - this shouldn't happen often if queue is working
-            static int missCount = 0;
-            if (++missCount % 30 == 1) {  // Log every 30 misses
+            // Frame not ready. Throttled per layer - this counter used to be a
+            // function-local static, so one busy layer silenced the others'
+            // misses and attributed its own to whichever layer logged first.
+            if (++queueMissCount_ % 30 == 1) {
                 LOG_WARNING << "Async decode: frame " << frameNumber << " not in queue (oldest="
                            << asyncDecodeQueue_->getOldestFrame() << ", newest="
                            << asyncDecodeQueue_->getNewestFrame() << ")";
             }
-            // Keep showing the last displayed frame instead of falling through
-            // to the sync path, which competes for VAAPI hardware and causes
-            // progressive surface pool exhaustion → eventual freeze.
+            // A miss is also the hook for recovery: if the decode thread has
+            // gone unhealthy behind us, this is where we notice and wake the
+            // worker. It decides whether anything actually needs doing - no
+            // joins, no sleeps and no queue teardown happen on this thread.
+            maybeWakeRecovery(frameNumber);
+
+            // Hold the last displayed frame rather than blanking the layer.
             if (textureBuffer.isValid()) {
                 return true;
             }
-            // Fall through to synchronous path only if no valid texture exists
-        }
-    }
-    
-    // =========================================================================
-    // SYNCHRONOUS DECODE PATH (fallback)
-    // Used when async queue is not available or frame was missed
-    // =========================================================================
-
-    // Seek to frame if needed
-    // Only seek if this frame is far from the last decoded position
-    // For consecutive frames, just decode forward
-    // NOTE: lastDecodedHWFrame_ is a per-instance member (NOT static!)
-    // A static variable here was shared across all layers, causing the rightmost
-    // monitor to skip decoding at loop boundaries (it saw another layer's state).
-    
-    // QUICK WIN #2: Early return for same frame (xjadeo-style)
-    // If same frame is requested, GPU texture already has correct data
-    // This avoids re-decoding when the caller requests the same frame multiple times
-    if (lastDecodedHWFrame_ == frameNumber && textureBuffer.isValid()) {
-        // Same frame already decoded and texture is valid - nothing to do
-        return true;
-    }
-    
-    bool needSeek = (lastDecodedHWFrame_ < 0 ||  // Initial state - must seek
-                     frameNumber < lastDecodedHWFrame_ ||  // Backward seek
-                     frameNumber > lastDecodedHWFrame_ + 30);  // Large forward jump
-    
-    if (needSeek) {
-        // SPECIAL CASE: Frames before first keyframe
-        // If the first keyframe is at frame 30, frames 0-29 exist before it as P/B frames
-        // The index seekpts for these frames points to the keyframe (wrong!)
-        // Instead, seek to beginning of file and decode forward
-        bool isBeforeFirstKeyframe = false;
-        if (frameIndex_ && frameCount_ > 0) {
-            // Find first keyframe
-            int64_t firstKeyframePTS = -1;
-            for (int64_t i = 0; i < frameCount_; i++) {
-                if (frameIndex_[i].key) {
-                    firstKeyframePTS = frameIndex_[i].pkt_pts;
-                    break;
-                }
-            }
-            
-            // Check if requested frame is before first keyframe
-            if (firstKeyframePTS > 0 && frameIndex_[frameNumber].pkt_pts < firstKeyframePTS) {
-                isBeforeFirstKeyframe = true;
-            }
-        }
-        
-        if (isBeforeFirstKeyframe) {
-            // Seek to beginning of file (timestamp 0)
-            if (!mediaReader_.seek(0, videoStream_, AVSEEK_FLAG_BACKWARD)) {
-                LOG_WARNING << "Failed to seek to beginning for frame " << frameNumber;
-                return false;
-            }
-        } else {
-            // Use indexed seek (if available) for frame-accurate positioning
-            // The seek() function uses frameIndex_ to find the exact packet position for this frame
-            if (!seek(frameNumber)) {
-                LOG_WARNING << "Failed to seek to frame " << frameNumber;
-                return false;
-            }
-        }
-        
-        // Flush hardware decoder buffers ONLY after a real seek
-        // This ensures we start fresh after a backward seek or large jump
-        if (codecCtx_) {
-            avcodec_flush_buffers(codecCtx_);
         }
     }
 
-    // Decode frame using hardware decoder
-    AVPacket* packet = av_packet_alloc();
-    if (!packet) {
-        return false;
-    }
-
-    // Hardware decoders (especially h264_cuvid) need multiple packets before producing output
-    // due to B-frame reordering and internal buffering. mpv uses up to 32 packets during probing.
-    // We use a packet count bailout, not an iteration bailout.
-    const int MAX_PACKETS = 128;  // Maximum packets to send before giving up
-    int packetsSent = 0;
-    int errorCount = 0;
-    const int MAX_ERRORS = 10;
-    bool frameFinished = false;
-    
-    // CRITICAL: Calculate target PTS for the frame we want
-    // We need to decode forward until we reach this PTS
-    AVRational timeBase = formatCtx_->streams[videoStream_]->time_base;
-    int64_t targetPTS = av_rescale_q(frameNumber, frameRateQ_, timeBase);
-
-    while (packetsSent < MAX_PACKETS && errorCount < MAX_ERRORS && !frameFinished) {
-        // Try to receive a frame first (in case decoder has buffered frames)
-        int err = avcodec_receive_frame(codecCtx_, hwFrame_);
-        if (err == 0) {
-            int64_t framePTS = hwFrame_->best_effort_timestamp != AV_NOPTS_VALUE 
-                               ? hwFrame_->best_effort_timestamp 
-                               : hwFrame_->pts;
-            
-            // Check if this is the frame we want (within tolerance for floating point frame rates)
-            int64_t ptsDiff = framePTS - targetPTS;
-            int64_t ptsPerFrame = av_rescale_q(1, frameRateQ_, timeBase);
-            
-            if (ptsDiff >= 0 && ptsDiff < ptsPerFrame) {
-                // This is the correct frame (or close enough)
-                frameFinished = true;
-                break;
-            } else if (framePTS < targetPTS) {
-                // This frame is BEFORE the target - discard it and continue decoding
-                av_frame_unref(hwFrame_);
-                // Continue to next frame
-            } else {
-                // framePTS > targetPTS + ptsPerFrame - we've gone too far!
-                // If we're WAY too far (more than 5 frames), something is wrong with the seek
-                // Just use this frame as best effort (better than showing nothing)
-                int64_t framesAhead = ptsDiff / ptsPerFrame;
-                if (framesAhead > 5) {
-                    LOG_ERROR << "Decoded frame PTS " << framePTS << " is " << framesAhead 
-                             << " frames ahead of target " << targetPTS << " - seek may have failed";
-                }
-                frameFinished = true;
-                break;
-            }
-        } else if (err == AVERROR(EAGAIN)) {
-            // Decoder needs more input - this is normal, not an error
-            // Continue to send more packets
-        } else if (err == AVERROR_EOF) {
-            // Decoder flushed, no more frames
-            break;
-        } else {
-            // Actual error
-            ++errorCount;
-            char errbuf[AV_ERROR_MAX_STRING_SIZE];
-            av_strerror(err, errbuf, AV_ERROR_MAX_STRING_SIZE);
-            LOG_VERBOSE << "Hardware decoder receive error: " << errbuf;
-            continue;
-        }
-
-        // Need more input - read and send a packet
-        av_packet_unref(packet);
-        err = mediaReader_.readPacket(packet);
-        if (err < 0) {
-            if (err == AVERROR_EOF) {
-                // End of file - try to flush decoder
-                err = avcodec_send_packet(codecCtx_, nullptr); // nullptr flushes
-                if (err < 0 && err != AVERROR_EOF && err != AVERROR(EAGAIN)) {
-                    ++errorCount;
-                }
-                // After flush, try to receive remaining frames
-                continue;
-            } else {
-                // Read error
-                av_packet_free(&packet);
-                return false;
-            }
-        }
-
-        // Skip non-video packets
-        if (packet->stream_index != videoStream_) {
-            continue;
-        }
-
-        // Send packet to hardware decoder
-        err = avcodec_send_packet(codecCtx_, packet);
-        if (err == 0) {
-            // Successfully sent packet
-            ++packetsSent;
-        } else if (err == AVERROR(EAGAIN)) {
-            // Decoder input buffer full - this shouldn't happen if we're receiving frames properly
-            // Try to receive a frame and retry
-            continue;
-        } else if (err == AVERROR_EOF) {
-            // Decoder already flushed
-            break;
-        } else {
-            // Send error
-            ++errorCount;
-            char errbuf[AV_ERROR_MAX_STRING_SIZE];
-            av_strerror(err, errbuf, AV_ERROR_MAX_STRING_SIZE);
-            LOG_VERBOSE << "Hardware decoder send error: " << errbuf;
-        }
-    }
-    
-    if (!frameFinished) {
-        LOG_VERBOSE << "Hardware decode: no frame after " << packetsSent << " packets";
-    }
-
-    if (!frameFinished) {
-        av_packet_free(&packet);
-        return false;
-    }
-
-    av_packet_free(&packet);
-
-    // Update last decoded position for next call (use ACTUAL decoded PTS, not requested frame)
-    int64_t decodedFrameNum = av_rescale_q(
-        hwFrame_->best_effort_timestamp != AV_NOPTS_VALUE ? hwFrame_->best_effort_timestamp : hwFrame_->pts,
-        timeBase, frameRateQ_
-    );
-    lastDecodedHWFrame_ = decodedFrameNum;
-
-    // Lazy initialization of VaapiInterop (needs GL context which may not be available at open time)
-#ifdef HAVE_VAAPI_INTEROP
-    if (!vaapiInterop_ && displayBackend_ && displayBackend_->hasVaapiSupport() && 
-        hwDecoderType_ == HardwareDecoder::Type::VAAPI) {
-        vaapiInterop_ = std::make_unique<VaapiInterop>();
-        if (!vaapiInterop_->init(displayBackend_)) {
-            LOG_WARNING << "Failed to initialize per-instance VaapiInterop, falling back to CPU copy";
-            vaapiInterop_.reset();
-        }
-    }
-#endif
-
-    // Transfer hardware frame to GPU texture
-    // MPV-style: VaapiInterop will ref the frame, and we'll unref our copy immediately after transfer
-    bool success = transferHardwareFrameToGPU(hwFrame_, textureBuffer);
-    
-    // CRITICAL: Unref hwFrame_ immediately after transfer (MPV pattern)
-    // VaapiInterop has its own reference (currentFrame_) which it will release after rendering
-    // If we don't unref here, we hold 2 references to the surface (ours + VaapiInterop's)
-    // This exhausts the VAAPI surface pool and causes the 30-frame freeze!
-    av_frame_unref(hwFrame_);
-    
-    return success;
+    // No synchronous fallback exists any more. The queue is the only decoder
+    // on this path; if it had nothing for us and there is no texture to hold,
+    // the honest answer is "no frame this vsync".
+    //
+    // What used to be here decoded the frame inline on the render thread,
+    // through a second hardware decoder competing for the same VAAPI pool -
+    // which is what progressively exhausted it. See ClickUp 869en65tm.
+    return false;
 }
 
 bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync) {
@@ -2392,12 +2236,6 @@ void VideoFileInput::cleanup() {
     swsCtxHeight_ = 0;
     swsCtxFormat_ = AV_PIX_FMT_NONE;
 
-    // Free hardware frames (must use av_frame_free for frames allocated with av_frame_alloc)
-    if (hwFrame_) {
-        av_frame_free(&hwFrame_);
-        hwFrame_ = nullptr;
-    }
-
     // Free frames (must use av_frame_free for frames allocated with av_frame_alloc)
     if (frameFMT_) {
         av_frame_free(&frameFMT_);
@@ -2414,20 +2252,11 @@ void VideoFileInput::cleanup() {
         hwDeviceCtx_ = nullptr;
     }
 
-    // Close video decoder (for software decoding)
-    if (!useHardwareDecoding_) {
-        videoDecoder_.close();
-        codecCtx_ = nullptr;
-    } else {
-        // For hardware decoding, we need to manually close
-    if (codecCtx_) {
-        avcodec_close(codecCtx_);
-        if (codecCtxAllocated_) {
-        avcodec_free_context(&codecCtx_);
-        }
-        codecCtx_ = nullptr;
-        }
-    }
+    // Close the software decoder. There is no hardware branch any more: the
+    // hardware path opens no codec context of its own, so codecCtx_ is either
+    // videoDecoder_'s (owned and freed by it) or null.
+    videoDecoder_.close();
+    codecCtx_ = nullptr;
 
     // Close media reader (closes format context)
     mediaReader_.close();
@@ -2449,344 +2278,272 @@ void VideoFileInput::cleanup() {
 }
 
 // ============================================================================
-// Async Frame Pre-buffering (like mpv's decode-ahead)
+// Decode queue control and health
 // ============================================================================
 
-void VideoFileInput::stopAsyncDecode() {
-    if (decodeThread_) {
-        decodeThreadStop_ = true;
-        decodeCond_.notify_all();
-        if (decodeThread_->joinable()) {
-            decodeThread_->join();
-        }
-        decodeThread_.reset();
-        decodeThreadRunning_ = false;
-        decodeThreadStop_ = false;
-    }
-}
-
-void VideoFileInput::startAsyncDecode(int64_t startFrame) {
-    // DISABLED: Async decode has race conditions with shared FFmpeg objects
-    // The decode thread and main thread share frame_, codecCtx_, swsCtx_, etc.
-    // without proper synchronization, causing corrupted frames.
-    // 
-    // TODO: SMOOTHNESS FIX #2 - Implement proper async decode like mpv
-    // The fix requires:
-    //   1. Create separate AVCodecContext for decode thread (or use mutex)
-    //   2. Separate AVFrame and SwsContext per thread
-    //   3. Producer-consumer queue: decode thread produces, render thread consumes
-    //   4. Pre-buffer 2-4 frames ahead of current playback position
-    // 
-    // mpv's approach in video/decode/vd_lavc.c:
-    //   - Uses mp_dispatch for thread-safe decode requests
-    //   - Maintains internal frame queue in filters/f_decoder_wrapper.c
-    //   - Decodes ahead based on display timing requirements
-    (void)startFrame;
-    return;
-    
-#if 0  // Original implementation - disabled due to race conditions
-    // Only use async decode for software decoding (hardware decode is already fast)
-    if (useHardwareDecoding_) {
-        return;
-    }
-    
-    // Start decode thread if not running
-    if (!decodeThread_) {
-        decodeThreadStop_ = false;
-        decodeThreadRunning_ = true;
-        decodeTargetFrame_ = startFrame + 1;  // Start decoding next frame
-        decodeThread_ = std::make_unique<std::thread>(&VideoFileInput::decodeThreadFunc, this);
-    } else {
-        // Update target and wake thread
-        decodeTargetFrame_ = startFrame + 1;
-        decodeCond_.notify_one();
-    }
-#endif
-}
-
 void VideoFileInput::setLoopMode(bool loop, int64_t totalFrames) {
-    if (asyncDecodeQueue_) {
+    // Mirrored so a recovery reopen can re-assert it: the queue's open()
+    // deliberately clears every latched playback state, loop mode included.
+    loopModeActive_ = loop;
+    loopTotalFrames_ = totalFrames;
+
+    // try_lock, not lock: this runs on the OSC/render path, and a recovery can
+    // hold the gate for seconds. Nothing is lost by skipping - the worker
+    // re-asserts loop mode from the mirrored values when it reopens.
+    std::unique_lock<std::mutex> gate(queueAccessMutex_, std::try_to_lock);
+    if (gate.owns_lock() && asyncDecodeQueue_) {
         asyncDecodeQueue_->setLoopMode(loop, totalFrames);
     }
 }
 
-VideoFileInput::CachedFrame* VideoFileInput::findCachedFrame(int64_t frameNumber) {
-    for (auto& cf : frameCache_) {
-        if (cf.frameNumber == frameNumber && cf.valid) {
-            return &cf;
-        }
+void VideoFileInput::startRecoveryWorker() {
+    if (recoveryThread_) {
+        return;
     }
-    return nullptr;
+    recoveryStop_ = false;
+    recoveryWake_ = false;
+    recoveryThread_ = std::make_unique<std::thread>(&VideoFileInput::recoveryWorkerFunc, this);
 }
 
-void VideoFileInput::decodeThreadFunc() {
-    LOG_INFO << "Async decode thread started";
-    
-    while (!decodeThreadStop_) {
-        int64_t targetFrame = decodeTargetFrame_.load();
-        
-        // Check if we should decode this frame
-        bool shouldDecode = false;
+void VideoFileInput::stopRecoveryWorker() {
+    if (!recoveryThread_) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(recoveryWakeMutex_);
+        recoveryStop_ = true;
+        recoveryWake_ = true;
+    }
+    recoveryWakeCond_.notify_all();
+
+    // In the common case the worker is parked and this returns at once.
+    //
+    // DOCUMENTED LIMITATION: an unload that lands DURING an active recovery
+    // joins here on the render/main thread, and the worker may itself be inside
+    // the queue's close(), which joins a decode thread that can be sitting in
+    // vaSyncSurface. On a healthy GPU that is milliseconds. On a hung VCN ring
+    // it is not bounded - but on a hung ring Mesa is already killing this
+    // process, which is the failure this whole phase exists to make visible.
+    if (recoveryThread_->joinable()) {
+        recoveryThread_->join();
+    }
+    recoveryThread_.reset();
+    recoveryActive_ = false;
+}
+
+void VideoFileInput::maybeWakeRecovery(int64_t currentFrame) {
+    if (!asyncDecodeQueue_ || asyncDecodeQueue_->isHealthy()) {
+        return;
+    }
+    // Never wake the worker again once recovery has been exhausted, or the miss
+    // path spawns a recovery attempt every vsync forever.
+    if (health_.load() == Health::declared_failed) {
+        return;
+    }
+    if (recoveryActive_.load()) {
+        return;
+    }
+    recoveryTargetFrame_ = currentFrame;
+    {
+        std::lock_guard<std::mutex> lock(recoveryWakeMutex_);
+        recoveryWake_ = true;
+    }
+    recoveryWakeCond_.notify_one();
+}
+
+void VideoFileInput::recoveryWorkerFunc() {
+    // Every reopen uses the full pool. The ladder used to drop to a reduced
+    // pool on tries 2-3, on the theory that a too-large pool was the fault;
+    // measurement retired it. Pool exhaustion produces no decode error on any
+    // platform we run: amdgpu evicts to GTT rather than failing an allocation
+    // (measured at 12 concurrent 4K layers) and escalates straight to the ring
+    // hang, while the Intel iGPUs are UMA and have no carve-out to exhaust at
+    // all. So those rungs could only ever run for a fault class they could not
+    // help, and they were unreachable anyway - try 1 always succeeds for the
+    // one class that does reach recovery. The full ladder is preserved at
+    // origin/feat/f2-sync-decoder-removal @ 3ed81c0 should a platform ever turn
+    // up whose driver answers pool pressure with a decode-path error.
+    const int backoffsMs[] = { 1000, 2000, 4000 };
+    const int attemptCount = static_cast<int>(sizeof(backoffsMs) / sizeof(backoffsMs[0]));
+
+    while (true) {
         {
-            std::lock_guard<std::mutex> lock(cacheMutex_);
-            // Only decode if frame not already cached and cache not full
-            if (frameCache_.size() < FRAME_CACHE_SIZE && !findCachedFrame(targetFrame)) {
-                shouldDecode = true;
-            }
-        }
-        
-        if (shouldDecode && targetFrame >= 0 && targetFrame < frameCount_) {
-            // Decode the frame
-            CachedFrame cf;
-            cf.frameNumber = targetFrame;
-            cf.valid = false;
-            
-            if (decodeFrameInternal(targetFrame, cf.buffer)) {
-                cf.valid = true;
-                
-                // Add to cache
-                std::lock_guard<std::mutex> lock(cacheMutex_);
-                // Remove old frames if cache is full
-                while (frameCache_.size() >= FRAME_CACHE_SIZE) {
-                    frameCache_.pop_front();
-                }
-                frameCache_.push_back(std::move(cf));
-                
-                // Move to next frame
-                decodeTargetFrame_ = targetFrame + 1;
-            } else {
-                // Decode failed, wait a bit and try again
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        } else {
-            // Nothing to decode, wait for signal
-            std::unique_lock<std::mutex> lock(cacheMutex_);
-            decodeCond_.wait_for(lock, std::chrono::milliseconds(10), [this] {
-                return decodeThreadStop_.load();
+            std::unique_lock<std::mutex> lock(recoveryWakeMutex_);
+            recoveryWakeCond_.wait(lock, [this] {
+                return recoveryStop_.load() || recoveryWake_.load();
             });
+            recoveryWake_ = false;
         }
-    }
-    
-    LOG_INFO << "Async decode thread stopped";
-}
-
-bool VideoFileInput::decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffer) {
-    // This is a copy of the decoding logic from readFrame, but without cache check
-    // Used by the async decode thread
-    
-    if (!isReady()) {
-        return false;
-    }
-
-    // Check if we need to seek
-    bool needSeek = false;
-    if (currentFrame_ < 0 || currentFrame_ != frameNumber) {
-        if (currentFrame_ >= 0 && frameNumber == currentFrame_ + 1) {
-            needSeek = false;  // Sequential
-        } else {
-            needSeek = true;
+        if (recoveryStop_.load()) {
+            return;
         }
-    }
-    
-    if (needSeek) {
-        if (!seek(frameNumber)) {
-            return false;
+        if (!asyncDecodeQueue_ || asyncDecodeQueue_->isHealthy()) {
+            continue;
         }
-    }
-
-    // Decode frame
-    AVPacket* packet = av_packet_alloc();
-    if (!packet) {
-        return false;
-    }
-
-    // Get target timestamp
-    int64_t targetTimestamp = -1;
-    if (frameIndex_ && frameNumber >= 0 && frameNumber < frameCount_) {
-        if (frameIndex_[frameNumber].frame_pts >= 0) {
-            targetTimestamp = frameIndex_[frameNumber].frame_pts;
-        } else {
-            targetTimestamp = frameIndex_[frameNumber].timestamp;
+        if (health_.load() == Health::declared_failed) {
+            continue;
         }
-    }
 
-    int64_t oneFrame = 1;
-    if (frameIndex_ && frameNumber > 0 && frameNumber < frameCount_) {
-        if (frameIndex_[frameNumber-1].timestamp >= 0 && 
-            frameIndex_[frameNumber].timestamp >= 0) {
-            oneFrame = frameIndex_[frameNumber].timestamp - frameIndex_[frameNumber-1].timestamp;
-            if (oneFrame <= 0) oneFrame = 1;
+        recoveryActive_ = true;
+
+        // Everything below runs behind the gate: the render thread try_locks
+        // this same mutex and holds its last texture while we own it.
+        std::lock_guard<std::mutex> gate(queueAccessMutex_);
+
+        // Decide the episode BEFORE announcing one. open() resets the queue's
+        // frame counter, so at this point it already reads "good frames since
+        // the reopen that ended the last episode" - exactly the policy's decay
+        // input, with no snapshot state of our own.
+        const RecoveryPolicy::Decision decision =
+            recoveryPolicy_.onWake(asyncDecodeQueue_->framesDecoded());
+
+        if (decision == RecoveryPolicy::Decision::declare) {
+            // Cap reached. Declare WITHOUT tearing down or reopening: rebuilding
+            // one more VAAPI context here would be the very churn the cap exists
+            // to stop. Then silence this queue's error log - it will keep
+            // erroring forever and the counters keep counting, but the journal
+            // must be left with one clean story, not 17k lines a day.
+            setHealth(Health::declared_failed,
+                      "recovery episode cap reached");
+            asyncDecodeQueue_->quiesceErrorLog();
+            LOG_ERROR << "VideoFileInput: recovery episode cap reached for "
+                      << currentFile_
+                      << " - layer FAILED permanently, holding last frame; "
+                         "reload the cue to retry";
+            recoveryActive_ = false;
+            continue;
         }
-    }
-    const int64_t prefuzz = oneFrame > 10 ? 1 : 0;
-    
-    int bailout = 64;
-    int maxPackets = 500;
-    bool frameFinished = false;
-    int64_t bestPTS = AV_NOPTS_VALUE;
-    AVFrame* bestFrame = av_frame_alloc();
 
-    while (bailout > 0 && maxPackets > 0 && !decodeThreadStop_) {
-        av_packet_unref(packet);
-        int err = mediaReader_.readPacket(packet);
-        if (err < 0) {
-            if (err == AVERROR_EOF) {
-                videoDecoder_.sendPacket(nullptr);
-                while ((err = videoDecoder_.receiveFrame(frame_)) == 0) {
-                    int64_t pts = parsePTSFromFrame(frame_);
-                    if (pts == AV_NOPTS_VALUE) continue;
-                    lastDecodedPTS_ = pts;
-                    
-                    if (targetTimestamp < 0) {
-                        frameFinished = true;
-                        break;
-                    }
-                    if (pts >= targetTimestamp - prefuzz && pts < targetTimestamp + oneFrame * 2) {
-                        int64_t ptsDiff = (pts >= targetTimestamp) ? (pts - targetTimestamp) : (targetTimestamp - pts);
-                        int64_t bestDiff = (bestPTS != AV_NOPTS_VALUE) ? 
-                            ((bestPTS >= targetTimestamp) ? (bestPTS - targetTimestamp) : (targetTimestamp - bestPTS)) : INT64_MAX;
-                        if (bestPTS == AV_NOPTS_VALUE || ptsDiff < bestDiff) {
-                            bestPTS = pts;
-                            av_frame_unref(bestFrame);
-                            av_frame_ref(bestFrame, frame_);
-                        }
-                        if (pts < targetTimestamp + oneFrame) {
-                            frameFinished = true;
-                            break;
-                        }
-                    }
-                }
-                if (frameFinished) break;
-                if (bestPTS != AV_NOPTS_VALUE) {
-                    av_frame_unref(frame_);
-                    av_frame_move_ref(frame_, bestFrame);
-                    frameFinished = true;
-                    break;
-                }
-                --bailout;
-                continue;
-            } else {
-                av_frame_free(&bestFrame);
-                av_packet_free(&packet);
-                return false;
+        const int64_t resumeFrame = recoveryTargetFrame_.load();
+        // Announced only now, after the decay/cap check: fired unconditionally
+        // at the top of the wake it would also print on the declaring wake,
+        // promising a recovery that never runs.
+        LOG_ERROR << "VideoFileInput: decode queue unhealthy for " << currentFile_
+                  << " (" << asyncDecodeQueue_->consecutiveErrors()
+                  << " consecutive errors) - attempting recovery at frame " << resumeFrame;
+
+        bool recovered = false;
+        for (int i = 0; i < attemptCount && !recoveryStop_.load(); ++i) {
+            // Wall-clock backoff, honoring the stop flag so an unload does not
+            // wait out the full ladder.
+            {
+                std::unique_lock<std::mutex> lock(recoveryWakeMutex_);
+                recoveryWakeCond_.wait_for(lock,
+                    std::chrono::milliseconds(backoffsMs[i]),
+                    [this] { return recoveryStop_.load(); });
             }
-        }
-
-        if (packet->stream_index != videoStream_) {
-            continue;
-        }
-        
-        --maxPackets;
-
-        err = videoDecoder_.sendPacket(packet);
-        if (err < 0 && err != AVERROR(EAGAIN)) {
-            --bailout;
-            continue;
-        }
-
-        while ((err = videoDecoder_.receiveFrame(frame_)) == 0) {
-            int64_t pts = parsePTSFromFrame(frame_);
-            if (pts == AV_NOPTS_VALUE) continue;
-            
-            lastDecodedPTS_ = pts;
-
-            if (targetTimestamp < 0) {
-                frameFinished = true;
+            if (recoveryStop_.load()) {
                 break;
             }
 
-            // Track the closest frame to target (for B-frame reordering)
-            if (pts >= targetTimestamp - prefuzz && pts < targetTimestamp + oneFrame * 2) {
-                int64_t ptsDiff = (pts >= targetTimestamp) ? (pts - targetTimestamp) : (targetTimestamp - pts);
-                int64_t bestDiff = (bestPTS != AV_NOPTS_VALUE) ? 
-                    ((bestPTS >= targetTimestamp) ? (bestPTS - targetTimestamp) : (targetTimestamp - bestPTS)) : INT64_MAX;
-                if (bestPTS == AV_NOPTS_VALUE || ptsDiff < bestDiff) {
-                    bestPTS = pts;
-                    av_frame_unref(bestFrame);
-                    av_frame_ref(bestFrame, frame_);
-                }
-                
-                // Exact match
-                if (pts >= targetTimestamp && pts < targetTimestamp + oneFrame) {
-                    frameFinished = true;
-                    break;
-                }
+            // Release the frame we are still holding a VAAPI reference to
+            // before tearing down the pool it belongs to. This is a plain
+            // av_frame_unref - no GL work - which is only safe off the render
+            // thread because the gate is keeping that thread out of the
+            // EGL import meanwhile.
+#ifdef HAVE_VAAPI_INTEROP
+            if (vaapiInterop_) {
+                vaapiInterop_->releaseCurrentFrame();
             }
-            
-            // Only count as bailout if we've gone past target
-            if (pts > targetTimestamp + oneFrame) {
-                --bailout;
-                if (bestPTS != AV_NOPTS_VALUE) {
-                    av_frame_unref(frame_);
-                    av_frame_move_ref(frame_, bestFrame);
-                    frameFinished = true;
-                    break;
-                }
+#endif
+
+            asyncDecodeQueue_->close();
+
+            const bool ok = asyncDecodeQueue_->open(currentFile_, hwDeviceCtx_,
+                                                    AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,
+                                                    AsyncDecodeQueue::MAX_QUEUE_SIZE);
+            if (!ok) {
+                LOG_WARNING << "VideoFileInput: recovery attempt " << (i + 1) << "/"
+                            << attemptCount << " failed to reopen the decode queue for "
+                            << currentFile_;
+                continue;
             }
+
+            // open() clears every latched playback state, so re-assert ours.
+            asyncDecodeQueue_->setLoopMode(loopModeActive_.load(), loopTotalFrames_.load());
+            asyncDecodeQueue_->setTargetFrame(resumeFrame);
+
+            recovered = true;
+            setHealth(Health::ok, std::string());
+            LOG_INFO << "VideoFileInput: decode queue recovered for " << currentFile_
+                     << " (episode " << recoveryPolicy_.episodeNumber() << "/"
+                     << RecoveryPolicy::RECOVERY_EPISODE_CAP
+                     << " of this fault run)";
+            break;
         }
-        
-        if (frameFinished) break;
-        
-        if (err != AVERROR(EAGAIN) && err < 0) {
-            --bailout;
+
+        if (!recovered && !recoveryStop_.load()) {
+            // Every reopen in this episode failed - the file itself is gone or
+            // unreadable, not merely damaged. Same end state as the cap, and
+            // deliberately the same "FAILED permanently" token so one detector
+            // (and one operator grep) catches both ways of getting here.
+            setHealth(Health::declared_failed,
+                      "decode queue could not be recovered");
+            asyncDecodeQueue_->quiesceErrorLog();
+            LOG_ERROR << "VideoFileInput: decode queue reopens exhausted for "
+                      << currentFile_
+                      << " - layer FAILED permanently, holding last frame; "
+                         "reload the cue to retry";
+        }
+
+        recoveryActive_ = false;
+    }
+}
+
+void VideoFileInput::setHealth(Health health, const std::string& reason) {
+    health_ = health;
+    std::lock_guard<std::mutex> lock(healthReasonMutex_);
+    healthReason_ = reason;
+}
+
+InputSource::Health VideoFileInput::getHealth() const {
+    const Health h = health_.load();
+    if (h != Health::ok) {
+        // Never mask a worse state. The refinement below only ever upgrades
+        // ok -> sw_fallback; declared_failed and load_failed always win.
+        return h;
+    }
+
+    // Defect 6(b): open() decided "hardware" before any frame existed, so a
+    // clip that opens on VAAPI and then decodes on the CPU reports ok. The
+    // queue knows better by its first frame; ask it.
+    //
+    // ⚠️ try_lock, NEVER lock. The rule for this member is stated at the render
+    // path below ("NOTHING may touch asyncDecodeQueue_ without holding this"),
+    // and recoveryWorkerFunc holds this same mutex across its entire backoff
+    // ladder - seconds. A blocking lock here would stall whatever thread asked,
+    // which today is the one loop that also renders. Failing the try_lock means
+    // recovery owns the queue, i.e. the layer is already in a fault that
+    // health_ reports: the un-refined answer is the right one anyway.
+    std::unique_lock<std::mutex> gate(queueAccessMutex_, std::try_to_lock);
+    if (gate.owns_lock() && asyncDecodeQueue_ &&
+        asyncDecodeQueue_->softDespiteHardwareClaim()) {
+        return Health::sw_fallback;
+    }
+    return h;
+}
+
+std::string VideoFileInput::getHealthReason() const {
+    // Same derivation as getHealth(), same gate, same never-block rule: a
+    // sw_fallback reached by derivation has no stored reason (the tier-1 path
+    // stored an empty one), so without this it would answer with silence.
+    {
+        std::unique_lock<std::mutex> gate(queueAccessMutex_, std::try_to_lock);
+        if (gate.owns_lock() && health_.load() == Health::ok && asyncDecodeQueue_ &&
+            asyncDecodeQueue_->softDespiteHardwareClaim()) {
+            const char* fmt = av_get_pix_fmt_name(
+                (AVPixelFormat)asyncDecodeQueue_->firstDecodedPixFmt());
+            return std::string("opened with hardware acceleration but frames "
+                               "decode in software (")
+                 + (fmt ? fmt : "unknown pixel format")
+                 + ") - this layer is on the CPU";
         }
     }
-
-    if (!frameFinished && bestPTS != AV_NOPTS_VALUE) {
-        av_frame_unref(frame_);
-        av_frame_move_ref(frame_, bestFrame);
-        frameFinished = true;
-    }
-    
-    av_frame_free(&bestFrame);
-    av_packet_free(&packet);
-
-    if (!frameFinished) {
-        return false;
-    }
-
-    // Allocate buffer if needed
-    if (!buffer.isValid() || buffer.info().width != frameInfo_.width || 
-        buffer.info().height != frameInfo_.height) {
-        if (!buffer.allocate(frameInfo_)) {
-            return false;
-        }
-    }
-
-    // Convert frame format
-    if (!swsCtx_ || swsCtxWidth_ != frameInfo_.width || swsCtxHeight_ != frameInfo_.height) {
-        if (swsCtx_) {
-            sws_freeContext(swsCtx_);
-            swsCtx_ = nullptr;
-        }
-        
-        swsCtx_ = sws_getContext(
-            codecCtx_->width, codecCtx_->height, codecCtx_->pix_fmt,
-            frameInfo_.width, frameInfo_.height, AV_PIX_FMT_BGRA,
-            SWS_BILINEAR, nullptr, nullptr, nullptr
-        );
-        if (!swsCtx_) {
-            return false;
-        }
-        swsCtxWidth_ = frameInfo_.width;
-        swsCtxHeight_ = frameInfo_.height;
-    }
-
-    int bgraStride = frameInfo_.width * 4;
-    uint8_t* dstData[4] = {buffer.data(), nullptr, nullptr, nullptr};
-    int dstLinesize[4] = {bgraStride, 0, 0, 0};
-    
-    int result = sws_scale(swsCtx_,
-              (const uint8_t* const*)frame_->data, frame_->linesize,
-              0, codecCtx_->height,
-              dstData, dstLinesize);
-    
-    if (result <= 0) {
-        return false;
-    }
-
-    currentFrame_ = frameNumber;
-    return true;
+    // Lock order: the derived branch returns BEFORE taking healthReasonMutex_,
+    // so the two mutexes are never held at once and no order needs
+    // establishing. Keep it that way.
+    std::lock_guard<std::mutex> lock(healthReasonMutex_);
+    return healthReason_;
 }
 
 // ---------------------------------------------------------------------------

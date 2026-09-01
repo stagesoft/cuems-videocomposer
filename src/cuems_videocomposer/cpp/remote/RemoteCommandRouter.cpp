@@ -1212,7 +1212,21 @@ bool RemoteCommandRouter::handleLayerMtcFollow(VideoLayer* layer, const std::vec
     // or "0" / empty string to disable.
     const std::string& val = args[0];
     bool enabled = !val.empty() && val != "0";
-    layer->setMtcFollow(enabled);
+
+    // This is the moment a loaded layer becomes a decoding one, so it is where
+    // the hang guard gets its only say. A refusal leaves the layer loaded and
+    // held and touches nothing that is already playing - the show continues
+    // one layer short, rather than the ring wedging and taking every output
+    // with it.
+    const bool admitted = layer->setMtcFollow(enabled);
+
+    if (!admitted && layerManager_) {
+        // Record it where F9 will look. The refusal is already in the journal;
+        // this is what survives for the health ping to answer with.
+        layerManager_->recordLoadOutcome(
+            layer->getCueId(), LoadOutcome::Result::refused,
+            "hang guard: cap on concurrent 4K-class decode sessions reached");
+    }
     return true;
 }
 

@@ -121,6 +121,7 @@ private:
     // Shared decoder flags (NOT derived from use_count — explicit)
     bool isSharedLayer_ = false;   // true when sharing an InputSource with other layers
     bool isDecodeDriver_ = false;  // true when this layer drives decode (calls readFrame/readFrameToTexture)
+    int hwMissLogCount_ = 0;       // per-layer throttle for hardware queue-miss warnings
     
     // Playback state
     bool playing_;
@@ -151,6 +152,12 @@ private:
     
     // Internal methods
     void updateFromSyncSource();
+
+    /**
+     * True when this layer's input decodes on the GPU, so a failed load means
+     * "the decode queue had nothing this vsync" rather than "decoding failed".
+     */
+    bool isHardwareDecodeLayer() const;
     bool loadFrame(int64_t frameNumber);
     bool copyFromDriverCache(int64_t frameNumber);  // For shared secondary layers
 };

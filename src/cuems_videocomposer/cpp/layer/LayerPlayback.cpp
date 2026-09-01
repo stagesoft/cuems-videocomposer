@@ -20,6 +20,7 @@
  */
 
 #include "LayerPlayback.h"
+#include "../guard/SaturationSignals.h"
 #include "../utils/Logger.h"
 #include "../utils/SMPTEUtils.h"
 #include "../sync/SyncSource.h"
@@ -325,11 +326,26 @@ void LayerPlayback::updateFromSyncSource() {
                 if (lastVideoFrame_ >= 0 && vsyncsSinceLast > 4) {
                     LOG_WARNING << "Frame pacing: frame " << lastVideoFrame_ << " held for " 
                                 << vsyncsSinceLast << " vsyncs (possible stall)";
+                    signals::frameHeldLong();
                 }
                 lastFrameChangeVsync_ = vsyncCount_;
                 lastVideoFrame_ = adjustedFrame;
             } else if (isSharedLayer_ && !isDecodeDriver_) {
                 // Shared secondary: cache not ready yet — skip seek (would corrupt driver's decoder)
+                signals::frameMissed();
+            } else if (isHardwareDecodeLayer()) {
+                // Hardware layer: a failed load is a decode-queue miss, not a
+                // lost position. Seeking would flush the queue and restart the
+                // decoder - turning a one-vsync miss into a real stall, on every
+                // miss. Hold and retry next vsync.
+                //
+                // This branch is the saturation signal that matters. The pacing
+                // warning above only fires when a frame *did* arrive, so a
+                // wedged layer never reaches it and would report nothing at all;
+                // a frame wanted and not delivered is counted here instead. It
+                // is also GPU-agnostic, which is what makes the warnings work
+                // on the Intel nodes, where decode occupancy is never reported.
+                signals::frameMissed();
             } else {
                 // If load fails, try seeking first (helps with keyframe-based codecs)
                 LOG_WARNING << "Failed to load frame " << adjustedFrame << ", trying seek first";
@@ -361,6 +377,12 @@ void LayerPlayback::updateFromSyncSource() {
             }
         }
     }
+}
+
+bool LayerPlayback::isHardwareDecodeLayer() const {
+    VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(inputSource_.get());
+    return videoInput &&
+           videoInput->getOptimalBackend() == InputSource::DecodeBackend::GPU_HARDWARE;
 }
 
 bool LayerPlayback::loadFrame(int64_t frameNumber) {
@@ -434,17 +456,24 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
                 frameOnGPU_ = true;
                 success = true;
             } else {
-                // If hardware decoding fails, fall through to software decoding
-                LOG_WARNING << "Hardware decoding failed for frame " << frameNumber << ", falling back to software";
+                // A false here is NOT "hardware is broken, try software". On the
+                // hardware path it means the decode queue had no frame this
+                // vsync and there was no texture to hold - a transient miss,
+                // normal during cold start. Falling back to readFrame() would
+                // spin up a second, software decoder on the same file for a
+                // frame the queue is about to deliver anyway, on the render
+                // thread, every vsync it misses.
+                //
+                // Report nothing this vsync and let the next one retry.
+                if (++hwMissLogCount_ % 120 == 1) {
+                    LOG_WARNING << "Hardware decode returned no frame " << frameNumber
+                                << " (queue miss); holding";
+                }
             }
-        }
-
-        if (!success) {
+        } else if (videoInput->readFrame(frameNumber, cpuFrameBuffer_)) {
             // Software decoding: use CPU frame buffer
-            if (videoInput->readFrame(frameNumber, cpuFrameBuffer_)) {
-                frameOnGPU_ = false;
-                success = true;
-            }
+            frameOnGPU_ = false;
+            success = true;
         }
     } else {
         // Other input sources: use CPU frame buffer (default)

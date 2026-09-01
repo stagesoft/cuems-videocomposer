@@ -39,6 +39,7 @@
 #include "../OutputInfo.h"
 #include "../MultiOutputRenderer.h"  // For OutputSurface base class
 #include "PresentationTiming.h"
+#include <chrono>
 #include <gbm.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -153,6 +154,67 @@ public:
      * Check if a flip is pending
      */
     bool isFlipPending() const override { return flipPending_; }
+
+    /**
+     * Can this surface take a new frame in this iteration?
+     *
+     * Per-surface pacing asks this instead of blocking on every surface's
+     * flip. A surface that produces flip events is ready as soon as its last
+     * one landed and GBM still has a spare buffer. A surface that does NOT
+     * produce them -- before the first modeset, during the Intel warmup, or
+     * after the SetCrtc strikeout -- would otherwise read as permanently
+     * ready and spin the render loop, so it is gated on its own vsync
+     * interval instead.
+     */
+    bool isReadyToPresent(std::chrono::steady_clock::time_point now) const;
+
+    /**
+     * When the time gate above will next let this surface through, or
+     * time_point::max() if it is not time-gated. Used to size the wait.
+     */
+    std::chrono::steady_clock::time_point timeGateDeadline() const;
+
+    /**
+     * Abandon a flip whose completion event never arrived, so one dead CRTC
+     * cannot freeze the outputs that share its refresh rate. Releases the
+     * buffer the event would have released -- otherwise it stays locked
+     * forever and the next flip overwrites the last pointer to it.
+     *
+     * @return true if a stuck flip was abandoned.
+     */
+    bool expireStuckFlip(std::chrono::steady_clock::time_point now);
+
+    /**
+     * True if this surface can go into an atomic request (plane resolved with
+     * its properties loaded, and the mode already set). Checked BEFORE
+     * prepareAtomicFlip(), which locks a GBM buffer.
+     */
+    bool isAtomicEligible() const;
+
+    /**
+     * Vsync interval actually in force, in nanoseconds. Comes from
+     * PresentationTiming, so it carries the same 60Hz fallback init() applies
+     * when the connector reports no usable rate.
+     */
+    int64_t vsyncIntervalNs() const;
+
+    /** Refresh rate in force, derived from vsyncIntervalNs(). */
+    double effectiveRefreshHz() const;
+
+    /**
+     * Block until ANY CRTC on this DRM fd reports a completed flip, then
+     * dispatch it. This is the frame clock for per-surface pacing: the
+     * coupled path used the wait-for-every-surface barrier for that, which is
+     * precisely what tied every output to the slowest one.
+     *
+     * Static because the event handlers and the crtc->surface map they route
+     * through are static members of this class; the fd is shared by every
+     * surface, so one poll serves all of them.
+     *
+     * @param timeoutMs 0 drains without blocking; >0 waits up to that long.
+     * @return true if at least one event was dispatched.
+     */
+    static bool waitForAnyFlip(int drmFd, int timeoutMs);
     
     /**
      * Check if GBM surface has free buffers available
@@ -346,6 +408,14 @@ private:
     // Flip state
     bool flipPending_ = false;
     bool initialized_ = false;
+    // Per-surface pacing state. usesFlipEvents_ says whether this surface's
+    // presents generate flip events (page flip / atomic) or not (SetCrtc);
+    // lastPresentTime_ paces the ones that do not, flipSubmitTime_ dates the
+    // in-flight flip so a dead CRTC can be timed out.
+    bool usesFlipEvents_ = false;
+    std::chrono::steady_clock::time_point lastPresentTime_{};
+    std::chrono::steady_clock::time_point flipSubmitTime_{};
+
     bool modeSet_ = false;           // True if CRTC mode has been set (initial modeset done)
     int warmupFrames_ = 0;           // Frames remaining before trying page flip (Intel quirk)
     bool useSetCrtcOnly_ = false;    // Fall back to SetCrtc if page flip consistently fails

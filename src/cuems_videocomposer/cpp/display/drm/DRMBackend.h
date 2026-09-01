@@ -46,6 +46,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <chrono>
 
 namespace videocomposer {
 
@@ -189,14 +190,6 @@ public:
     DisplayConfigurationManager* getConfigManager() { return configManager_.get(); }
     
     /**
-     * Set expected video framerate for presentation timing
-     * With xjadeo-style timing, video fps < display fps is normal.
-     * This tells PresentationTiming to expect some vsync skips.
-     * @param fps Video framerate (e.g., 25.0 for PAL)
-     */
-    void setVideoFramerate(double fps);
-    
-    /**
      * Get surface for a specific output
      */
     DRMSurface* getSurface(const std::string& name);
@@ -241,11 +234,6 @@ public:
      * Get the multi-output renderer (for configuring output regions)
      */
     MultiOutputRenderer* getMultiOutputRenderer() { return multiRenderer_.get(); }
-    
-    /**
-     * Get total dropped frames across all outputs (frame pacing stats)
-     */
-    int64_t getTotalDroppedFrames() const;
 
     /**
      * Measure end-to-end display latency at startup.
@@ -322,6 +310,79 @@ private:
     
     // Atomic modesetting
     bool atomicPageFlip();  // Returns true if successful
+
+    /**
+     * Commit a page flip for exactly these surfaces, in the order given.
+     *
+     * Only plane properties go into the request -- never MODE_ID or ACTIVE --
+     * so a CRTC left out simply keeps scanning out the buffer it already has.
+     * That is what lets outputs on different refresh rates flip on their own
+     * vblank instead of all being held to the slowest one.
+     *
+     * Every participant must already be isAtomicEligible(): the check has to
+     * happen BEFORE prepareAtomicFlip(), which locks a GBM buffer. Dropping a
+     * surface after that point would strand the buffer, and a surface with no
+     * free buffers never becomes ready again.
+     *
+     * On any failure the whole commit is abandoned, every prepared surface is
+     * cancelled, and the participants fall back to individual page flips --
+     * libdrm has no way to withdraw a property already added to the request.
+     */
+    bool atomicPageFlipSubset(const std::vector<DRMSurface*>& participants);
+
+    // The historical render path: wait for every surface's flip, then commit
+    // all CRTCs together. Kept behind VIDEOCOMPOSER_COUPLED_PACING for A/B
+    // measurement against the decoupled path, using one binary.
+    void renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManager* osdManager);
+
+    // Per-surface pacing: each output presents on its own vblank.
+    void renderVirtualCanvasDecoupled(LayerManager* layerManager, OSDManager* osdManager);
+
+    /**
+     * Surfaces that may present this iteration, in physical layout order.
+     *
+     * Each surface answers for itself. An earlier version grouped them into
+     * refresh-rate classes and held a class back until every member was ready,
+     * to keep a blended pair on one canvas frame -- but that coherence was
+     * never real: a commit spanning several CRTCs still latches each one at ITS
+     * own vblank, so the pair was always separated by the physical phase
+     * offset. What the grouping did buy was the defect: the batched commit tied
+     * the group to its most out-of-phase member and cost it a vblank every
+     * vblank. Outputs that genuinely run in phase still land on the same vblank
+     * here, without being grouped -- they simply come ready together, blit the
+     * same canvas generation (the FBO is reused between composites) and commit
+     * microseconds apart. See 869emcrwa.
+     */
+    std::vector<DRMSurface*> collectReadySurfaces(std::chrono::steady_clock::time_point now);
+
+    // VIDEOCOMPOSER_COUPLED_PACING=1 restores the old all-outputs barrier.
+    // TODO(869emcrwa): drop once per-surface pacing is proven on the fleet.
+    bool coupledPacing_ = false;
+
+    // Last time the canvas was composited, to bound composites to the fastest
+    // output's rate rather than the loop's iteration rate.
+    std::chrono::steady_clock::time_point lastCompositeTime_{};
+
+    /**
+     * Warn when the enabled outputs do not all run at the same refresh rate.
+     *
+     * renderVirtualCanvas() waits for every surface's flip and then submits a
+     * single atomic commit for all CRTCs, so a canvas that mixes refresh rates
+     * is paced by the SLOWEST one: the faster outputs really do present at the
+     * slower rate. Nothing in the pipeline says so, which is how a room can be
+     * commissioned broken (ClickUp 869emcrwa).
+     *
+     * Advisory only -- logs and returns. Failing openWindow() would fall back
+     * to HeadlessDisplay, and hasFatalError() would make systemd restart-loop;
+     * both are worse than the symptom.
+     *
+     * @param context Where the check ran from, for the log line.
+     */
+    void warnIfMixedRefreshRates(const char* context);
+
+    // Last mixed-rate signature reported, so chained mode changes do not log
+    // the same warning several times. Cleared when the rates become uniform.
+    std::string lastMixedRefreshSignature_;
     
     // Configuration
     std::string devicePath_;

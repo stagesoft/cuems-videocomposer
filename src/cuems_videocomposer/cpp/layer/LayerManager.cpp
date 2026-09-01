@@ -20,6 +20,7 @@
  */
 
 #include "LayerManager.h"
+#include <chrono>
 #include "../utils/Logger.h"
 #include <algorithm>
 #include <map>
@@ -419,6 +420,11 @@ void LayerManager::promoteDecodeDriver(VideoLayer* removedLayer) {
         if (layer->playback().getSharedInputSource().get() == sharedInput) {
             layer->playback().setDecodeDriver(true);
             layer->setUpdatePriority(0);
+            // The decode session survives the driver that owned it, so its
+            // hang-guard slot moves to the new owner instead of being dropped
+            // and re-requested - which could otherwise be refused, stopping a
+            // cue that never stopped decoding.
+            layer->inheritGuardReservation(*removedLayer);
             LOG_INFO << "Promoted layer " << layer->getLayerId() << " to decode driver";
             return;
         }
@@ -433,6 +439,7 @@ bool LayerManager::addLayerWithId(const std::string& cueId, std::unique_ptr<Vide
     
     int layerId = nextLayerId_++;
     layer->setLayerId(layerId);
+    layer->setCueId(cueId);
     cueIdToLayerId_[cueId] = layerId;
     layers_.push_back(std::move(layer));
     
@@ -481,6 +488,41 @@ std::string LayerManager::getCueIdFromLayer(VideoLayer* layer) const {
     }
     
     return ""; // Not found
+}
+
+// ---------------------------------------------------------------------------
+// Load outcomes
+// ---------------------------------------------------------------------------
+
+void LayerManager::recordLoadOutcome(const std::string& cueId,
+                                     LoadOutcome::Result result,
+                                     const std::string& reason) {
+    if (cueId.empty()) {
+        return;
+    }
+    LoadOutcome o;
+    o.result = result;
+    o.reason = reason;
+    o.timestampMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    std::lock_guard<std::mutex> lock(outcomeMutex_);
+    loadOutcomes_[cueId] = o;
+}
+
+bool LayerManager::getLoadOutcome(const std::string& cueId, LoadOutcome& out) const {
+    std::lock_guard<std::mutex> lock(outcomeMutex_);
+    auto it = loadOutcomes_.find(cueId);
+    if (it == loadOutcomes_.end()) {
+        return false;
+    }
+    out = it->second;
+    return true;
+}
+
+std::map<std::string, LoadOutcome> LayerManager::getLoadOutcomes() const {
+    std::lock_guard<std::mutex> lock(outcomeMutex_);
+    return loadOutcomes_;
 }
 
 } // namespace videocomposer

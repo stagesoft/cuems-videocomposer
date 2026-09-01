@@ -27,9 +27,50 @@
 #include <memory>
 #include <map>
 #include <string>
+#include <mutex>
 #include <cstdint>
 
 namespace videocomposer {
+
+/**
+ * What happened the last time this cue tried to become a playing layer.
+ *
+ * ## Why this record exists at all
+ *
+ * The engine's OSC load is fire-and-forget, so a node reports a cue armed
+ * whether or not anything can actually play it. F9 - the engine's load-time
+ * health ping - is what will close that hole, and it needs something to read.
+ * It cannot read the input source's health: on a refused or failed load the
+ * object carrying that health is destroyed before anyone could ask, and on a
+ * re-load the layer still holds the *previous* cue's healthy source and would
+ * cheerfully answer "ok" while showing the wrong media.
+ *
+ * So the outcome is recorded here, keyed by cue, written before the source is
+ * discarded, and it outlives the object it describes. Until F9 lands nothing
+ * reads it and the operator's channel is the journal; the point is that F9
+ * finds the record already waiting rather than needing the compositor changed
+ * underneath it.
+ */
+struct LoadOutcome {
+    enum class Result {
+        ok,        // loaded, and allowed to play
+        refused,   // the hang guard declined to let it decode
+        failed     // it could not be loaded at all
+    };
+
+    Result result = Result::ok;
+    std::string reason;        // empty when ok
+    int64_t timestampMs = 0;   // milliseconds since the epoch
+
+    const char* resultName() const {
+        switch (result) {
+            case Result::refused: return "refused";
+            case Result::failed:  return "failed";
+            case Result::ok:      break;
+        }
+        return "ok";
+    }
+};
 
 /**
  * LayerManager - Manages collection of VideoLayer instances
@@ -84,10 +125,26 @@ public:
     std::vector<VideoLayer*> getLayersSortedByZOrder();
     std::vector<const VideoLayer*> getLayersSortedByZOrder() const;
 
+    // --- load outcomes (the record F9 will read) -------------------------
+    /** Record what became of a cue's load. Overwrites any previous outcome. */
+    void recordLoadOutcome(const std::string& cueId, LoadOutcome::Result result,
+                           const std::string& reason);
+    /** Last recorded outcome for a cue, if any. */
+    bool getLoadOutcome(const std::string& cueId, LoadOutcome& out) const;
+    /** Every recorded outcome, for a future health reply. */
+    std::map<std::string, LoadOutcome> getLoadOutcomes() const;
+
 private:
     std::vector<std::unique_ptr<VideoLayer>> layers_;
     int nextLayerId_;
     std::map<std::string, int> cueIdToLayerId_;  // Map UUID cue ID to internal layer ID
+
+    // Outcomes survive their layers, so this map is keyed by cue and is not
+    // cleared when a layer goes away. Guarded because it is written from the
+    // OSC thread (a refusal) and the main thread (a completed load) and may be
+    // read by a health reply on either.
+    mutable std::mutex outcomeMutex_;
+    std::map<std::string, LoadOutcome> loadOutcomes_;
 
     void sortLayersByZOrder();
     int getNextZOrder();

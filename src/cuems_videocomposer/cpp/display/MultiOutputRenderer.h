@@ -225,8 +225,17 @@ public:
      * Render all outputs
      * @param layerManager Layer manager with video layers
      * @param osdManager Optional OSD manager
+     * @param onlySurfaces When non-null, only these surfaces are blitted and
+     *        swapped; the rest keep the buffer they are already scanning out.
+     *        Per-surface pacing needs this: a surface that swaps without a
+     *        matching flip drains its GBM buffer pool.
+     * @param recomposite When false the canvas FBO is reused as-is and only
+     *        the blits run. Lets outputs on different refresh rates share one
+     *        composite instead of forcing one per loop iteration.
      */
-    void render(LayerManager* layerManager, OSDManager* osdManager = nullptr);
+    void render(LayerManager* layerManager, OSDManager* osdManager = nullptr,
+                const std::vector<OutputSurface*>* onlySurfaces = nullptr,
+                bool recomposite = true);
     
     /**
      * Present all outputs (synchronized swap/flip)
@@ -284,7 +293,7 @@ private:
     /**
      * Blit canvas regions to all outputs
      */
-    void blitToOutputs();
+    void blitToOutputs(const std::vector<OutputSurface*>* onlySurfaces);
     
     /**
      * Blit canvas region to a single output

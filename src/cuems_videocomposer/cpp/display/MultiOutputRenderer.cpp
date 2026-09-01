@@ -160,19 +160,26 @@ void MultiOutputRenderer::setCaptureResolution(int width, int height) {
     captureHeight_ = height;
 }
 
-void MultiOutputRenderer::render(LayerManager* layerManager, OSDManager* osdManager) {
+void MultiOutputRenderer::render(LayerManager* layerManager, OSDManager* osdManager,
+                                 const std::vector<OutputSurface*>* onlySurfaces,
+                                 bool recomposite) {
     if (!initialized_ || outputs_.empty() || !canvas_) {
         return;
     }
     
-    // Step 1: Render all layers to virtual canvas
-    renderToCanvas(layerManager, osdManager);
+    // Step 1: Render all layers to virtual canvas. Skipped when the caller
+    // says the canvas is still current -- the FBO keeps its contents, so the
+    // blits below simply reuse the last composite.
+    if (recomposite) {
+        renderToCanvas(layerManager, osdManager);
+    }
     
     // Step 2: Blit canvas regions to each output
-    blitToOutputs();
+    blitToOutputs(onlySurfaces);
     
-    // Step 3: Capture for virtual outputs (sinks)
-    if (captureEnabled_ && outputSinkManager_) {
+    // Step 3: Capture for virtual outputs (sinks). Tied to the composite:
+    // capturing an unchanged canvas would just duplicate the previous frame.
+    if (recomposite && captureEnabled_ && outputSinkManager_) {
         captureForVirtualOutputs();
     }
 }
@@ -209,13 +216,22 @@ void MultiOutputRenderer::renderToCanvas(LayerManager* layerManager, OSDManager*
     canvas_->endFrame();
 }
 
-void MultiOutputRenderer::blitToOutputs() {
+void MultiOutputRenderer::blitToOutputs(const std::vector<OutputSurface*>* onlySurfaces) {
     if (!blitShader_ || !canvas_) {
         return;
     }
     
     for (auto& output : outputs_) {
         if (output.surface) {
+            // Outputs left out of this pass must not swap either -- a swap
+            // with no flip behind it locks a GBM buffer that never comes back.
+            // That includes the disabled-region branch below, which swaps a
+            // cleared buffer purely to keep the atomic commit happy.
+            if (onlySurfaces &&
+                std::find(onlySurfaces->begin(), onlySurfaces->end(), output.surface)
+                    == onlySurfaces->end()) {
+                continue;
+            }
             if (output.region.enabled) {
                 blitToOutput(output);
             } else {

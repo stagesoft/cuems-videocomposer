@@ -20,6 +20,7 @@
  */
 
 #include "ConfigurationManager.h"
+#include <iostream>
 #include <fstream>
 #include <sstream>
 #include <cstdlib>
@@ -181,11 +182,82 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
             }
         } else if (arg == "--no-splash" || arg == "--nosplash") {
             setBool("no_splash", true);
+        } else if (arg.rfind("--hang-guard", 0) == 0 || arg.rfind("--vc-profile", 0) == 0
+                   || arg.rfind("--saturation-monitor", 0) == 0) {
+            // Operator flags for the hang guard, delivered through
+            // OPERATOR_FLAGS in the unit's environment file.
+            //
+            // These take --flag=value, which nothing else in this parser does -
+            // every other option compares the whole argument - so the split is
+            // written out rather than pattern-matched onto the existing style.
+            // A separate-word form (--flag value) is accepted too, because an
+            // operator editing an env file by hand will eventually type it.
+            const size_t eq = arg.find('=');
+            std::string name = (eq == std::string::npos) ? arg : arg.substr(0, eq);
+            std::string value;
+            if (eq != std::string::npos) {
+                value = arg.substr(eq + 1);
+            } else if (i + 1 < argc && argv[i + 1][0] != '-') {
+                value = argv[++i];
+            }
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+
+            if (name == "--hang-guard") {
+                // Validated here rather than where it is used, so a typo stops
+                // the operator at startup instead of silently leaving a safety
+                // feature in a state they did not choose.
+                if (value == "off" || value == "0" || value == "false") {
+                    setBool("hang_guard_off", true);
+                } else if (value == "on" || value == "1" || value == "true" || value.empty()) {
+                    setBool("hang_guard_off", false);
+                } else {
+                    std::cerr << "videocomposer: --hang-guard=" << value
+                              << " is not a valid value (expected on or off)"
+                              << std::endl;
+                    return 2;
+                }
+            } else if (name == "--saturation-monitor") {
+                // Exists so the monitor's own cost can be measured against
+                // itself: same binary, same build, one flag apart. An A/B
+                // between two separately-built binaries measures the build as
+                // much as the change, which is why this is a runtime switch
+                // and not a compile-time one.
+                if (value == "off" || value == "0" || value == "false") {
+                    setBool("saturation_monitor_off", true);
+                } else if (value == "on" || value == "1" || value == "true" || value.empty()) {
+                    setBool("saturation_monitor_off", false);
+                } else {
+                    std::cerr << "videocomposer: --saturation-monitor=" << value
+                              << " is not a valid value (expected on or off)"
+                              << std::endl;
+                    return 2;
+                }
+            } else if (name == "--vc-profile") {
+                if (value.empty()) {
+                    std::cerr << "videocomposer: --vc-profile needs a profile name"
+                              << std::endl;
+                    return 2;
+                }
+                setString("vc_profile", value);
+            } else {
+                // e.g. --hang-guardian: close enough to match the prefix, not
+                // close enough to mean anything.
+                std::cerr << "videocomposer: unrecognized option '" << name << "'"
+                          << std::endl;
+                return 2;
+            }
         } else if (arg[0] != '-') {
             // Assume it's a movie file
             if (movieFile_.empty()) {
                 movieFile_ = arg;
             }
+        } else {
+            // Every unknown -flag used to be swallowed in silence, so
+            // --hang-gaurd=off looked exactly like a working command line while
+            // leaving the guard armed. Name it: a misspelled flag is a
+            // configuration bug, and in a safety path it must not be quiet.
+            unrecognizedOptions_.push_back(arg);
         }
     }
 

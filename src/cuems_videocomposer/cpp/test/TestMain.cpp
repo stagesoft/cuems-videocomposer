@@ -55,6 +55,53 @@ extern bool test_MTCDecoder();
 
 extern bool test_SMPTEUtils_Overflow24h();
 
+// ExitReporter tests (F1, 869en65tm) - most of these fork, because the paths
+// under test are exit() and fatal signals.
+extern bool test_ExitReporter_SilentBeforeRunning();
+extern bool test_ExitReporter_CleanShutdownIsInfo();
+extern bool test_ExitReporter_DirtyExitIsErrorWithCensus();
+extern bool test_ExitReporter_PeaksSurviveClose();
+extern bool test_ExitReporter_FatalSignalRecordAndReraise();
+extern bool test_ExitReporter_ReportsOnlyOnce();
+extern bool test_ExitReporter_CensusLine();
+
+// RecoveryPolicy tests (G3, 869en65tm) - the arithmetic that bounds a fault
+// run. Pure and thread-free; the hardware drill is the integration proof.
+extern bool test_RecoveryPolicy_LimpingYieldsAccumulateToCap();
+extern bool test_RecoveryPolicy_GoodRunResetsTheLadder();
+extern bool test_RecoveryPolicy_JustBelowThresholdDoesNotDecay();
+extern bool test_RecoveryPolicy_DeclarationConsumesNothing();
+extern bool test_RecoveryPolicy_DecayRescuesAtTheCap();
+extern bool test_RecoveryPolicy_OneWakeIsOneEpisode();
+extern bool test_RecoveryPolicy_ZeroYieldFirstWakeAttempts();
+
+// HangGuard tests (G12, 869en65tm) - the cap arithmetic, the two counters
+// behind it, and the fail-closed rule that keeps a broken header from sailing
+// past the boundary.
+extern bool test_HangGuard_HdIsExemptAtTheBoundary();
+extern bool test_HangGuard_UhdAndDciAreFourKClass();
+extern bool test_HangGuard_MissingMetadataFailsClosed();
+extern bool test_HangGuard_AboveEnvelopeIsFlaggedNotRefused();
+extern bool test_HangGuard_AdmitsUpToCapThenRefuses();
+extern bool test_HangGuard_ExemptSessionsAreNeverRefused();
+extern bool test_HangGuard_MonitorOnlyProfileNeverRefuses();
+extern bool test_HangGuard_DisarmStopsRefusalButKeepsCounting();
+extern bool test_HangGuard_RepeatedRevealDoesNotDoubleCount();
+extern bool test_HangGuard_ReleaseIsIdempotentAndSafeWhenUnreserved();
+extern bool test_HangGuard_RefusedRevealReservesNothing();
+extern bool test_HangGuard_ArmedCountCountsOnceAndReleasesOnce();
+extern bool test_HangGuard_ArmedCountIgnoresExemptLoads();
+extern bool test_HangGuard_ArmedCountOverCapDoesNotRefuse();
+extern bool test_HangGuard_AdvisoryLatchTracksTheCrossing();
+extern bool test_HangGuard_NoAdvisoryWithoutACap();
+extern bool test_HangGuard_MonitorStateCarriesBothCountsSeparately();
+extern bool test_HangGuard_OnlyMeasuredProfilesAreArmed();
+extern bool test_HangGuard_DetectAlwaysYieldsAUsableProfile();
+extern bool test_HangGuard_DeferredAdvisoryClearIsNotLost();
+extern bool test_HangGuard_PollIsANoOpWhenTheLogIsCurrent();
+extern bool test_HangGuard_TransferMovesTheSlotWithoutChangingCounts();
+extern bool test_HangGuard_TransferFromUnreservedIsANoOp();
+
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
 extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
@@ -62,6 +109,9 @@ extern bool test_PresentationTiming_DiscardPendingSubmit();
 extern bool test_PresentationTiming_StatisticsMedianAndP95();
 extern bool test_PresentationTiming_ResetClearsState();
 extern bool test_PresentationTiming_ConcurrentSubmitFlip();
+extern bool test_PresentationTiming_SkippedVsyncsFromMscDelta();
+extern bool test_PresentationTiming_SustainedUnderrateDetected();
+extern bool test_PresentationTiming_NoUnderrateAtFullRate();
 
 using namespace videocomposer::test;
 
@@ -99,6 +149,46 @@ int main() {
     TestFramework::instance().addTest("MTCDecoder", test_MTCDecoder);
     TestFramework::instance().addTest("SMPTEUtils_Overflow24h", test_SMPTEUtils_Overflow24h);
 
+    TestFramework::instance().addTest("ExitReporter_SilentBeforeRunning", test_ExitReporter_SilentBeforeRunning);
+    TestFramework::instance().addTest("ExitReporter_CleanShutdownIsInfo", test_ExitReporter_CleanShutdownIsInfo);
+    TestFramework::instance().addTest("ExitReporter_DirtyExitIsErrorWithCensus", test_ExitReporter_DirtyExitIsErrorWithCensus);
+    TestFramework::instance().addTest("ExitReporter_PeaksSurviveClose", test_ExitReporter_PeaksSurviveClose);
+    TestFramework::instance().addTest("ExitReporter_FatalSignalRecordAndReraise", test_ExitReporter_FatalSignalRecordAndReraise);
+    TestFramework::instance().addTest("ExitReporter_ReportsOnlyOnce", test_ExitReporter_ReportsOnlyOnce);
+    TestFramework::instance().addTest("ExitReporter_CensusLine", test_ExitReporter_CensusLine);
+
+    TestFramework::instance().addTest("RecoveryPolicy_LimpingYieldsAccumulateToCap", test_RecoveryPolicy_LimpingYieldsAccumulateToCap);
+    TestFramework::instance().addTest("RecoveryPolicy_GoodRunResetsTheLadder", test_RecoveryPolicy_GoodRunResetsTheLadder);
+    TestFramework::instance().addTest("RecoveryPolicy_JustBelowThresholdDoesNotDecay", test_RecoveryPolicy_JustBelowThresholdDoesNotDecay);
+    TestFramework::instance().addTest("RecoveryPolicy_DeclarationConsumesNothing", test_RecoveryPolicy_DeclarationConsumesNothing);
+    TestFramework::instance().addTest("RecoveryPolicy_DecayRescuesAtTheCap", test_RecoveryPolicy_DecayRescuesAtTheCap);
+    TestFramework::instance().addTest("RecoveryPolicy_OneWakeIsOneEpisode", test_RecoveryPolicy_OneWakeIsOneEpisode);
+    TestFramework::instance().addTest("RecoveryPolicy_ZeroYieldFirstWakeAttempts", test_RecoveryPolicy_ZeroYieldFirstWakeAttempts);
+
+    TestFramework::instance().addTest("HangGuard_HdIsExemptAtTheBoundary", test_HangGuard_HdIsExemptAtTheBoundary);
+    TestFramework::instance().addTest("HangGuard_UhdAndDciAreFourKClass", test_HangGuard_UhdAndDciAreFourKClass);
+    TestFramework::instance().addTest("HangGuard_MissingMetadataFailsClosed", test_HangGuard_MissingMetadataFailsClosed);
+    TestFramework::instance().addTest("HangGuard_AboveEnvelopeIsFlaggedNotRefused", test_HangGuard_AboveEnvelopeIsFlaggedNotRefused);
+    TestFramework::instance().addTest("HangGuard_AdmitsUpToCapThenRefuses", test_HangGuard_AdmitsUpToCapThenRefuses);
+    TestFramework::instance().addTest("HangGuard_ExemptSessionsAreNeverRefused", test_HangGuard_ExemptSessionsAreNeverRefused);
+    TestFramework::instance().addTest("HangGuard_MonitorOnlyProfileNeverRefuses", test_HangGuard_MonitorOnlyProfileNeverRefuses);
+    TestFramework::instance().addTest("HangGuard_DisarmStopsRefusalButKeepsCounting", test_HangGuard_DisarmStopsRefusalButKeepsCounting);
+    TestFramework::instance().addTest("HangGuard_RepeatedRevealDoesNotDoubleCount", test_HangGuard_RepeatedRevealDoesNotDoubleCount);
+    TestFramework::instance().addTest("HangGuard_ReleaseIsIdempotentAndSafeWhenUnreserved", test_HangGuard_ReleaseIsIdempotentAndSafeWhenUnreserved);
+    TestFramework::instance().addTest("HangGuard_RefusedRevealReservesNothing", test_HangGuard_RefusedRevealReservesNothing);
+    TestFramework::instance().addTest("HangGuard_ArmedCountCountsOnceAndReleasesOnce", test_HangGuard_ArmedCountCountsOnceAndReleasesOnce);
+    TestFramework::instance().addTest("HangGuard_ArmedCountIgnoresExemptLoads", test_HangGuard_ArmedCountIgnoresExemptLoads);
+    TestFramework::instance().addTest("HangGuard_ArmedCountOverCapDoesNotRefuse", test_HangGuard_ArmedCountOverCapDoesNotRefuse);
+    TestFramework::instance().addTest("HangGuard_AdvisoryLatchTracksTheCrossing", test_HangGuard_AdvisoryLatchTracksTheCrossing);
+    TestFramework::instance().addTest("HangGuard_NoAdvisoryWithoutACap", test_HangGuard_NoAdvisoryWithoutACap);
+    TestFramework::instance().addTest("HangGuard_MonitorStateCarriesBothCountsSeparately", test_HangGuard_MonitorStateCarriesBothCountsSeparately);
+    TestFramework::instance().addTest("HangGuard_OnlyMeasuredProfilesAreArmed", test_HangGuard_OnlyMeasuredProfilesAreArmed);
+    TestFramework::instance().addTest("HangGuard_DetectAlwaysYieldsAUsableProfile", test_HangGuard_DetectAlwaysYieldsAUsableProfile);
+    TestFramework::instance().addTest("HangGuard_DeferredAdvisoryClearIsNotLost", test_HangGuard_DeferredAdvisoryClearIsNotLost);
+    TestFramework::instance().addTest("HangGuard_PollIsANoOpWhenTheLogIsCurrent", test_HangGuard_PollIsANoOpWhenTheLogIsCurrent);
+    TestFramework::instance().addTest("HangGuard_TransferMovesTheSlotWithoutChangingCounts", test_HangGuard_TransferMovesTheSlotWithoutChangingCounts);
+    TestFramework::instance().addTest("HangGuard_TransferFromUnreservedIsANoOp", test_HangGuard_TransferFromUnreservedIsANoOp);
+
     TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing_UsesKernelUst", test_PresentationTiming_FifoPairing_UsesKernelUst);
@@ -106,6 +196,9 @@ int main() {
     TestFramework::instance().addTest("PresentationTiming_StatisticsMedianAndP95", test_PresentationTiming_StatisticsMedianAndP95);
     TestFramework::instance().addTest("PresentationTiming_ResetClearsState", test_PresentationTiming_ResetClearsState);
     TestFramework::instance().addTest("PresentationTiming_ConcurrentSubmitFlip", test_PresentationTiming_ConcurrentSubmitFlip);
+    TestFramework::instance().addTest("PresentationTiming_SkippedVsyncsFromMscDelta", test_PresentationTiming_SkippedVsyncsFromMscDelta);
+    TestFramework::instance().addTest("PresentationTiming_SustainedUnderrateDetected", test_PresentationTiming_SustainedUnderrateDetected);
+    TestFramework::instance().addTest("PresentationTiming_NoUnderrateAtFullRate", test_PresentationTiming_NoUnderrateAtFullRate);
 
     return TestFramework::instance().runAll();
 }

@@ -34,8 +34,18 @@ PresentationTiming::PresentationTiming() {
     reset();
 }
 
-void PresentationTiming::init(double refreshHz) {
+std::string PresentationTiming::tag() const {
+    if (outputName_.empty()) {
+        return "PresentationTiming";
+    }
+    return "PresentationTiming[" + outputName_ + "]";
+}
+
+void PresentationTiming::init(double refreshHz, std::string outputName) {
     reset();
+    // After reset(): reset() deliberately leaves identity alone, but setting
+    // it here keeps init() the single place that establishes both.
+    outputName_ = std::move(outputName);
 
     if (refreshHz > 0) {
         // Calculate expected vsync duration in nanoseconds
@@ -44,28 +54,8 @@ void PresentationTiming::init(double refreshHz) {
         displayHz_ = refreshHz;
         initialized_ = true;
 
-        LOG_INFO << "PresentationTiming: Initialized for " << refreshHz
+        LOG_INFO << tag() << ": Initialized for " << refreshHz
                  << "Hz (vsync=" << (expectedVsyncNs_ / 1000000.0) << "ms)";
-    }
-}
-
-void PresentationTiming::setVideoFramerate(double videoFps) {
-    videoFps_ = videoFps;
-
-    // Calculate expected vsyncs between flips
-    // e.g., 60Hz display / 25fps video = 2.4 vsyncs per video frame
-    if (videoFps > 0 && displayHz_ > 0) {
-        double ratio = displayHz_ / videoFps;
-        // Round up: we might see 2 or 3 vsyncs per frame for a 2.4 ratio
-        expectedVsyncsPerFrame_ = static_cast<int>(ratio + 0.5);
-        if (expectedVsyncsPerFrame_ < 1) {
-            expectedVsyncsPerFrame_ = 1;
-        }
-
-        LOG_INFO << "PresentationTiming: Video framerate set to " << videoFps
-                 << " fps (expecting ~" << expectedVsyncsPerFrame_ << " vsyncs per frame)";
-    } else {
-        expectedVsyncsPerFrame_ = 1;
     }
 }
 
@@ -89,28 +79,21 @@ void PresentationTiming::recordFlip(unsigned int sec, unsigned int usec, unsigne
             // Calculate actual vsync duration
             current_.vsync_duration = ust_delta / msc_delta;
 
+            checkSustainedUnderrate(ust_delta, current_.ust);
+
             // Detect skipped vsyncs (msc_delta > 1 means we missed frames)
             // msc_delta of 1 = perfect, 2 = 1 skipped, etc.
             current_.skipped_vsyncs = msc_delta - 1;
 
-            if (current_.skipped_vsyncs > 0) {
-                totalDroppedFrames_ += current_.skipped_vsyncs;
-
-                // With xjadeo-style timing (video fps < display fps), some skips are expected
-                // Only count as "unexpected" if we skip more than expected
-                // e.g., 25fps on 60Hz: expected msc_delta = 2-3, skips = 1-2
-                int64_t expectedSkips = expectedVsyncsPerFrame_ - 1;  // e.g., 2-1=1 or 3-1=2
-                int64_t unexpectedSkips = current_.skipped_vsyncs - expectedSkips;
-
-                // Allow 1 vsync tolerance for timing jitter
-                if (unexpectedSkips > 1) {
-                    totalUnexpectedDrops_ += unexpectedSkips;
-                    // Only log actual problems, not expected timing
-                    if (totalUnexpectedDrops_ <= 5 || totalUnexpectedDrops_ % 60 == 0) {
-                        LOG_WARNING << "PresentationTiming: Dropped " << unexpectedSkips
-                                   << " frame(s) beyond expected (total unexpected: "
-                                   << totalUnexpectedDrops_ << ")";
-                    }
+            // One skipped vsync is timing jitter; more than one is a real drop.
+            // This surface's own count -- every DRMSurface owns its
+            // PresentationTiming, so the number below is NOT a fleet-wide total.
+            if (current_.skipped_vsyncs > 1) {
+                totalUnexpectedDrops_ += current_.skipped_vsyncs;
+                if (totalUnexpectedDrops_ <= 5 || totalUnexpectedDrops_ % 60 == 0) {
+                    LOG_WARNING << tag() << ": Dropped " << current_.skipped_vsyncs
+                               << " frame(s) beyond expected (total unexpected: "
+                               << totalUnexpectedDrops_ << ")";
                 }
             }
         } else if (msc_delta == 0) {
@@ -216,14 +199,72 @@ PresentationEntry PresentationTiming::getInfo() const {
 void PresentationTiming::reset() {
     current_ = PresentationEntry();
     previous_ = PresentationEntry();
-    totalDroppedFrames_ = 0;
     totalUnexpectedDrops_ = 0;
-    // Keep expectedVsyncNs_, displayHz_, videoFps_, expectedVsyncsPerFrame_, initialized_ - they're set by init()/setVideoFramerate()
+    presentIntervalEmaNs_ = 0;
+    presentSamples_ = 0;
+    underrateSinceNs_ = 0;
+    underrateWarned_ = false;
+    // Keep expectedVsyncNs_, displayHz_, initialized_ - they're set by init()
 
     std::lock_guard<std::mutex> lock(mutex_);
     pendingSubmits_.clear();
     latencySamples_.clear();
     // captureEnabled_ / maxSamples_ preserved across reset() — caller controls them via enable/disable.
+}
+
+namespace {
+// A shortfall this size is real, not jitter: half rate is 50%, and the smallest
+// fraction seen in the field was 5/6 (83%).
+constexpr double kUnderrateFraction = 0.90;
+// Hold it this long before saying anything. Long enough that a mode change, a
+// project load or a cold-boot warmup passes through without a word.
+constexpr int64_t kUnderrateHoldNs = 10LL * 1000000000LL;
+// Enough flips for the average to mean something.
+constexpr int64_t kUnderrateMinSamples = 30;
+// Smoothing over roughly the last 16 intervals.
+constexpr int64_t kEmaShift = 4;
+}  // namespace
+
+void PresentationTiming::checkSustainedUnderrate(int64_t intervalNs, int64_t nowNs) {
+    if (expectedVsyncNs_ <= 0 || intervalNs <= 0) {
+        return;
+    }
+
+    presentIntervalEmaNs_ = (presentIntervalEmaNs_ == 0)
+        ? intervalNs
+        : presentIntervalEmaNs_ + ((intervalNs - presentIntervalEmaNs_) >> kEmaShift);
+
+    if (++presentSamples_ < kUnderrateMinSamples) {
+        return;
+    }
+
+    // Longer interval than configured means fewer frames per second.
+    const bool short_of_rate =
+        presentIntervalEmaNs_ > static_cast<int64_t>(expectedVsyncNs_ / kUnderrateFraction);
+    const int64_t now = nowNs;
+
+    if (!short_of_rate) {
+        underrateSinceNs_ = 0;
+        underrateWarned_ = false;
+        return;
+    }
+
+    if (underrateSinceNs_ == 0) {
+        underrateSinceNs_ = now;
+        return;
+    }
+    if (underrateWarned_ || (now - underrateSinceNs_) < kUnderrateHoldNs) {
+        return;
+    }
+
+    underrateWarned_ = true;
+    const double measuredHz = 1e9 / static_cast<double>(presentIntervalEmaNs_);
+    // Deliberately free of the phrase the harness greps for in the drop line
+    // above -- these are two different signals and must stay separately
+    // parseable.
+    LOG_WARNING << tag() << ": configured " << displayHz_ << "Hz but presenting at ~"
+                << measuredHz << "Hz, sustained for "
+                << ((now - underrateSinceNs_) / 1000000000LL) << "s";
 }
 
 int64_t PresentationTiming::toNanoseconds(unsigned int sec, unsigned int usec) {
