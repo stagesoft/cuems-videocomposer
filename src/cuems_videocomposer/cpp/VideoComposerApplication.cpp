@@ -20,6 +20,8 @@
  */
 
 #include "VideoComposerApplication.h"
+#include "guard/HangGuard.h"
+#include "guard/SaturationMonitor.h"
 #include "config/ConfigurationManager.h"
 #include "input/VideoFileInput.h"
 #include "input/AsyncVideoLoader.h"
@@ -108,6 +110,11 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
         Logger::getInstance().setLevel(Logger::VERBOSE);
     }
 
+    // Before anything can be loaded or played.
+    if (!initializeHangGuard()) {
+        return false;
+    }
+
     // Initialize display
     if (!initializeDisplay()) {
         LOG_ERROR << "Failed to initialize display";
@@ -166,6 +173,40 @@ bool VideoComposerApplication::initializeConfiguration(int argc, char** argv) {
         return false;
     }
     
+    return true;
+}
+
+bool VideoComposerApplication::initializeHangGuard() {
+    // A misspelled flag is not a harmless typo here: --hang-gaurd=off leaves
+    // the guard armed while the operator believes it is off, and the only
+    // evidence used to be silence.
+    for (const std::string& opt : config_->unrecognizedOptions()) {
+        LOG_WARNING << "Unrecognized option '" << opt
+                    << "' was ignored - check the spelling; it changed nothing";
+    }
+
+    MachineProfile profile;
+    const std::string forced = config_->getString("vc_profile", "");
+    if (!forced.empty()) {
+        if (!MachineProfile::byName(forced, profile)) {
+            LOG_ERROR << "--vc-profile=" << forced << " is not a known profile "
+                      << "(known: " << MachineProfile::knownNames() << ")";
+            return false;
+        }
+    } else {
+        profile = MachineProfile::detect();
+    }
+
+    initHangGuard(profile);
+
+    if (config_->getBool("hang_guard_off", false)) {
+        // Mandatory escape hatch: the capacity harness has to be able to
+        // exceed the cap, or no new boundary can ever be measured.
+        hangGuard().disarm("--hang-guard=off");
+    }
+
+    hangGuard().logStartupState();
+    saturationMonitor().start(hangGuard().profile());
     return true;
 }
 
@@ -573,7 +614,13 @@ OpenGLRenderer& VideoComposerApplication::renderer() {
 
 void VideoComposerApplication::shutdown() {
     running_ = false;
-    
+
+    // Stop the monitor before the things it describes go away. It never holds
+    // a pointer into a layer, so this is ordering hygiene rather than a
+    // correctness requirement - but a monitor still sampling through teardown
+    // would log a stream of meaningless transitions on the way out.
+    saturationMonitor().stop();
+
     // Shutdown async video loader first (before layer manager)
     if (asyncVideoLoader_) {
         asyncVideoLoader_->shutdown();
@@ -1074,8 +1121,19 @@ void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, con
                                                    std::unique_ptr<InputSource> inputSource, bool success) {
     if (!success || !inputSource) {
         LOG_ERROR << "Async load failed for: " << filepath << " (cue ID: " << cueId << ")";
+        // Written before the source is discarded - which is the whole point of
+        // keeping the record on the manager rather than on the object that is
+        // about to cease to exist.
+        if (layerManager_) {
+            layerManager_->recordLoadOutcome(cueId, LoadOutcome::Result::failed,
+                                             "load failed: " + filepath);
+        }
         pendingSharedLayers_.erase(cueId);  // cleanup any pending secondaries
         return;
+    }
+
+    if (layerManager_) {
+        layerManager_->recordLoadOutcome(cueId, LoadOutcome::Result::ok, std::string());
     }
 
     // Get the layer for this cue ID

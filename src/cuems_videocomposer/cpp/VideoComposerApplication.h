@@ -102,6 +102,20 @@ public:
 private:
     // Component initialization
     bool initializeConfiguration(int argc, char** argv);
+
+    /**
+     * Resolve the machine profile, arm or disarm the hang guard, and start
+     * the saturation monitor.
+     *
+     * Runs early - right after the logger is configured and before any output
+     * exists - because every route into it is read once, at startup, and
+     * never re-read. That is a deliberate limitation rather than an oversight:
+     * changing it means restarting the compositor, which kills playback on
+     * every output, so it is a pre-show operation and never something to
+     * reach for during a show.
+     */
+    bool initializeHangGuard();
+
     bool initializeDisplay();
     void showStartupSplash();
     bool initializeRemoteControl();

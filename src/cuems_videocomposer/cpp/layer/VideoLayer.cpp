@@ -25,6 +25,7 @@
 #include "../sync/MIDISyncSource.h"
 #include "../input/VideoFileInput.h"
 #include "../input/HAPVideoInput.h"
+#include "../guard/HangGuard.h"
 #include <algorithm>
 #include <cmath>
 
@@ -40,6 +41,12 @@ VideoLayer::VideoLayer()
 
 VideoLayer::~VideoLayer() {
     pause();
+    // Backstop release. The ordinary path is /mtcfollow 0, but a layer can be
+    // destroyed while still following - a project change, an unload, a reset -
+    // and a slot that was never given back would shrink the cap for the rest
+    // of the process's life. releaseReveal() is idempotent, so the two owners
+    // cannot double-release.
+    hangGuard().releaseReveal(layerId_);
 }
 
 void VideoLayer::setInputSource(std::unique_ptr<InputSource> input) {
@@ -61,6 +68,10 @@ void VideoLayer::setInputSource(std::unique_ptr<InputSource> input) {
     
     // Invalidate frame buffer cache
     frameBufferCacheValid_ = false;
+
+    // The layer may already have been told to follow MTC before this source
+    // existed; now that it does, the guard can decide.
+    reconcileGuardReservation();
 
     // If wraparound was already enabled (OSC /loop arrived before the file
     // finished loading), propagate it to the new input source now.
@@ -274,8 +285,79 @@ bool VideoLayer::getWraparound() const {
     return playback_.getWraparound();
 }
 
-void VideoLayer::setMtcFollow(bool enabled) {
-    playback_.setMtcFollow(enabled);
+bool VideoLayer::setMtcFollow(bool enabled) {
+    return applyGuardedFollow(enabled);
+}
+
+bool VideoLayer::applyGuardedFollow(bool wantFollow) {
+    if (!wantFollow) {
+        // Stopping is never refused, and the slot goes back immediately: a
+        // layer that has stopped following is no longer decoding, whatever
+        // else is true of it.
+        if (guardReserved_) {
+            hangGuard().releaseReveal(layerId_);
+            guardReserved_ = false;
+        }
+        playback_.setMtcFollow(false);
+        return true;
+    }
+
+    InputSource* src = playback_.getInputSource();
+    if (!src) {
+        // The command arrived before the file did. Remember the intent; the
+        // guard decides in reconcileGuardReservation() once there is really
+        // something to decode.
+        playback_.setMtcFollow(true);
+        return true;
+    }
+
+    if (playback_.isSharedLayer() && !playback_.isDecodeDriver()) {
+        // One cue shown on several outputs is ONE decode session: the
+        // secondaries read the driver's decoded frames and never touch the
+        // decode engine. Charging each output a slot would make a single
+        // four-output 4K cue fill the whole cap on its own and refuse the
+        // next one - a refusal of a configuration that has never hung, which
+        // is exactly what the guard must not do.
+        playback_.setMtcFollow(true);
+        return true;
+    }
+
+    if (!guardReserved_) {
+        const SessionClass cls = src->isFourKClass() ? SessionClass::fourKClass
+                                                    : SessionClass::exempt;
+        HangGuard::RevealDecision d =
+            hangGuard().requestReveal(layerId_, cls, cueId_.empty() ? std::string("<unnamed>") : cueId_);
+        if (!d.admitted) {
+            // Refused. The layer keeps its media and its last frame; nothing
+            // that is already playing is touched. The operator's notice is the
+            // journal line the guard already wrote.
+            playback_.setMtcFollow(false);
+            return false;
+        }
+        guardReserved_ = true;
+    }
+
+    playback_.setMtcFollow(true);
+    return true;
+}
+
+void VideoLayer::inheritGuardReservation(VideoLayer& fromLayer) {
+    if (!fromLayer.guardReserved_) {
+        return;
+    }
+    hangGuard().transferReveal(fromLayer.layerId_, layerId_);
+    fromLayer.guardReserved_ = false;
+    guardReserved_ = true;
+}
+
+void VideoLayer::reconcileGuardReservation() {
+    if (!playback_.getMtcFollow()) {
+        return;
+    }
+    // Deliberately does not re-decide an existing reservation: a layer that is
+    // already decoding keeps its slot across a re-arm, which is what makes a
+    // re-load net-zero.
+    applyGuardedFollow(true);
 }
 
 bool VideoLayer::getMtcFollow() const {
