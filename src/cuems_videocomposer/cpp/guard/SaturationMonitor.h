@@ -124,7 +124,16 @@ private:
 
     // Signal readers. Each returns a sentinel rather than throwing when the
     // platform does not provide it.
-    double readDecodeOccupancyPercent();   // -1 when unavailable
+    /**
+     * Decode occupancy over the last sample, as a percentage.
+     *
+     * `elapsedSec` is the *measured* interval since the previous sample, not
+     * the nominal period: the loop sleeps for the period and then spends real
+     * time walking /proc/self/fdinfo, so dividing the engine-time delta by the
+     * nominal period reports more busy time than the wall clock contained -
+     * which is how a single decode engine came to be logged at 101.4 %.
+     */
+    double readDecodeOccupancyPercent(double elapsedSec);   // -1 when unavailable
     void   readMemory();
     int    readNewPageFaults();            // -1 when the channel is unavailable
 

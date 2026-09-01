@@ -119,16 +119,16 @@ void SaturationMonitor::run() {
 void SaturationMonitor::sample() {
     const auto now = std::chrono::steady_clock::now();
 
-    const double occupancy = readDecodeOccupancyPercent();
-    readMemory();
-    const int newFaults = readNewPageFaults();
-
-    double elapsedSec = 1.0;
+    double elapsedSec = std::chrono::duration<double>(SAMPLE_PERIOD).count();
     if (lastSampleAt_.time_since_epoch().count() != 0) {
         elapsedSec = std::chrono::duration<double>(now - lastSampleAt_).count();
     }
     lastSampleAt_ = now;
-    if (elapsedSec <= 0.0) elapsedSec = 1.0;
+    if (elapsedSec <= 0.0) elapsedSec = std::chrono::duration<double>(SAMPLE_PERIOD).count();
+
+    const double occupancy = readDecodeOccupancyPercent(elapsedSec);
+    readMemory();
+    const int newFaults = readNewPageFaults();
 
     const long missTotal = signals::framesMissed();
     const double missRate = static_cast<double>(missTotal - lastMissTotal_) / elapsedSec;
@@ -256,7 +256,7 @@ void SaturationMonitor::logTransition(SaturationLevel from, SaturationLevel to,
 // Signal readers
 // ---------------------------------------------------------------------------
 
-double SaturationMonitor::readDecodeOccupancyPercent() {
+double SaturationMonitor::readDecodeOccupancyPercent(double elapsedSec) {
     // Sum drm-engine-dec across this process's DRM clients, deduplicated by
     // drm-client-id: several fds can name the same client, and counting a
     // client twice would report impossible occupancy.
@@ -345,8 +345,8 @@ double SaturationMonitor::readDecodeOccupancyPercent() {
     const long long deltaNs = totalDecNs - lastDecNs_;
     lastDecNs_ = totalDecNs;
 
-    const double windowNs = static_cast<double>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(SAMPLE_PERIOD).count());
+    // Against the measured interval, never the nominal one.
+    const double windowNs = elapsedSec * 1e9;
     double pct = (windowNs > 0.0) ? (static_cast<double>(deltaNs) / windowNs) * 100.0 : -1.0;
     if (pct < 0.0) pct = 0.0;   // a client closing can make the sum go backwards
 
