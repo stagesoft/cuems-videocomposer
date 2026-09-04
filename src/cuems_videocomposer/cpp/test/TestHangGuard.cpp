@@ -58,7 +58,7 @@ namespace {
 /** A guard armed exactly like the one profile that has a measured boundary. */
 HangGuard armedFp530() {
     MachineProfile p;
-    p.name = "fp530-8gb";
+    p.name = "fp530-picasso";
     p.cap = 4;
     p.armed = true;
     p.detail = "test";
@@ -384,7 +384,7 @@ bool test_HangGuard_MonitorStateCarriesBothCountsSeparately() {
     TEST_ASSERT_EQ(s.activeExempt, 1);
     TEST_ASSERT_EQ(s.cap, 4);
     TEST_ASSERT_TRUE(s.guardArmed);
-    TEST_ASSERT(s.profile == "fp530-8gb");
+    TEST_ASSERT(s.profile == "fp530-picasso");
     return true;
 }
 
@@ -397,11 +397,11 @@ bool test_HangGuard_MonitorStateCarriesBothCountsSeparately() {
 // default limit.
 bool test_HangGuard_OnlyMeasuredProfilesAreArmed() {
     MachineProfile p;
-    TEST_ASSERT_TRUE(MachineProfile::byName("fp530-8gb", p));
+    TEST_ASSERT_TRUE(MachineProfile::byName("fp530-picasso", p));
     TEST_ASSERT_EQ(p.cap, 4);
     TEST_ASSERT_TRUE(p.armed);
 
-    for (const char* name : {"fp530-16gb", "4ktop-780m", "intel-legacy", "unknown"}) {
+    for (const char* name : {"4ktop-780m", "intel-legacy", "unknown"}) {
         MachineProfile m;
         TEST_ASSERT_TRUE(MachineProfile::byName(name, m));
         TEST_ASSERT_EQ(m.cap, 0);
@@ -412,6 +412,50 @@ bool test_HangGuard_OnlyMeasuredProfilesAreArmed() {
     // and wrong.
     MachineProfile bogus;
     TEST_ASSERT_FALSE(MachineProfile::byName("fp530-8g", bogus));
+    return true;
+}
+
+// The deprecated names must still resolve, must resolve to the SAME thing, and
+// must both be armed. `fp530-16gb` used to mean monitor-only; that meaning was
+// an artifact of keying on RAM, and a host still passing the old name deserves
+// protection rather than a silent downgrade.
+bool test_HangGuard_LegacyRamKeyedNamesAreAliases() {
+    MachineProfile eightGb, sixteenGb, canonical;
+    TEST_ASSERT_TRUE(MachineProfile::byName("fp530-8gb", eightGb));
+    TEST_ASSERT_TRUE(MachineProfile::byName("fp530-16gb", sixteenGb));
+    TEST_ASSERT_TRUE(MachineProfile::byName("fp530-picasso", canonical));
+
+    // Same cap, same armed state, and both renamed to the canonical profile so
+    // the startup log never reports a name that describes RAM.
+    TEST_ASSERT_EQ(eightGb.cap, canonical.cap);
+    TEST_ASSERT_EQ(sixteenGb.cap, canonical.cap);
+    TEST_ASSERT_TRUE(eightGb.armed);
+    TEST_ASSERT_TRUE(sixteenGb.armed);
+    TEST_ASSERT(eightGb.name == "fp530-picasso");
+    TEST_ASSERT(sixteenGb.name == "fp530-picasso");
+
+    // And they say they are deprecated, so the log explains itself.
+    TEST_ASSERT(eightGb.detail.find("deprecated alias") != std::string::npos);
+    TEST_ASSERT(sixteenGb.detail.find("deprecated alias") != std::string::npos);
+    return true;
+}
+
+// The regression this whole change exists to prevent: on the measured GPU the
+// guard arms REGARDLESS of how much RAM the board reports. Before 2026-09-04 a
+// 16 GB board resolved to a monitor-only profile, so fitting more memory
+// silently removed the protection.
+bool test_HangGuard_PicassoArmsIndependentlyOfRam() {
+    const MachineProfile detected = MachineProfile::detect();
+    // Only assertable on the hardware in question; elsewhere this is a no-op
+    // rather than a false pass, and says so.
+    if (!(detected.pciVendor == 0x1002 && detected.pciDevice == 0x15d8)) {
+        return true;  // not a Picasso box - nothing to assert here
+    }
+    TEST_ASSERT(detected.name == "fp530-picasso");
+    TEST_ASSERT_EQ(detected.cap, 4);
+    TEST_ASSERT_TRUE(detected.armed);
+    // RAM is still read - it is reported, just not consulted.
+    TEST_ASSERT(detected.ramTotalMb > 0);
     return true;
 }
 

@@ -96,6 +96,8 @@ extern bool test_HangGuard_AdvisoryLatchTracksTheCrossing();
 extern bool test_HangGuard_NoAdvisoryWithoutACap();
 extern bool test_HangGuard_MonitorStateCarriesBothCountsSeparately();
 extern bool test_HangGuard_OnlyMeasuredProfilesAreArmed();
+extern bool test_HangGuard_LegacyRamKeyedNamesAreAliases();
+extern bool test_HangGuard_PicassoArmsIndependentlyOfRam();
 extern bool test_HangGuard_DetectAlwaysYieldsAUsableProfile();
 extern bool test_HangGuard_DeferredAdvisoryClearIsNotLost();
 extern bool test_HangGuard_PollIsANoOpWhenTheLogIsCurrent();
@@ -183,6 +185,8 @@ int main() {
     TestFramework::instance().addTest("HangGuard_NoAdvisoryWithoutACap", test_HangGuard_NoAdvisoryWithoutACap);
     TestFramework::instance().addTest("HangGuard_MonitorStateCarriesBothCountsSeparately", test_HangGuard_MonitorStateCarriesBothCountsSeparately);
     TestFramework::instance().addTest("HangGuard_OnlyMeasuredProfilesAreArmed", test_HangGuard_OnlyMeasuredProfilesAreArmed);
+    TestFramework::instance().addTest("HangGuard_LegacyRamKeyedNamesAreAliases", test_HangGuard_LegacyRamKeyedNamesAreAliases);
+    TestFramework::instance().addTest("HangGuard_PicassoArmsIndependentlyOfRam", test_HangGuard_PicassoArmsIndependentlyOfRam);
     TestFramework::instance().addTest("HangGuard_DetectAlwaysYieldsAUsableProfile", test_HangGuard_DetectAlwaysYieldsAUsableProfile);
     TestFramework::instance().addTest("HangGuard_DeferredAdvisoryClearIsNotLost", test_HangGuard_DeferredAdvisoryClearIsNotLost);
     TestFramework::instance().addTest("HangGuard_PollIsANoOpWhenTheLogIsCurrent", test_HangGuard_PollIsANoOpWhenTheLogIsCurrent);
