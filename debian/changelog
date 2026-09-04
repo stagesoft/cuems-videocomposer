@@ -1,3 +1,16 @@
+cuems-videocomposer (0.1.2-6) unstable; urgency=medium
+
+  * Rebuild from the rc_1 tip: debian/bookworm had not picked up
+    0c09598, which moves the cuems-mediadecoder submodule 529a830 ->
+    c7568c5. That range is documentation only (README overhaul,
+    CHANGELOG, CONTRIBUTORS, GPL LICENSE, CLAUDE.md) — the FFmpeg
+    failure-reason work its merge commit names was already in 529a830 —
+    so this package is functionally identical to 0.1.2-5. Released so
+    the installed deb is reproducible from the branch tip rather than
+    from a tree one commit behind it.
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 04 Sep 2026 13:34:47 +0200
+
 cuems-videocomposer (0.1.2-5) unstable; urgency=medium
 
   * Build-Depends declared three packages that do not exist in Debian
