@@ -39,10 +39,23 @@ constexpr long PCI_VENDOR_INTEL = 0x8086;
 constexpr long PCI_DEV_PICASSO  = 0x15d8;  // FP530 (Ryzen Picasso, VCN 1.0)
 constexpr long PCI_DEV_PHOENIX  = 0x15bf;  // 780M / 8845HS (VCN 4.0, unified ring)
 
-// The FP530 8 GB box reports ~7.6 GiB of MemTotal once the framebuffer carve-out
-// is taken; the 16 GB variant reports ~15.5. Anything below this line is read as
-// the 8 GB machine - the one profile with a measured cap.
-constexpr long RAM_8GB_CEILING_MB = 12 * 1024;
+// RAM is NOT a discriminator, and stopped being one on 2026-09-04. It was: a
+// MemTotal ceiling of 12 GiB split Picasso into `fp530-8gb` (armed, cap 4) and
+// `fp530-16gb` (monitor-only). Two things were wrong with that.
+//
+//   1. Fitting more RAM SILENTLY DISARMED the guard. The roomier box shipped
+//      LESS protected, with nothing failing and only a startup log line to say
+//      so - on a rig with no remote power that ends in a trip to site.
+//   2. It was not even a stable reading of the hardware. MemTotal is installed
+//      RAM minus the UMA carve-out, which is a BIOS setting, so a 16 GB board
+//      with a >=4 GiB carve-out dropped back under the ceiling and re-armed
+//      under a name that then described neither its RAM nor its carve-out.
+//
+// The hang does not come from system memory. It is the VCN 1.0 single decode
+// ring: the signature reproduced identically across a GPU firmware upgrade, and
+// G12 retired VRAM as the anchor outright - a 12-session run held 4936 MB of
+// 5120 addressable (96 %) WITHOUT hanging, while a run that hung held less.
+// So the GPU is the discriminator, and RAM is a detail for the log.
 
 /**
  * Read a small text file into buf. Returns the byte count, or -1.
@@ -144,20 +157,19 @@ MachineProfile MachineProfile::detect() {
     p.pciDevice = readHexId(p.drmDevicePath + "/device");
 
     if (p.pciVendor == PCI_VENDOR_AMD && p.pciDevice == PCI_DEV_PICASSO) {
-        const bool is8gb = (p.ramTotalMb > 0 && p.ramTotalMb < RAM_8GB_CEILING_MB);
-        if (is8gb) {
-            p.name = "fp530-8gb";
-            p.cap = 4;
-            p.armed = true;
-            p.detail = "measured boundary: 4 concurrent 4K-class decode sessions "
-                       "clean, 5 and beyond in the hang region";
-        } else {
-            p.name = "fp530-16gb";
-            p.cap = 0;
-            p.armed = false;
-            p.detail = "same GPU as fp530-8gb but the boundary has not been "
-                       "measured with this much RAM - monitor only";
-        }
+        p.name = "fp530-picasso";
+        p.cap = 4;
+        p.armed = true;
+        // The boundary was measured on an 8 GB board and is applied to every
+        // Picasso, because the ring - not the RAM - is what saturates. That is
+        // deliberately the conservative direction: if a roomier board turns out
+        // to tolerate more, relaxing the cap is a change backed by a new
+        // measurement, whereas leaving it unarmed until someone measures ships
+        // an unprotected box today. ramTotalMb is still read and logged, so the
+        // reading can be re-attributed later without guessing.
+        p.detail = "measured boundary: 4 concurrent 4K-class decode sessions "
+                   "clean, 5 and beyond in the hang region (measured on 8 GB; "
+                   "the boundary is the VCN 1.0 decode ring, not system RAM)";
         return p;
     }
 
@@ -191,13 +203,26 @@ bool MachineProfile::byName(const std::string& name, MachineProfile& out) {
     p.source = "flag";
     p.name = name;
 
-    if (name == "fp530-8gb") {
+    if (name == "fp530-picasso") {
         p.cap = 4;
         p.armed = true;
         p.detail = "forced by --vc-profile; measured boundary 4 concurrent "
                    "4K-class decode sessions";
-    } else if (name == "fp530-16gb") {
-        p.detail = "forced by --vc-profile; no measured boundary - monitor only";
+    } else if (name == "fp530-8gb" || name == "fp530-16gb") {
+        // Both accepted, and both mean the same thing now. They are the
+        // pre-2026-09-04 names from when RAM was the discriminator: a host, a
+        // runbook or a systemd drop-in still passing either must keep working,
+        // and must not get a DIFFERENT cap depending on which one it happens to
+        // say. Note this makes `--vc-profile fp530-16gb` ARM where it used to be
+        // monitor-only. That was never a considered choice - it fell out of the
+        // RAM split - and the supported way to disarm is --hang-guard=off.
+        p.name = "fp530-picasso";
+        p.cap = 4;
+        p.armed = true;
+        p.detail = std::string("forced by --vc-profile as '") + name +
+                   "', a deprecated alias of fp530-picasso (the profile no "
+                   "longer keys on RAM); measured boundary 4 concurrent "
+                   "4K-class decode sessions";
     } else if (name == "4ktop-780m") {
         p.detail = "forced by --vc-profile; VCN 4.0 unified ring, no measured "
                    "boundary - monitor only";
@@ -214,7 +239,8 @@ bool MachineProfile::byName(const std::string& name, MachineProfile& out) {
 }
 
 std::string MachineProfile::knownNames() {
-    return "fp530-8gb, fp530-16gb, 4ktop-780m, intel-legacy, unknown";
+    return "fp530-picasso, 4ktop-780m, intel-legacy, unknown "
+           "(fp530-8gb and fp530-16gb accepted as deprecated aliases)";
 }
 
 } // namespace videocomposer

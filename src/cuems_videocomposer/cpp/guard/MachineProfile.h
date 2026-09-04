@@ -29,22 +29,30 @@ namespace videocomposer {
 /**
  * MachineProfile - which box this is, and therefore what the hang guard knows.
  *
- * The vcn_dec ring hang (869en65tm) is a property of one GPU generation under
- * one memory configuration, not of the compositor. So the cap that protects
- * against it is only meaningful on hardware where the boundary was actually
- * measured, and claiming a number anywhere else would be inventing evidence.
- * This is the lookup that decides which of those two situations we are in.
+ * The vcn_dec ring hang (869en65tm) is a property of one GPU - the VCN 1.0
+ * single decode ring - not of the compositor and not of how much RAM the board
+ * carries. So the cap that protects against it is meaningful on that GPU, and
+ * claiming a number on any other hardware would be inventing evidence. This is
+ * the lookup that decides which of those two situations we are in.
  *
- * **Only fp530-8gb ships armed.** Every other profile is monitor-only: the
+ * **Only fp530-picasso ships armed.** Every other profile is monitor-only: the
  * warnings still run, nothing is ever refused, and the startup log says so in
  * as many words. A profile earns a cap by having a measurement behind it, and
- * the only such measurement today is the FP530 8 GB one - 4 concurrent
- * 4K-class decode sessions clean, 5 and beyond in the hang region.
+ * the only such measurement today is the FP530 one - 4 concurrent 4K-class
+ * decode sessions clean, 5 and beyond in the hang region.
  *
- * Detection is PCI vendor:device from sysfs plus total RAM, both read once at
- * startup. The resolved DRM card path is kept here too, because the saturation
- * monitor's VRAM/GTT readers need the same answer and one wrong card is better
- * found in one place than in three.
+ * ⚠️ **The profile does NOT key on RAM, and must not go back to doing so**
+ * (changed 2026-09-04). It used to: a 12 GiB MemTotal ceiling split Picasso
+ * into an armed `fp530-8gb` and a monitor-only `fp530-16gb`, which meant
+ * fitting more RAM silently disarmed the guard - the roomier box shipped less
+ * protected. It was not a stable reading either, since MemTotal is installed
+ * RAM minus the UMA carve-out, a BIOS setting. Both old names are still
+ * accepted by byName() as deprecated aliases.
+ *
+ * Detection is PCI vendor:device from sysfs; total RAM is still read, but only
+ * to be reported. The resolved DRM card path is kept here too, because the
+ * saturation monitor's VRAM/GTT readers need the same answer and one wrong card
+ * is better found in one place than in three.
  */
 struct MachineProfile {
     /** Stable profile identifier, as it appears in the startup log. */
@@ -73,7 +81,11 @@ struct MachineProfile {
     long pciVendor = -1;
     long pciDevice = -1;
 
-    /** Total system RAM in MiB as read from /proc/meminfo, -1 when unknown. */
+    /**
+     * Total system RAM in MiB as read from /proc/meminfo, -1 when unknown.
+     * Reported only. It has not selected a profile since 2026-09-04 - see the
+     * warning above before wiring it back into any decision.
+     */
     long ramTotalMb = -1;
 
     /**
