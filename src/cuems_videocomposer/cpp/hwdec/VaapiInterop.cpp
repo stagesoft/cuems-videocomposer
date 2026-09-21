@@ -994,7 +994,22 @@ void VaapiInterop::releaseFrame() {
         eglDestroyImageKHR_(currentDisplay, eglImageUV_);
         eglImageUV_ = EGL_NO_IMAGE_KHR;
     }
-    
+
+    // createEGLImages() moves the previous generation here to keep it alive
+    // until bindTexturesToImages() finishes binding the new one, then frees
+    // it there. If bindTexturesToImages() never runs (or fails) after a
+    // successful createEGLImages(), that previous pair is never anyone
+    // else's responsibility - only this function still knows about it.
+    // Free it too, or it's orphaned for the life of the process.
+    if (prevEglImageY_ != EGL_NO_IMAGE_KHR) {
+        eglDestroyImageKHR_(currentDisplay, prevEglImageY_);
+        prevEglImageY_ = EGL_NO_IMAGE_KHR;
+    }
+    if (prevEglImageUV_ != EGL_NO_IMAGE_KHR) {
+        eglDestroyImageKHR_(currentDisplay, prevEglImageUV_);
+        prevEglImageUV_ = EGL_NO_IMAGE_KHR;
+    }
+
     // Close open DMA-BUF FDs if keepFDsOpen_ mode was used
     if (openYFd_ >= 0) {
         close(openYFd_);
