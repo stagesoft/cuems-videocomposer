@@ -20,6 +20,12 @@
  */
 
 #include "OpenGLRenderer.h"
+// #region DEBUG
+// ClickUp 869en4tqt (layerTextureCache_ never evicted on layer removal) is
+// measured here so ONE run covers it and 869en65tm at once: the leak is a
+// prime suspect for the VRAM floor that 869en65tm's hang sits on.
+#include "../utils/DebugLog.h"
+// #endregion DEBUG
 #include "../layer/VideoLayer.h"
 #include "../osd/OSDRenderer.h"
 #include "../utils/Logger.h"
@@ -62,6 +68,22 @@ extern "C" {
 #endif
 
 namespace videocomposer {
+
+// #region DEBUG
+namespace {
+// Called after every mutation of layerTextureCache_, on the render thread, so
+// the 1 Hz sampler only ever reads atomics.
+template <typename MapT>
+inline void dbgSyncTextureCache(const MapT& m) {
+    long bytes = 0;
+    for (const auto& kv : m) {
+        bytes += (long)kv.second.width * kv.second.height * 4;  // RGBA
+    }
+    vcdbg::textureCacheEntries() = (int)m.size();
+    vcdbg::textureCacheBytes()   = bytes;
+}
+}  // namespace
+// #endregion DEBUG
 
 OpenGLRenderer::OpenGLRenderer()
     : textureId_(0)
@@ -186,6 +208,9 @@ void OpenGLRenderer::cleanup() {
         cleanupLayerPBOs(pair.second);
     }
     layerTextureCache_.clear();
+    // #region DEBUG
+    dbgSyncTextureCache(layerTextureCache_);
+    // #endregion DEBUG
     
     // Cleanup VBO/VAO
     cleanupQuadVBO();
@@ -600,6 +625,9 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                     texturesToDelete_.push_back(cacheIt->second.textureId);
                     cleanupLayerPBOs(cacheIt->second);
                     layerTextureCache_.erase(cacheIt);
+                    // #region DEBUG
+                    dbgSyncTextureCache(layerTextureCache_);
+                    // #endregion DEBUG
                 }
                 
                 glGenTextures(1, &shaderTextureId);
@@ -621,6 +649,9 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 cache.pboInitialized = false;
                 layerTextureCache_[layerId] = cache;
                 cachePtr = &layerTextureCache_[layerId];
+                // #region DEBUG
+                dbgSyncTextureCache(layerTextureCache_);
+                // #endregion DEBUG
             }
             
             // Upload frame data using PBO double-buffering for async transfer
@@ -726,6 +757,9 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 texturesToDelete_.push_back(cacheIt->second.textureId);
                 layerTextureCache_.erase(cacheIt);
                 cacheIt = layerTextureCache_.end();
+                // #region DEBUG
+                dbgSyncTextureCache(layerTextureCache_);
+                // #endregion DEBUG
             }
         }
         
@@ -756,6 +790,9 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
             cache.width = layerTextureWidth;
             cache.height = layerTextureHeight;
             layerTextureCache_[layerId] = cache;
+            // #region DEBUG
+            dbgSyncTextureCache(layerTextureCache_);
+            // #endregion DEBUG
         }
         
         // Upload frame data to cached texture

@@ -27,6 +27,10 @@
 
 #include "AsyncDecodeQueue.h"
 #include "../utils/Logger.h"
+// #region DEBUG
+#include "../utils/DebugLog.h"
+#include <sstream>
+// #endregion DEBUG
 #include <chrono>
 
 extern "C" {
@@ -166,10 +170,16 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         codecCtx_->thread_count = 4;
         codecCtx_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     } else {
-        // Request extra VAAPI surfaces so the queue can hold 8 frames
-        // without exhausting the pool (default pool ~17 is too small
-        // when sync fallback + EGL import also hold surfaces).
-        codecCtx_->extra_hw_frames = 16;
+        // Enough for everything this queue can hold at once, and no more:
+        // MAX_QUEUE_SIZE (8) queued + 1 borrowed by the renderer + 2 in flight
+        // through the EGL import. 16 was guesswork above that ceiling.
+        //
+        // At 4K a surface is ~11.9 MiB, so each spare costs real VRAM out of a
+        // 2048 MB carve-out -- see the note in VideoFileInput.cpp and ClickUp
+        // 869en65tm for the measurement that made this a hang rather than a
+        // rounding error.
+        codecCtx_->extra_hw_frames = vcdbg::envExtra("CUEMS_DEBUG_EXTRA_ASYNC",
+                                        static_cast<int>(MAX_QUEUE_SIZE) + 3);
     }
     
     // Open codec
@@ -183,6 +193,25 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         return false;
     }
     
+    // #region DEBUG
+    // H4: this is the SECOND hardware decoder on this same file -- the sync
+    // one in VideoFileInput is still open and keeps its own surface pool.
+    if (useHardware_) {
+        long surfBytes = (long)codecCtx_->width * codecCtx_->height * 3 / 2
+                       * (codecCtx_->extra_hw_frames + 17);
+        vcdbg::surfaceBytes() += surfBytes;
+        int n = ++vcdbg::asyncDecoders();
+        std::ostringstream dbg;
+        dbg << "ASYNC decoder #" << n << " opened"
+            << " " << codecCtx_->width << "x" << codecCtx_->height
+            << " extra_hw_frames=" << codecCtx_->extra_hw_frames
+            << " est_pool_mb=" << (surfBytes / (1024 * 1024))
+            << " " << vcdbg::gpuMemStr()
+            << " | " << vcdbg::decoderCensus();
+        vcdbg::log("H1 H3 H4", "DECODER-OPEN", dbg.str());
+    }
+    // #endregion DEBUG
+
     // Allocate decode frame
     decodeFrame_ = av_frame_alloc();
     if (!decodeFrame_) {
@@ -236,6 +265,13 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
 }
 
 void AsyncDecodeQueue::close() {
+    // #region DEBUG
+    if (useHardware_ && codecCtx_) {
+        vcdbg::log("H1 H5", "DECODER-CLOSE",
+                   "ASYNC decoder closing, before " + vcdbg::gpuMemStr());
+        --vcdbg::asyncDecoders();
+    }
+    // #endregion DEBUG
     // Stop decode thread
     if (decodeThread_) {
         threadStop_ = true;
@@ -643,6 +679,19 @@ bool AsyncDecodeQueue::decodeNextFrame() {
             av_packet_free(&packet);
             return false;
         } else {
+            // #region DEBUG
+            // H2: after a GPU reset the decoder returns EIO/ENODEV/ECANCELED
+            // here. Today this path is silent -- it just returns false -- so
+            // nothing in any CUEMS log ever mentions the failure.
+            {
+                char eb[AV_ERROR_MAX_STRING_SIZE] = {0};
+                av_strerror(ret, eb, sizeof(eb));
+                std::ostringstream dbg;
+                dbg << "avcodec_receive_frame ret=" << ret << " (" << eb << ") "
+                    << vcdbg::gpuMemStr();
+                vcdbg::log("H2 H3", "DECODE-ERROR", dbg.str());
+            }
+            // #endregion DEBUG
             // Error
             av_packet_free(&packet);
             return false;
@@ -762,6 +811,16 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         av_packet_unref(packet);
         
         if (ret < 0 && ret != AVERROR(EAGAIN)) {
+            // #region DEBUG
+            {
+                char eb[AV_ERROR_MAX_STRING_SIZE] = {0};
+                av_strerror(ret, eb, sizeof(eb));
+                std::ostringstream dbg;
+                dbg << "avcodec_send_packet ret=" << ret << " (" << eb << ") "
+                    << vcdbg::gpuMemStr();
+                vcdbg::log("H2 H3", "DECODE-ERROR", dbg.str());
+            }
+            // #endregion DEBUG
             av_packet_free(&packet);
             return false;
         }

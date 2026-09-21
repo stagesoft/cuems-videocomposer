@@ -51,6 +51,42 @@
 #endif
 #include "osd/OSDManager.h"
 #include "utils/Logger.h"
+// #region DEBUG
+#include "utils/DebugLog.h"
+#include <EGL/egl.h>
+#include <sstream>
+namespace {
+// GL_KHR_robustness. Tokens spelled out so no particular GL header version is
+// required. Returns 0 (GL_NO_ERROR) while the context is healthy.
+typedef unsigned int (*PFNGLGETGRAPHICSRESETSTATUSPROC_DBG)(void);
+inline unsigned int dbgGraphicsResetStatus() {
+    static PFNGLGETGRAPHICSRESETSTATUSPROC_DBG fn = nullptr;
+    static bool resolved = false;
+    if (!resolved) {
+        resolved = true;
+        for (const char* nm : {"glGetGraphicsResetStatusKHR",
+                               "glGetGraphicsResetStatus",
+                               "glGetGraphicsResetStatusARB"}) {
+            fn = (PFNGLGETGRAPHICSRESETSTATUSPROC_DBG)eglGetProcAddress(nm);
+            if (fn) {
+                vcdbg::log("H2", "RESET-POLL", std::string("resolved ") + nm);
+                break;
+            }
+        }
+        if (!fn) vcdbg::log("H2", "RESET-POLL", "glGetGraphicsResetStatus NOT available");
+    }
+    return fn ? fn() : 0u;
+}
+inline const char* dbgResetName(unsigned int st) {
+    switch (st) {
+        case 0x8253: return "GUILTY_CONTEXT_RESET";
+        case 0x8254: return "INNOCENT_CONTEXT_RESET";
+        case 0x8255: return "UNKNOWN_CONTEXT_RESET";
+        default:     return "other";
+    }
+}
+}  // namespace
+// #endregion DEBUG
 #include "utils/SMPTEUtils.h"
 #include <iostream>
 #include <chrono>
@@ -374,6 +410,11 @@ int VideoComposerApplication::run() {
     // - Same-frame requests skip decoding (cached in frame_ buffer)
     // - Rendering happens every vsync for tear-free smooth output
     
+    // #region DEBUG
+    vcdbg::installLastGasp();
+    vcdbg::startSampler();
+    vcdbg::log("H1 H2 H3 H4 H5", "RUN", "entering main loop, " + vcdbg::gpuMemStr());
+    // #endregion DEBUG
     LOG_INFO << "Entering video update loop @ display refresh rate (vsync-driven)";
 
     while (running_ && shouldContinue()) {
@@ -394,6 +435,28 @@ int VideoComposerApplication::run() {
         if (displayBackend_ && displayBackend_->isWindowOpen()) {
             displayBackend_->makeCurrent();
         }
+
+        // #region DEBUG
+        // H2: with a robust context this is how we learn the GPU was reset,
+        // instead of Mesa terminating us. Cheap (a driver-side counter read),
+        // but only poll once per second so it cannot skew frame timing.
+        {
+            static int dbgFrames = 0;
+            if ((++dbgFrames % 60) == 0) {
+                unsigned int st = dbgGraphicsResetStatus();
+                if (st != 0u) {
+                    vcdbg::resetSeen() = (int)st;
+                    std::ostringstream dbg;
+                    dbg << "GPU RESET OBSERVED status=0x" << std::hex << st << std::dec
+                        << " (" << dbgResetName(st) << ") -- layers are dead, "
+                        << vcdbg::decoderCensus() << " " << vcdbg::gpuMemStr();
+                    vcdbg::log("H2", "RESET-POLL", dbg.str());
+                    LOG_ERROR << "GPU reset detected (" << dbgResetName(st)
+                              << ") -- all video layers are lost";
+                }
+            }
+        }
+        // #endregion DEBUG
 
         updateLayers();
 

@@ -24,6 +24,9 @@
  */
 
 #include "DRMSurface.h"
+// #region DEBUG
+#include "../../utils/DebugLog.h"
+// #endregion DEBUG
 #include "DRMOutputManager.h"
 #include "../../utils/Logger.h"
 
@@ -373,7 +376,50 @@ gbm_surface_created:
             EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
             EGL_NONE
         };
-        
+
+        // #region DEBUG
+        // H2: on a GPU reset Mesa's amdgpu winsys rejects the next command
+        // submission with -125 (ECANCELED) and then kills us itself:
+        //   "The CS has been rejected (-125), but the context isn't robust."
+        //   "The process will be terminated."
+        // A context created with robust access + LOSE_CONTEXT_ON_RESET sets
+        // Mesa's allow_context_lost, which should suppress that exit(1) and
+        // let glGetGraphicsResetStatus report the reset instead. Opt-in by env
+        // var so ONE binary serves both arms of the A/B.
+        //   CUEMS_DEBUG_ROBUST=1 -> robust context
+        // Caveat under test: the VA-API pipe context is created by Mesa's own
+        // frontend with flags 0, so it may still exit(1) before we get here.
+        EGLint robustAttribs[] = {
+            EGL_CONTEXT_MAJOR_VERSION, 3,
+            EGL_CONTEXT_MINOR_VERSION, 3,
+            EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+            0x31B2 /* EGL_CONTEXT_OPENGL_ROBUST_ACCESS */, EGL_TRUE,
+            0x31BD /* ..._RESET_NOTIFICATION_STRATEGY */, 0x31BF /* LOSE_CONTEXT_ON_RESET */,
+            EGL_NONE
+        };
+        eglContext_ = EGL_NO_CONTEXT;  // explicit: the guard below reads it
+        const char* dbgRobust = std::getenv("CUEMS_DEBUG_ROBUST");
+        const bool dbgWantRobust = (dbgRobust && dbgRobust[0] == '1');
+        {
+            const char* exts = eglQueryString(eglDisplay_, EGL_EXTENSIONS);
+            std::string e = exts ? exts : "";
+            vcdbg::log("H2", "EGL-CONTEXT",
+                       std::string("want_robust=") + (dbgWantRobust ? "1" : "0")
+                       + " has_EXT_create_context_robustness="
+                       + (e.find("EGL_EXT_create_context_robustness") != std::string::npos ? "1" : "0"));
+        }
+        if (dbgWantRobust) {
+            eglContext_ = eglCreateContext(eglDisplay_, eglConfig_, EGL_NO_CONTEXT, robustAttribs);
+            if (eglContext_ == EGL_NO_CONTEXT) {
+                vcdbg::log("H2", "EGL-CONTEXT",
+                           "robust context REFUSED (egl error 0x"
+                           + std::to_string(eglGetError()) + ") -- falling back to plain");
+            } else {
+                vcdbg::log("H2", "EGL-CONTEXT", "robust context created OK");
+            }
+        }
+        if (eglContext_ == EGL_NO_CONTEXT)
+        // #endregion DEBUG
         eglContext_ = eglCreateContext(eglDisplay_, eglConfig_, EGL_NO_CONTEXT, contextAttribs);
         if (eglContext_ == EGL_NO_CONTEXT) {
             // Try simpler context

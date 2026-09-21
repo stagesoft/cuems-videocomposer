@@ -23,6 +23,9 @@
 #include "../../ffcompat.h"
 #include "../utils/CLegacyBridge.h"
 #include "../utils/Logger.h"
+// #region DEBUG
+#include "../utils/DebugLog.h"
+// #endregion DEBUG
 #include <cstring>
 #include <cassert>
 #include <algorithm>
@@ -285,6 +288,15 @@ void VideoFileInput::prewarmGPUPipeline() {
 }
 
 void VideoFileInput::close() {
+    // #region DEBUG
+    // H5: if VRAM does not come back down here, something outlives the layer.
+    if (useHardwareDecoding_ && codecCtx_) {
+        vcdbg::log("H1 H5", "DECODER-CLOSE",
+                   "SYNC decoder closing file=" + currentFile_
+                   + " before " + vcdbg::gpuMemStr());
+        --vcdbg::syncDecoders();
+    }
+    // #endregion DEBUG
     // Stop async decode queue first
     if (asyncDecodeQueue_) {
         asyncDecodeQueue_->close();
@@ -698,12 +710,30 @@ bool VideoFileInput::openHardwareCodec() {
     // Wrapper decoders (with METHOD_INTERNAL, like cuvid) handle hardware and pixel format
     // selection internally, but we keep hwDeviceCtx_ for frame transfers
     
-    // CRITICAL: Request extra surfaces for zero-copy rendering (like mpv does)
-    // The default pool size is determined by the decoder (usually ~17 for H.264)
-    // But with EGL image lifecycle delays (we keep textures/EGL images alive for 1 frame),
-    // we need extra surfaces to prevent pool exhaustion
-    // MPV uses hwdec_extra_frames=6, we use more to account for our architecture
-    codecCtx_->extra_hw_frames = 20;  // Request 20 extra surfaces
+    // Surfaces for zero-copy rendering, on top of the codec's own DPB.
+    //
+    // This context is the FALLBACK decoder: once open() brings up the
+    // AsyncDecodeQueue, reads go through the queue and only come back here when
+    // the queue misses a frame, one frame at a time. It therefore needs a
+    // couple of surfaces in flight, not a full playback pool -- the old value
+    // of 20 sized it as if it were the primary decoder.
+    //
+    // Why this matters (ClickUp 869en65tm): extra_hw_frames is a COUNT, so at
+    // 4K each surface is ~11.9 MiB and every layer pays this twice, once here
+    // and once in AsyncDecodeQueue. Measured on the FP530 (2048 MB carve-out),
+    // 3x4K asked for 2491 MB of decode surfaces alone; VRAM sat at 98% for the
+    // whole run with GTT thrashing 2269-2646 MB, and the vcn_dec ring blew its
+    // timeout. Eight concurrent 640x360 sessions -- MORE decoders, 23% VRAM --
+    // ran clean with zero drops, so the trigger is the memory pressure, not the
+    // number of decode sessions sharing the single ring.
+    codecCtx_->extra_hw_frames = vcdbg::envExtra("CUEMS_DEBUG_EXTRA_SYNC", 4);
+
+    // #region DEBUG
+    // H1/H4: this pool is never scaled by resolution nor by how many layers
+    // are already decoding, and AsyncDecodeQueue opens a SECOND one on the
+    // very same file a few lines later (VideoFileInput.cpp open()).
+    vcdbg::GpuMem dbgMemBefore = vcdbg::gpuMem();
+    // #endregion DEBUG
 
     // Open hardware codec
     ret = avcodec_open2(codecCtx_, hwCodec, nullptr);
@@ -730,6 +760,27 @@ bool VideoFileInput::openHardwareCodec() {
     
     LOG_INFO << "Successfully opened hardware decoder: " << hwCodecName 
              << " (" << HardwareDecoder::getName(hwDecoderType_) << ")";
+
+    // #region DEBUG
+    {
+        vcdbg::GpuMem after = vcdbg::gpuMem();
+        long surfBytes = (long)codecCtx_->width * codecCtx_->height * 3 / 2
+                       * (codecCtx_->extra_hw_frames + 17);  // +17 ~ H.264 DPB
+        vcdbg::surfaceBytes() += surfBytes;
+        int n = ++vcdbg::syncDecoders();
+        std::ostringstream dbg;
+        dbg << "SYNC decoder #" << n << " opened file=" << currentFile_
+            << " " << codecCtx_->width << "x" << codecCtx_->height
+            << " codec=" << hwCodecName
+            << " extra_hw_frames=" << codecCtx_->extra_hw_frames
+            << " est_pool_mb=" << (surfBytes / (1024 * 1024))
+            << " vram_before_mb=" << (dbgMemBefore.vramUsed < 0 ? -1 : dbgMemBefore.vramUsed / (1024 * 1024))
+            << " vram_after_mb=" << (after.vramUsed < 0 ? -1 : after.vramUsed / (1024 * 1024))
+            << " gtt_after_mb=" << (after.gttUsed < 0 ? -1 : after.gttUsed / (1024 * 1024))
+            << " | " << vcdbg::decoderCensus();
+        vcdbg::log("H1 H3 H4", "DECODER-OPEN", dbg.str());
+    }
+    // #endregion DEBUG
 
     // Allocate frames
     frame_ = av_frame_alloc();
