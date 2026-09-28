@@ -57,6 +57,14 @@ public:
     VideoLayer* getLayerByCueId(const std::string& cueId);
     const VideoLayer* getLayerByCueId(const std::string& cueId) const;
     std::string getCueIdFromLayer(VideoLayer* layer) const;
+
+    // The integer id of the layer an OSC message names, or 0 if none.
+    // A live cue id wins; otherwise an all-digit id (isIntegerLayerId) is
+    // taken as an integer layer id. Integer ids start at 1, so 0 is never a
+    // layer. Every OSC handler that names a layer must resolve it here: a
+    // bare std::atoi turns an absent cue id "2ac1fe93-..." into the live
+    // layer 2 (869f8j1ja).
+    int resolveLayerAddress(const std::string& address) const;
     
     // Get all layers (sorted by z-order)
     std::vector<VideoLayer*> getLayers();

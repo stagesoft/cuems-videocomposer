@@ -30,7 +30,6 @@
 #include "../display/DisplayBackend.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
 #include "../utils/SMPTEUtils.h"
-#include "LayerPathId.h"
 #include <sstream>
 #include <algorithm>
 #include <cstdlib>
@@ -403,31 +402,18 @@ bool RemoteCommandRouter::routeCommand(const std::string& path, const std::vecto
             cueId = remaining.substr(0, slashPos);
             command = remaining.substr(slashPos + 1);
             
-            // Try to get layer by cue ID (UUID)
-            VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
+            // Cue ID (UUID) first, then an all-digit integer layer ID for
+            // manual use. A cue UUID whose layer is gone resolves to nothing:
+            // atoi("2ac1fe93-...") is 2, the live layer 2 (869f8j1ja).
+            VideoLayer* layer = layerManager_->getLayer(layerManager_->resolveLayerAddress(cueId));
             if (layer) {
-                // Layer found by UUID - route to layer command
                 auto it = layerCommands_.find(command);
                 if (it != layerCommands_.end()) {
                     return it->second(layer, args);
                 }
-            } else {
-                // Integer layer ID for backward compatibility — only for an
-                // all-digit id. A cue UUID whose layer is gone must not fall
-                // through: atoi("2ac1fe93-...") is 2, which would apply this
-                // command to whichever live layer has integer id 2.
-                if (isIntegerLayerId(cueId)) {
-                    layer = layerManager_->getLayer(std::atoi(cueId.c_str()));
-                    if (layer) {
-                        auto it = layerCommands_.find(command);
-                        if (it != layerCommands_.end()) {
-                            return it->second(layer, args);
-                        }
-                        return false;
-                    }
-                }
-                reportUnknownLayer(cueId, command);
+                return false;
             }
+            reportUnknownLayer(cueId, command);
         } else {
             // No layer ID specified - treat as app-level layer command
             command = remaining;
@@ -554,11 +540,22 @@ bool RemoteCommandRouter::handleLayerRemove(const std::vector<std::string>& args
         return false;
     }
 
-    int layerId = std::atoi(args[0].c_str());
-    if (layerManager_) {
-        return layerManager_->removeLayer(layerId);
+    if (!layerManager_) {
+        return false;
     }
-    return false;
+    const int layerId = layerManager_->resolveLayerAddress(args[0]);
+    if (layerId == 0) {
+        reportUnknownLayer(args[0], "remove");
+        return false;
+    }
+    // A layer never disappears without a line in the log.
+    const std::string cueId = layerManager_->getCueIdFromLayer(layerManager_->getLayer(layerId));
+    if (!layerManager_->removeLayer(layerId)) {
+        return false;
+    }
+    LOG_INFO << "Removed layer " << layerId << " (cue ID: " << (cueId.empty() ? "none" : cueId)
+             << ") via /layer/remove";
+    return true;
 }
 
 bool RemoteCommandRouter::handleLayerDuplicate(const std::vector<std::string>& args) {
@@ -566,15 +563,17 @@ bool RemoteCommandRouter::handleLayerDuplicate(const std::vector<std::string>& a
         return false;
     }
 
-    int layerId = std::atoi(args[0].c_str());
-    if (layerManager_) {
-        int newLayerId = -1;
-        if (layerManager_->duplicateLayer(layerId, &newLayerId)) {
-            // Could send response with new layer ID
-            return true;
-        }
+    if (!layerManager_) {
+        return false;
     }
-    return false;
+    const int layerId = layerManager_->resolveLayerAddress(args[0]);
+    if (layerId == 0) {
+        reportUnknownLayer(args[0], "duplicate");
+        return false;
+    }
+    int newLayerId = -1;
+    // Could send response with new layer ID
+    return layerManager_->duplicateLayer(layerId, &newLayerId);
 }
 
 bool RemoteCommandRouter::handleLayerReorder(const std::vector<std::string>& args) {
@@ -582,25 +581,29 @@ bool RemoteCommandRouter::handleLayerReorder(const std::vector<std::string>& arg
         return false;
     }
 
-    int layerId = std::atoi(args[0].c_str());
-    std::string action = args[1];
-    
-    if (layerManager_) {
-        if (action == "top" || action == "front") {
-            return layerManager_->moveLayerToTop(layerId);
-        } else if (action == "bottom" || action == "back") {
-            return layerManager_->moveLayerToBottom(layerId);
-        } else if (action == "up") {
-            return layerManager_->moveLayerUp(layerId);
-        } else if (action == "down") {
-            return layerManager_->moveLayerDown(layerId);
-        } else {
-            // Try to set specific z-order
-            int zOrder = std::atoi(action.c_str());
-            return layerManager_->setLayerZOrder(layerId, zOrder);
-        }
+    if (!layerManager_) {
+        return false;
     }
-    return false;
+    const int layerId = layerManager_->resolveLayerAddress(args[0]);
+    if (layerId == 0) {
+        reportUnknownLayer(args[0], "reorder");
+        return false;
+    }
+    std::string action = args[1];
+
+    if (action == "top" || action == "front") {
+        return layerManager_->moveLayerToTop(layerId);
+    } else if (action == "bottom" || action == "back") {
+        return layerManager_->moveLayerToBottom(layerId);
+    } else if (action == "up") {
+        return layerManager_->moveLayerUp(layerId);
+    } else if (action == "down") {
+        return layerManager_->moveLayerDown(layerId);
+    } else {
+        // Try to set specific z-order
+        int zOrder = std::atoi(action.c_str());
+        return layerManager_->setLayerZOrder(layerId, zOrder);
+    }
 }
 
 bool RemoteCommandRouter::handleLayerList(const std::vector<std::string>& args) {
@@ -1882,7 +1885,11 @@ bool RemoteCommandRouter::handleDisplayAssign(const std::vector<std::string>& ar
         return false;
     }
     
-    int layerId = std::atoi(args[0].c_str());
+    const int layerId = layerManager_ ? layerManager_->resolveLayerAddress(args[0]) : 0;
+    if (layerId == 0) {
+        reportUnknownLayer(args[0], "display/assign");
+        return false;
+    }
     std::string outputName = args[1];
     
     LOG_INFO << "Layer " << layerId << " assigned to output " << outputName

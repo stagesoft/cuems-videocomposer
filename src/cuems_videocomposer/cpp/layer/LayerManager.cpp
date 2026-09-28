@@ -21,6 +21,8 @@
 
 #include "LayerManager.h"
 #include "../utils/Logger.h"
+#include "LayerPathId.h"
+#include <cstdlib>
 #include <algorithm>
 #include <map>
 
@@ -473,6 +475,20 @@ const VideoLayer* LayerManager::getLayerByCueId(const std::string& cueId) const 
         return getLayer(mapIt->second);
     }
     return nullptr;
+}
+
+int LayerManager::resolveLayerAddress(const std::string& address) const {
+    auto mapIt = cueIdToLayerId_.find(address);
+    if (mapIt != cueIdToLayerId_.end() && getLayer(mapIt->second)) {
+        return mapIt->second;
+    }
+    if (isIntegerLayerId(address)) {
+        const int layerId = std::atoi(address.c_str());
+        if (getLayer(layerId)) {
+            return layerId;
+        }
+    }
+    return 0;
 }
 
 std::string LayerManager::getCueIdFromLayer(VideoLayer* layer) const {

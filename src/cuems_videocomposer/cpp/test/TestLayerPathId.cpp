@@ -24,7 +24,7 @@
  * (869f8j1ja).
  */
 
-#include "remote/LayerPathId.h"
+#include "layer/LayerPathId.h"
 #include "TestFramework.h"
 
 using namespace videocomposer;
