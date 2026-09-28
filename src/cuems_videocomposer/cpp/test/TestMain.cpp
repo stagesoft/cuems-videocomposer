@@ -27,6 +27,12 @@ extern bool test_LayerManager_RemoveLayer();
 extern bool test_LayerManager_ZOrder();
 extern bool test_LayerManager_DuplicateLayer();
 extern bool test_LayerManager_Reorder();
+extern bool test_LayerManager_ResolveLiveCueId();
+extern bool test_LayerManager_ResolveAbsentDigitUuidIsNotAnIntegerId();
+extern bool test_LayerManager_ResolveIntegerId();
+extern bool test_LayerManager_ResolveMalformedOrMissing();
+extern bool test_LayerManager_ResolveCueIdWinsOverIntegerId();
+extern bool test_LayerManager_ResolveAfterRemovalIsGone();
 
 extern bool test_VideoLayer_PlayPause();
 extern bool test_VideoLayer_Seek();
@@ -75,6 +81,12 @@ int main() {
     TestFramework::instance().addTest("LayerManager_ZOrder", test_LayerManager_ZOrder);
     TestFramework::instance().addTest("LayerManager_DuplicateLayer", test_LayerManager_DuplicateLayer);
     TestFramework::instance().addTest("LayerManager_Reorder", test_LayerManager_Reorder);
+    TestFramework::instance().addTest("LayerManager_ResolveLiveCueId", test_LayerManager_ResolveLiveCueId);
+    TestFramework::instance().addTest("LayerManager_ResolveAbsentDigitUuidIsNotAnIntegerId", test_LayerManager_ResolveAbsentDigitUuidIsNotAnIntegerId);
+    TestFramework::instance().addTest("LayerManager_ResolveIntegerId", test_LayerManager_ResolveIntegerId);
+    TestFramework::instance().addTest("LayerManager_ResolveMalformedOrMissing", test_LayerManager_ResolveMalformedOrMissing);
+    TestFramework::instance().addTest("LayerManager_ResolveCueIdWinsOverIntegerId", test_LayerManager_ResolveCueIdWinsOverIntegerId);
+    TestFramework::instance().addTest("LayerManager_ResolveAfterRemovalIsGone", test_LayerManager_ResolveAfterRemovalIsGone);
     
     TestFramework::instance().addTest("VideoLayer_PlayPause", test_VideoLayer_PlayPause);
     TestFramework::instance().addTest("VideoLayer_Seek", test_VideoLayer_Seek);
