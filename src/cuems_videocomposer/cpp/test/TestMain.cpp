@@ -54,6 +54,9 @@ extern bool test_Integration_MIDISyncSource_NoJumpSnapBias();
 extern bool test_MTCDecoder();
 
 extern bool test_SMPTEUtils_Overflow24h();
+extern bool test_LayerPathId_IntegerIds();
+extern bool test_LayerPathId_UuidsAreNotIntegerIds();
+extern bool test_LayerPathId_Malformed();
 
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
@@ -98,6 +101,9 @@ int main() {
 
     TestFramework::instance().addTest("MTCDecoder", test_MTCDecoder);
     TestFramework::instance().addTest("SMPTEUtils_Overflow24h", test_SMPTEUtils_Overflow24h);
+    TestFramework::instance().addTest("LayerPathId_IntegerIds", test_LayerPathId_IntegerIds);
+    TestFramework::instance().addTest("LayerPathId_UuidsAreNotIntegerIds", test_LayerPathId_UuidsAreNotIntegerIds);
+    TestFramework::instance().addTest("LayerPathId_Malformed", test_LayerPathId_Malformed);
 
     TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);

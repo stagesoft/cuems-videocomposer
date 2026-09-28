@@ -30,6 +30,7 @@
 #include "../display/DisplayBackend.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
 #include "../utils/SMPTEUtils.h"
+#include "LayerPathId.h"
 #include <sstream>
 #include <algorithm>
 #include <cstdlib>
@@ -411,17 +412,21 @@ bool RemoteCommandRouter::routeCommand(const std::string& path, const std::vecto
                     return it->second(layer, args);
                 }
             } else {
-                // Try integer layer ID for backward compatibility
-                int layerId = std::atoi(cueId.c_str());
-                if (layerId >= 0) {
-                    layer = layerManager_->getLayer(layerId);
+                // Integer layer ID for backward compatibility — only for an
+                // all-digit id. A cue UUID whose layer is gone must not fall
+                // through: atoi("2ac1fe93-...") is 2, which would apply this
+                // command to whichever live layer has integer id 2.
+                if (isIntegerLayerId(cueId)) {
+                    layer = layerManager_->getLayer(std::atoi(cueId.c_str()));
                     if (layer) {
-            auto it = layerCommands_.find(command);
-            if (it != layerCommands_.end()) {
-                return it->second(layer, args);
+                        auto it = layerCommands_.find(command);
+                        if (it != layerCommands_.end()) {
+                            return it->second(layer, args);
                         }
+                        return false;
                     }
                 }
+                reportUnknownLayer(cueId, command);
             }
         } else {
             // No layer ID specified - treat as app-level layer command
@@ -440,6 +445,16 @@ bool RemoteCommandRouter::routeCommand(const std::string& path, const std::vecto
     }
 
     return false;
+}
+
+void RemoteCommandRouter::reportUnknownLayer(const std::string& id, const std::string& command) {
+    if (warnedUnknownLayers_.insert(id).second) {
+        LOG_WARNING << "Layer not found for command '" << command << "' (cue ID: " << id
+                    << "): ignored (further commands for this ID log at verbose level)";
+    } else {
+        LOG_VERBOSE << "Layer not found for command '" << command << "' (cue ID: " << id
+                    << "): ignored";
+    }
 }
 
 void RemoteCommandRouter::registerAppCommand(const std::string& path,
