@@ -191,8 +191,20 @@ void LayerManager::updateAll() {
             if (currentFrame >= totalFrames &&
                 !wraparoundActive &&
                 !props.loopRegion.enabled) {
-                // Mark layer for removal
-                layersToRemove.push_back(layer->getLayerId());
+                // Mark layer for removal. Always logged: this removal happens
+                // without any command, so without this line nothing records
+                // that the layer is gone (869f8j1ja).
+                const int layerId = layer->getLayerId();
+                std::string cueId = "-";
+                for (const auto& entry : cueIdToLayerId_) {
+                    if (entry.second == layerId) {
+                        cueId = entry.first;
+                        break;
+                    }
+                }
+                LOG_INFO << "Auto-unloaded layer (cue ID: " << cueId << ", id " << layerId
+                         << ") at end of file (frame " << currentFrame << "/" << totalFrames << ")";
+                layersToRemove.push_back(layerId);
             }
         }
     }
