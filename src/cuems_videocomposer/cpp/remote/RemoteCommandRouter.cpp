@@ -448,12 +448,24 @@ bool RemoteCommandRouter::routeCommand(const std::string& path, const std::vecto
 }
 
 void RemoteCommandRouter::reportUnknownLayer(const std::string& id, const std::string& command) {
-    if (warnedUnknownLayers_.insert(id).second) {
+    // Bounded: engine layer ids are "<cue-uuid>_<n>", one per cue output.
+    if (unknownLayerMisses_.size() >= 4096 && !unknownLayerMisses_.count(id)) {
+        unknownLayerMisses_.clear();
+    }
+    const uint64_t misses = ++unknownLayerMisses_[id];
+    // WARNING at 1, 10, 100, ... so a recurring miss stays visible at INFO
+    // level without flooding the journal.
+    uint64_t decade = 1;
+    while (decade * 10 <= misses) {
+        decade *= 10;
+    }
+    if (misses == decade) {
         LOG_WARNING << "Layer not found for command '" << command << "' (cue ID: " << id
-                    << "): ignored (further commands for this ID log at verbose level)";
+                    << "): ignored (" << misses << (misses == 1 ? " miss" : " misses")
+                    << " for this ID)";
     } else {
         LOG_VERBOSE << "Layer not found for command '" << command << "' (cue ID: " << id
-                    << "): ignored";
+                    << "): ignored (" << misses << " misses)";
     }
 }
 

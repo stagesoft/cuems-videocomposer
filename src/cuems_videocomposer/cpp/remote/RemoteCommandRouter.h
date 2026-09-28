@@ -24,8 +24,8 @@
 
 #include <string>
 #include <functional>
+#include <cstdint>
 #include <map>
-#include <set>
 #include <vector>
 
 namespace videocomposer {
@@ -68,10 +68,10 @@ private:
     // Parse command path
     bool parsePath(const std::string& path, std::string& command, int& layerId);
 
-    // Log a command addressed to a layer that does not exist: WARNING the
-    // first time per id, VERBOSE after that.
+    // Log a command addressed to a layer that does not exist: WARNING with a
+    // running count at the 1st, 10th, 100th... miss per id, VERBOSE otherwise.
     void reportUnknownLayer(const std::string& id, const std::string& command);
-    std::set<std::string> warnedUnknownLayers_;
+    std::map<std::string, uint64_t> unknownLayerMisses_;
 
     // App-level command handlers
     bool handleQuit(const std::vector<std::string>& args);
