@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+-->
 # cuems-videocomposer
 
 Part of the **CUEMS** ecosystem — see the [`cuems-RELATIONS`](https://github.com/stagesoft/cuems-RELATIONS) repo for the system index, architecture diagram, and protocol/port map.
@@ -70,3 +75,11 @@ The patch lives in `cpp/display/drm/DRMBackend.cpp` (`openWindow`/`initializeVir
   AMD is **2:1** — the rejected `AddFB2WithModifiers` *plus* the working fallback — so **`83b1489` is AMD-only**. Intel is **1:1**: the `WithModifiers` call succeeds first time on i915, so **`83b1489` is inert there** (byte-identical ioctl before and after). **`c2b74e8` helps both**, zeroing the per-flip pair: ~539 ioctls/s on AMD, ~716/s on Intel at 3×1080p60. Cost: CPU −9% (1×4K60) / −11% (2×4K60) on AMD, −14% (3×1080p60) on Intel, at identical `gfx` and 0 dropped frames across 12 rungs. Live fb count is flat (higher after — one per BO — but bounded by the pool, **not a leak**).
   ⚠️ **`83b1489`'s commit message says "stock FAIL 58 drops → fixed PASS 0". That does NOT reproduce and should not be cited.** It compared the packaged Debian binary against a local build — an A/B of two *builds*, not of the patch. With both arms built from one tree (BASE rebuild = only `DRMSurface.cpp` + link), **the pre-fix binary also passes 2×4K60 with 0 drops**. The CPU/ioctl win is real; **there is no capacity rescue**. General rule: *an A/B is only valid if both binaries are built the same way* — and stamp the binary's md5 into the result, or an arm label is an assertion rather than a measurement. Raw data: `cuems-RELATIONS/baselines/fp530-capacity/` (`AB-light-*`, `AB-heavy-*`, `AB-intel-*`), doc page 69maa-11632, ClickUp 869efh2f5.
 - **N97 display ceiling** (source/measurement, 2026-06): sustains 2×4K@30 or 1×4K@60 with 0 drops but **hard-fails 3×4K@30** (render/EU-saturation, perf-limit reason `OTHER`, ~69°C — NOT thermal, NOT pl4). i3-1215U tops out at the same 2×4K@30 but for a thermal reason. HAP shifts every verdict down. Real lever: distribute outputs across nodes (1×4K@60/node proven, MTC-synced, 0 drops). `PresentationTiming` counts drops from DRM page-flip MSC deltas → `journalctl -u cuems-videocomposer | grep Dropped` is the accurate signal.
+- **A layer is named by its cue id; integer ids are for manual use only (869f8j1ja).**
+  - The engine addresses every layer as `<cue-uuid>_<n>`.
+  - Integer layer ids exist, but they restart at **1 on every `/reset`** (STOP, project load), so a show always has live layers 1, 2, 3….
+  - Every OSC handler that names a layer must resolve the name with **`LayerManager::resolveLayerAddress`**. It takes a live cue id first, then an **all-digit** integer id (`layer/LayerPathId.h`), and otherwise returns 0, which is never a layer id.
+  - **Never `std::atoi` a layer name.** `atoi("2ac1fe93-…")` is 2. Before this fix, `/layer/remove`, `/duplicate`, `/reorder` and `/display/assign` did exactly that.
+  - On test2 (`cuems-RELATIONS/baselines/869f8j1ja/`), `/layer/remove 2dead000-…_0` for a cue that was never loaded **silently deleted the live layer 2** mid-play.
+  - An unresolved name is now ignored and reported through `RemoteCommandRouter::reportUnknownLayer`, at WARNING on miss 1, 10, 100… and VERBOSE otherwise. A successful `/layer/remove` logs at INFO.
+  - What still produces stale cue ids in practice is a videocomposer restart mid-show, which the engine does not detect (869f8jn34).

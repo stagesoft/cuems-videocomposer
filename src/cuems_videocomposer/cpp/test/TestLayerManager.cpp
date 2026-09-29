@@ -179,3 +179,80 @@ bool test_LayerManager_Reorder() {
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// resolveLayerAddress: the one way an OSC layer name becomes a layer (869f8j1ja)
+// ---------------------------------------------------------------------------
+
+// Returns the integer id the manager assigned, or -1 if the add failed.
+static int addCueLayer(LayerManager& manager, const std::string& cueId) {
+    auto layer = std::make_unique<VideoLayer>();
+    layer->setInputSource(std::make_unique<MockInputSource>());
+    VideoLayer* raw = layer.get();
+    if (!manager.addLayerWithId(cueId, std::move(layer))) {
+        return -1;
+    }
+    return raw->getLayerId();
+}
+
+bool test_LayerManager_ResolveLiveCueId() {
+    LayerManager manager;
+    int id = addCueLayer(manager, "a1b2c3d4-0000-4000-8000-000000000001_0");
+    TEST_ASSERT_TRUE(id > 0);
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("a1b2c3d4-0000-4000-8000-000000000001_0"), id);
+    return true;
+}
+
+bool test_LayerManager_ResolveAbsentDigitUuidIsNotAnIntegerId() {
+    // Integer ids restart at 1 on every /reset, so a show always has layers
+    // 1, 2, ... atoi("2ac1fe93-...") is 2: the absent cue must resolve to
+    // nothing, not to the live layer 2.
+    LayerManager manager;
+    addCueLayer(manager, "1111aaaa-0000-4000-8000-000000000001_0");
+    int id2 = addCueLayer(manager, "2222bbbb-0000-4000-8000-000000000002_0");
+    TEST_ASSERT_EQ(id2, 2);
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("2ac1fe93-0000-4000-8000-000000000003_0"), 0);
+    return true;
+}
+
+bool test_LayerManager_ResolveIntegerId() {
+    LayerManager manager;
+    addCueLayer(manager, "1111aaaa-0000-4000-8000-000000000001_0");
+    int id2 = addCueLayer(manager, "2222bbbb-0000-4000-8000-000000000002_0");
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("2"), id2);
+    return true;
+}
+
+bool test_LayerManager_ResolveMalformedOrMissing() {
+    LayerManager manager;
+    addCueLayer(manager, "1111aaaa-0000-4000-8000-000000000001_0");
+    addCueLayer(manager, "2222bbbb-0000-4000-8000-000000000002_0");
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("0"), 0);
+    TEST_ASSERT_EQ(manager.resolveLayerAddress(""), 0);
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("2abc"), 0);
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("1234567890"), 0);
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("7"), 0);
+    return true;
+}
+
+bool test_LayerManager_ResolveCueIdWinsOverIntegerId() {
+    // A cue id that reads as an integer resolves as the cue id: the lookup
+    // order (cue id first, then integer id) is part of the contract.
+    LayerManager manager;
+    int first = addCueLayer(manager, "5");   // integer id 1, cue id "5"
+    addCueLayer(manager, "other_0");         // integer id 2
+    TEST_ASSERT_EQ(first, 1);
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("5"), first);
+    int third = addCueLayer(manager, "2");   // integer id 3, cue id "2"
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("2"), third);
+    return true;
+}
+
+bool test_LayerManager_ResolveAfterRemovalIsGone() {
+    LayerManager manager;
+    addCueLayer(manager, "1111aaaa-0000-4000-8000-000000000001_0");
+    TEST_ASSERT_TRUE(manager.removeLayerByCueId("1111aaaa-0000-4000-8000-000000000001_0"));
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("1111aaaa-0000-4000-8000-000000000001_0"), 0);
+    TEST_ASSERT_EQ(manager.resolveLayerAddress("1"), 0);
+    return true;
+}

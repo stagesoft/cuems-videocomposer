@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+-->
+
 # CUEMS Video Composer – User guide
 
 ## Starting the application
@@ -15,6 +21,7 @@ Use `--fullscreen` to start in fullscreen and `--ontop` to keep the window above
 - **Single file at startup:** pass the path as a positional argument, e.g. `cuems-videocomposer video.mp4`.
 - **Via OSC:** send `/videocomposer/load` with a file path (string) to load a video, replacing the current one.
 - **Multiple layers:** use OSC layer commands to add, load, and manage layers. Add a layer with `/videocomposer/layer/add` (path), load a file into a layer with `/videocomposer/layer/load` (filepath, cueId) or `/videocomposer/layer/<id>/file` (path). Reorder with `/videocomposer/layer/reorder`, set opacity and visibility per layer.
+- **What `<id>` is:** the layer's cue id, the `cueId` given to `/videocomposer/layer/load` (CUEMS uses `<cue-uuid>_<n>`). `/layer/remove`, `/layer/duplicate`, `/layer/reorder` and `/display/assign` take the same id as their first argument. A plain number such as `2` also works, as the layer's integer id, but integer ids restart at 1 after every `/videocomposer/reset`, so use them only by hand. An id that matches no layer is ignored and logged as `Layer not found for command …`.
 
 For the full list of layer and application OSC paths, see the OSC reference in the repository root.
 
