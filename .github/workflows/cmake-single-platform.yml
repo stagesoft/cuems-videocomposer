@@ -58,6 +58,7 @@ jobs:
           liblo-dev \
           libltc-dev \
           libasound2-dev \
+          librtmidi-dev \
           libsnappy-dev
 
     - name: Configure CMake
