@@ -1,23 +1,38 @@
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+#
 # This starter workflow is for a CMake project running on a single platform.
 # See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-multi-platform.yml
+#
+# NOTE (869f8j1ja, 2026-09-29): this workflow never actually ran — every
+# queued job sat for 24h and was auto-cancelled, because `runs-on:
+# debian-bookworm` names a self-hosted runner label with zero runners
+# registered for this repo. It also only triggered on `main`, which is 19
+# commits behind `rc_1` (the branch every PR actually targets) and never
+# received a push. Fixed: a GitHub-hosted runner (ubuntu-latest, same as
+# rtpmidid/ola elsewhere in this org) and both branches. Submodules are
+# now checked out too — mtcreceiver, cuemslogger and cuems-mediadecoder
+# are required just to configure, and were previously missing entirely.
 
 name: CMake on a single platform
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "rc_1" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "rc_1" ]
+  workflow_dispatch:
 
 env:
   BUILD_TYPE: Release
 
 jobs:
   build:
-    runs-on: debian-bookworm
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Install dependencies
       run: |
@@ -51,8 +66,8 @@ jobs:
       run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
 
     - name: Build
-      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} -j"$(nproc)"
 
     - name: Test
       working-directory: ${{github.workspace}}/build
-      run: ctest -C ${{env.BUILD_TYPE}}
+      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure
