@@ -48,10 +48,8 @@ jobs:
           libglew-dev \
           libegl-dev \
           libva-dev \
-          libva-drm-dev \
           libdrm-dev \
           libwayland-dev \
-          libwayland-egl-dev \
           wayland-protocols \
           libxinerama-dev \
           libxv-dev \
