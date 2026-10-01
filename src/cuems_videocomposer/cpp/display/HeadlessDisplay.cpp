@@ -210,6 +210,12 @@ void HeadlessDisplay::render(LayerManager* layerManager, OSDManager* osdManager)
                 renderer_->renderLayer(layer);
             }
         }
+
+        // Drop removed layers' cached textures and delete what was deferred.
+        auto layers = layerManager->getLayersSortedByZOrder();
+        std::vector<const VideoLayer*> liveLayers(layers.begin(), layers.end());
+        renderer_->evictRemovedLayerTextures(liveLayers);
+        renderer_->cleanupDeferredTextures();
     }
     
     // Unbind FBO

@@ -34,6 +34,7 @@ extern "C" {
 #endif
 #include "../../homography.h"
 }
+#include <algorithm>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -814,6 +815,8 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
 }
 
 void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layers) {
+    evictRemovedLayerTextures(layers);
+
     // Check if master transforms are active
     bool useMasterFBO = masterProperties_.isActive();
     
@@ -867,6 +870,26 @@ void OpenGLRenderer::updateTexture(int width, int height) {
         glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA, 
                      width, height, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+    }
+}
+
+void OpenGLRenderer::evictRemovedLayerTextures(const std::vector<const VideoLayer*>& liveLayers) {
+    // Only CPU-path layers ever get an entry, so this is usually a no-op.
+    for (auto it = layerTextureCache_.begin(); it != layerTextureCache_.end();) {
+        const int layerId = it->first;
+        const bool live = std::any_of(liveLayers.begin(), liveLayers.end(),
+            [layerId](const VideoLayer* layer) {
+                return layer && layer->getLayerId() == layerId;
+            });
+        if (live) {
+            ++it;
+            continue;
+        }
+        if (it->second.textureId != 0) {
+            texturesToDelete_.push_back(it->second.textureId);
+        }
+        cleanupLayerPBOs(it->second);
+        it = layerTextureCache_.erase(it);
     }
 }
 
