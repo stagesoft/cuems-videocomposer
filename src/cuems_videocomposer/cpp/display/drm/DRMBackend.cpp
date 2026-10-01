@@ -521,6 +521,12 @@ void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager
         // Schedule page flip (non-blocking)
         surface->schedulePageFlip();
     }
+
+    // Delete the textures the renderer deferred this frame, after the swaps.
+    // Only with a context current: if no surface rendered, nothing was bound.
+    if (renderer_ && eglGetCurrentContext() != EGL_NO_CONTEXT) {
+        renderer_->cleanupDeferredTextures();
+    }
 }
 
 void DRMBackend::handleEvents() {

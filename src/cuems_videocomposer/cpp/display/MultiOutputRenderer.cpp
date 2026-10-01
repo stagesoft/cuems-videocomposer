@@ -175,6 +175,13 @@ void MultiOutputRenderer::render(LayerManager* layerManager, OSDManager* osdMana
     if (captureEnabled_ && outputSinkManager_) {
         captureForVirtualOutputs();
     }
+
+    // Step 4: Delete the textures the renderer deferred this frame, after the
+    // swaps (same place X11/Wayland do it). Without this the DRM path never
+    // drains texturesToDelete_ and every resized CPU-path texture is kept.
+    if (renderer_) {
+        renderer_->cleanupDeferredTextures();
+    }
 }
 
 void MultiOutputRenderer::renderToCanvas(LayerManager* layerManager, OSDManager* osdManager) {
