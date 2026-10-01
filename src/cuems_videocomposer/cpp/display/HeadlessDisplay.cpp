@@ -203,16 +203,18 @@ void HeadlessDisplay::render(LayerManager* layerManager, OSDManager* osdManager)
     
     // Render layers
     if (renderer_ && layerManager) {
-        // Render each visible layer
-        for (size_t i = 0; i < layerManager->getLayerCount(); ++i) {
-            VideoLayer* layer = layerManager->getLayer(static_cast<int>(i));
+        // Render each visible layer, in z-order like the other backends.
+        // (This used to walk getLayer(i) for i < count, but getLayer() takes a
+        // layer ID, not an index: IDs start at 1, so the newest layer was never
+        // drawn, and after any removal the wrong set was.)
+        auto layers = layerManager->getLayersSortedByZOrder();
+        for (VideoLayer* layer : layers) {
             if (layer && layer->properties().visible && layer->isReady()) {
                 renderer_->renderLayer(layer);
             }
         }
 
         // Drop removed layers' cached textures and delete what was deferred.
-        auto layers = layerManager->getLayersSortedByZOrder();
         std::vector<const VideoLayer*> liveLayers(layers.begin(), layers.end());
         renderer_->evictRemovedLayerTextures(liveLayers);
         renderer_->cleanupDeferredTextures();
