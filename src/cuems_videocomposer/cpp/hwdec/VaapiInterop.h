@@ -31,6 +31,7 @@
 // EGL types - use minimal definitions to avoid GLEW conflicts
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <thread>
 
 // GL types - minimal definitions to avoid GLEW conflicts
 typedef unsigned int GLuint;
@@ -221,6 +222,12 @@ private:
     EGLImageKHR prevEglImageUV_;
     GLuint textureY_;
     GLuint textureUV_;
+
+    // Backend whose context owns textureY_/textureUV_, and the thread that
+    // context is used from. The DRM backend releases its context after every
+    // frame, so teardown has to make it current itself (869en65tm).
+    DisplayBackend* display_ = nullptr;
+    std::thread::id glThread_;
     
     // Cached frame info
     int frameWidth_;

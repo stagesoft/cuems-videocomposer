@@ -124,13 +124,34 @@ VaapiInterop::~VaapiInterop() {
         previousFrame_ = nullptr;
     }
     
-    // Delete textures
-    if (textureY_ != 0) {
-        glDeleteTextures(1, &textureY_);
+    // Delete textures. They are bound to the last frame's DMA-BUF, so a delete
+    // that silently no-ops keeps that decoder surface allocated for the life of
+    // the process - one per unloaded layer (869en65tm). glDeleteTextures with no
+    // current context does exactly that, and it is the normal case here: the
+    // DRM backend releases its context after every frame and OSC unloads run
+    // between frames. Borrow the context, but only on the thread that uses it.
+    if (textureY_ != 0 || textureUV_ != 0) {
+        bool madeCurrent = false;
+        if (eglGetCurrentContext() == EGL_NO_CONTEXT && display_ &&
+            std::this_thread::get_id() == glThread_) {
+            display_->makeCurrent();
+            madeCurrent = eglGetCurrentContext() != EGL_NO_CONTEXT;
+        }
+        if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
+            if (textureY_ != 0) {
+                glDeleteTextures(1, &textureY_);
+            }
+            if (textureUV_ != 0) {
+                glDeleteTextures(1, &textureUV_);
+            }
+        } else {
+            LOG_WARNING << "VaapiInterop: no GL context to delete the NV12 textures on - "
+                           "one decoder surface stays allocated";
+        }
+        if (madeCurrent) {
+            display_->clearCurrent();
+        }
         textureY_ = 0;
-    }
-    if (textureUV_ != 0) {
-        glDeleteTextures(1, &textureUV_);
         textureUV_ = 0;
     }
     
@@ -156,6 +177,11 @@ bool VaapiInterop::init(DisplayBackend* display) {
         return false;
     }
     
+    // init() runs lazily on the render thread, which is the only thread the
+    // destructor may borrow the backend's context from.
+    display_ = display;
+    glThread_ = std::this_thread::get_id();
+
     // Get EGL display and extension functions from DisplayBackend
     eglDisplay_ = display->getEGLDisplay();
     if (eglDisplay_ == EGL_NO_DISPLAY) {
