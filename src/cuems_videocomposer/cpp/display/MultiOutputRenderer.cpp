@@ -179,7 +179,16 @@ void MultiOutputRenderer::render(LayerManager* layerManager, OSDManager* osdMana
     // Step 4: Delete the textures the renderer deferred this frame, after the
     // swaps (same place X11/Wayland do it). Without this the DRM path never
     // drains texturesToDelete_ and every resized CPU-path texture is kept.
-    if (renderer_) {
+    //
+    // Only with a context current. cleanupDeferredTextures() clears its list
+    // whether or not glDeleteTextures took effect, so with no context the
+    // deletes would be silently lost and the textures kept for good - the same
+    // failure as a no-op delete in ~VaapiInterop (869en65tm). Today the last
+    // output's context is still current here, but that is a side effect of not
+    // releasing it between outputs, so check instead of relying on it. Skipped
+    // frames just retry: the list is kept. (EGL check: this is the DRM path;
+    // the GLX backends do their own drain.)
+    if (renderer_ && eglGetCurrentContext() != EGL_NO_CONTEXT) {
         renderer_->cleanupDeferredTextures();
     }
 }
