@@ -20,7 +20,10 @@
  */
 
 #include "NDIVideoInput.h"
+#include "NdiAddress.h"
+#include "../remote/JournalContract.h"
 #include "../utils/Logger.h"
+#include <cmath>
 #include <cstring>
 #include <thread>
 #include <chrono>
@@ -80,31 +83,44 @@ bool NDIVideoInput::connectToSource(const std::string& sourceName) {
 
     LOG_INFO << "NDI: Searching for source '" << sourceName << "' (timeout: " << discoveryTimeoutMs_ << "ms)";
 
-    // Poll for sources with timeout (more responsive than sleep)
+    // Poll for sources with timeout (more responsive than sleep).
+    // An exact name wins for the whole discovery window: a substring hit
+    // ("MYLAPTOP (OBS)" for "LAPTOP (OBS)") must not shadow the exact source
+    // just because it was announced first. A substring match is accepted
+    // only in one final pass after the window has run out.
     auto startTime = std::chrono::steady_clock::now();
     const NDIlib_source_t* selectedSource = nullptr;
+    bool finalPass = false;
     
     while (true) {
         // Check for sources
         uint32_t numSources = 0;
         const NDIlib_source_t* sources = NDIlib_find_get_current_sources(ndiFinder_, &numSources);
         
-        // Look for matching source (exact match or partial match)
-        for (uint32_t i = 0; i < numSources; i++) {
-            std::string ndiName = sources[i].p_ndi_name;
-            if (ndiName == sourceName || ndiName.find(sourceName) != std::string::npos) {
+        for (uint32_t i = 0; i < numSources && !selectedSource; i++) {
+            if (sourceName == sources[i].p_ndi_name) {
                 selectedSource = &sources[i];
-                LOG_INFO << "NDI: Found source '" << ndiName << "'";
-                break;
+            }
+        }
+        for (uint32_t i = 0; i < numSources && !selectedSource && finalPass; i++) {
+            if (std::string(sources[i].p_ndi_name).find(sourceName) != std::string::npos) {
+                selectedSource = &sources[i];
             }
         }
         
-        if (selectedSource) break;
+        if (selectedSource) {
+            LOG_INFO << "NDI: Found source '" << selectedSource->p_ndi_name << "'";
+            break;
+        }
         
-        // Check timeout
-        auto elapsed = std::chrono::steady_clock::now() - startTime;
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() >= discoveryTimeoutMs_) {
-            LOG_ERROR << "NDI: Source not found: " << sourceName;
+        if (!finalPass) {
+            auto elapsed = std::chrono::steady_clock::now() - startTime;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() >= discoveryTimeoutMs_) {
+                finalPass = true;
+                continue;
+            }
+        } else {
+            LOG_ERROR << journal::ndiSourceNotFound(sourceName);
             
             // List available sources
             uint32_t finalNumSources = 0;
@@ -124,6 +140,8 @@ bool NDIVideoInput::connectToSource(const std::string& sourceName) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    const std::string connectedName = selectedSource->p_ndi_name;
+
     // Create receiver
     NDIlib_recv_create_v3_t recv_desc;
     recv_desc.source_to_connect_to = *selectedSource;
@@ -138,10 +156,37 @@ bool NDIVideoInput::connectToSource(const std::string& sourceName) {
         return false;
     }
 
-    LOG_INFO << "NDI: Connected to source: " << sourceName;
+    LOG_INFO << journal::ndiConnected(connectedName);
     return true;
 #else
     (void)sourceName;  // Unused
+    return false;
+#endif
+}
+
+bool NDIVideoInput::connectToAddress(const std::string& address) {
+#ifdef HAVE_NDI_SDK
+    // No finder: the receiver dials the address itself. Creation succeeds
+    // whether or not anything answers there, and a missing first frame is
+    // not an error either, so an unreachable address cannot be reported from
+    // here - the bridge's relay checks its upstream before sending the load.
+    NDIlib_recv_create_v3_t recv_desc;
+    recv_desc.source_to_connect_to.p_ndi_name = nullptr;
+    recv_desc.source_to_connect_to.p_url_address = address.c_str();
+    recv_desc.color_format = NDIlib_recv_color_format_BGRX_BGRA;
+    recv_desc.bandwidth = NDIlib_recv_bandwidth_highest;
+    recv_desc.allow_video_fields = false;
+    recv_desc.p_ndi_recv_name = "cuems-videocomposer";
+
+    ndiReceiver_ = NDIlib_recv_create_v3(&recv_desc);
+    if (!ndiReceiver_) {
+        LOG_ERROR << "NDI: Failed to create receiver";
+        return false;
+    }
+    LOG_INFO << journal::ndiConnected("@" + address);
+    return true;
+#else
+    (void)address;
     return false;
 #endif
 }
@@ -157,8 +202,27 @@ bool NDIVideoInput::open(const std::string& source) {
     if (sourceName_.find("ndi://") == 0) {
         sourceName_ = sourceName_.substr(6);
     }
+    if (sourceName_.empty()) {
+        // An empty name is a substring of every source: refuse it rather
+        // than connect to whichever source happens to be found.
+        LOG_ERROR << "NDI: empty source name";
+        shutdownNDI();
+        return false;
+    }
 
-    if (!connectToSource(sourceName_)) {
+    bool connected = false;
+    if (sourceName_[0] == '@') {
+        std::string address, why;
+        if (!parseNdiAddress(sourceName_, address, why)) {
+            LOG_ERROR << journal::ndiBadAddress(sourceName_, why);
+            shutdownNDI();
+            return false;
+        }
+        connected = connectToAddress(address);
+    } else {
+        connected = connectToSource(sourceName_);
+    }
+    if (!connected) {
         shutdownNDI();
         return false;
     }
@@ -166,16 +230,31 @@ bool NDIVideoInput::open(const std::string& source) {
     // Wait for first frame to get format info
 #ifdef HAVE_NDI_SDK
     NDIlib_video_frame_v2_t video_frame;
-    NDIlib_audio_frame_v2_t audio_frame;
-    NDIlib_metadata_frame_t metadata_frame;
     
     LOG_INFO << "NDI: Waiting for first frame (timeout: " << connectionTimeoutMs_ << "ms)";
     
-    // Try to capture a frame with configurable timeout
-    NDIlib_frame_type_e frame_type = NDIlib_recv_capture_v2(
-        ndiReceiver_, &video_frame, &audio_frame, &metadata_frame, connectionTimeoutMs_);
+    // The first capture right after connecting usually returns a status
+    // change, not video: keep waiting for an actual video frame until the
+    // timeout. Audio and metadata are not requested (NULL): this input only
+    // shows video, and a requested audio frame must be freed by the caller.
+    NDIlib_frame_type_e frame_type = NDIlib_frame_type_none;
+    const auto firstFrameDeadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(connectionTimeoutMs_);
+    while (true) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            firstFrameDeadline - std::chrono::steady_clock::now()).count();
+        if (left <= 0) {
+            break;
+        }
+        frame_type = NDIlib_recv_capture_v2(ndiReceiver_, &video_frame, nullptr, nullptr,
+                                            static_cast<uint32_t>(left));
+        if (frame_type == NDIlib_frame_type_video || frame_type == NDIlib_frame_type_error) {
+            break;
+        }
+    }
     
     if (frame_type == NDIlib_frame_type_video) {
+        std::lock_guard<std::mutex> lock(frameInfoMutex_);
         frameInfo_.width = video_frame.xres;
         frameInfo_.height = video_frame.yres;
         frameInfo_.aspect = static_cast<float>(video_frame.xres) / static_cast<float>(video_frame.yres);
@@ -189,18 +268,24 @@ bool NDIVideoInput::open(const std::string& source) {
         frameInfo_.format = PixelFormat::BGRA32;  // BGRA matches OpenGL expectation
         frameInfo_.totalFrames = 0;  // Live stream, no total frames
         frameInfo_.duration = 0.0;
+        frameInfoInvented_ = false;
         
         NDIlib_recv_free_video_v2(ndiReceiver_, &video_frame);
         
-        LOG_INFO << "NDI: Source format: " << frameInfo_.width << "x" << frameInfo_.height 
-                 << " @ " << frameInfo_.framerate << " fps (BGRA)";
+        LOG_INFO << journal::ndiSourceFormat(frameInfo_.width, frameInfo_.height, frameInfo_.framerate);
     } else {
-        LOG_WARNING << "NDI: No video frame received, using defaults (1920x1080 @25fps)";
+        // Not a failure: the capture thread keeps receiving, and the first
+        // frame that arrives replaces this guess (ndiSourceFormatUpdated).
+        LOG_WARNING << journal::ndiNoVideoFrame();
+        std::lock_guard<std::mutex> lock(frameInfoMutex_);
         frameInfo_.width = 1920;
         frameInfo_.height = 1080;
         frameInfo_.aspect = 16.0f / 9.0f;
         frameInfo_.framerate = 25.0;
         frameInfo_.format = PixelFormat::BGRA32;  // BGRA matches OpenGL expectation
+        frameInfo_.totalFrames = 0;
+        frameInfo_.duration = 0.0;
+        frameInfoInvented_ = true;
     }
 #endif
 
@@ -223,6 +308,8 @@ void NDIVideoInput::close() {
     ready_ = false;
     sourceName_.clear();
     frameCount_ = 0;
+    std::lock_guard<std::mutex> lock(frameInfoMutex_);
+    frameInfoInvented_ = false;
 }
 
 bool NDIVideoInput::isReady() const {
@@ -230,7 +317,35 @@ bool NDIVideoInput::isReady() const {
 }
 
 FrameInfo NDIVideoInput::getFrameInfo() const {
+    std::lock_guard<std::mutex> lock(frameInfoMutex_);
     return frameInfo_;
+}
+
+bool NDIVideoInput::isFrameInfoProvisional() const {
+    std::lock_guard<std::mutex> lock(frameInfoMutex_);
+    return frameInfoInvented_;
+}
+
+void NDIVideoInput::updateFrameInfoFromCapture(int width, int height, double fps) {
+    std::lock_guard<std::mutex> lock(frameInfoMutex_);
+    // Frame rates are compared loosely: N/D jitter is not a format change.
+    const bool fpsChanged = fps > 0.0 && std::abs(fps - frameInfo_.framerate) > 0.01;
+    if (!frameInfoInvented_ && width == frameInfo_.width && height == frameInfo_.height && !fpsChanged) {
+        return;
+    }
+    const bool wasInvented = frameInfoInvented_;
+    frameInfo_.width = width;
+    frameInfo_.height = height;
+    frameInfo_.aspect = static_cast<float>(width) / static_cast<float>(height);
+    if (fps > 0.0) {
+        frameInfo_.framerate = fps;
+    }
+    frameInfoInvented_ = false;
+    if (wasInvented) {
+        LOG_INFO << journal::ndiSourceFormatUpdated(width, height, frameInfo_.framerate);
+    } else {
+        LOG_INFO << journal::ndiSourceFormatChanged(width, height, frameInfo_.framerate);
+    }
 }
 
 int64_t NDIVideoInput::getCurrentFrame() const {
@@ -253,12 +368,11 @@ bool NDIVideoInput::captureFrame(FrameBuffer& buffer) {
     }
 
     NDIlib_video_frame_v2_t video_frame;
-    NDIlib_audio_frame_v2_t audio_frame;
-    NDIlib_metadata_frame_t metadata_frame;
 
-    // Non-blocking capture with short timeout
+    // Capture with a short timeout. Video only: a requested audio or
+    // metadata frame would have to be freed here (OBS sends audio).
     NDIlib_frame_type_e frame_type = NDIlib_recv_capture_v2(
-        ndiReceiver_, &video_frame, &audio_frame, &metadata_frame, 100);
+        ndiReceiver_, &video_frame, nullptr, nullptr, 100);
 
     if (frame_type == NDIlib_frame_type_video) {
         // Allocate buffer for frame
@@ -267,6 +381,12 @@ bool NDIVideoInput::captureFrame(FrameBuffer& buffer) {
         info.height = video_frame.yres;
         info.aspect = static_cast<float>(video_frame.xres) / static_cast<float>(video_frame.yres);
         info.format = PixelFormat::BGRA32;  // BGRA matches OpenGL expectation
+        double fps = 0.0;
+        if (video_frame.frame_rate_N > 0 && video_frame.frame_rate_D > 0) {
+            fps = static_cast<double>(video_frame.frame_rate_N) / static_cast<double>(video_frame.frame_rate_D);
+            info.framerate = fps;
+        }
+        updateFrameInfoFromCapture(video_frame.xres, video_frame.yres, fps);
         
         if (!buffer.allocate(info)) {
             NDIlib_recv_free_video_v2(ndiReceiver_, &video_frame);

@@ -21,12 +21,22 @@
 
 #include "VideoComposerApplication.h"
 #include "input/NDIVideoInput.h"
+#include "input/NdiTransport.h"
 #include <iostream>
 #ifdef HAVE_CUEMS_LOGGER
 #include "cuemslogger.h"
 #endif
 
+// Where the package ships ndi-config.v1.json (CMakeLists.txt).
+#ifndef CUEMS_NDI_CONFIG_DIR
+#define CUEMS_NDI_CONFIG_DIR "/usr/share/cuems-videocomposer/ndi"
+#endif
+
 int main(int argc, char** argv) {
+    // Before anything can initialise the NDI SDK, which reads its transport
+    // configuration once per process (plan rev 9, D17).
+    videocomposer::configureNdiTransport(CUEMS_NDI_CONFIG_DIR);
+
     // Check for --discover-ndi flag before full initialization
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];

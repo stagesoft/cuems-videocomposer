@@ -144,11 +144,22 @@ public:
      * For live streams: get the latest available frame
      * Default implementation calls readFrame(0, buffer)
      * @param buffer FrameBuffer to store the decoded frame
-     * @return true on success, false on failure
+     * @param waitMs How long to wait when no new frame is available yet.
+     *               0 = never block (the render loop's live pull uses this).
+     * @return true when a new frame was delivered, false otherwise
      */
-    virtual bool readLatestFrame(FrameBuffer& buffer) {
+    virtual bool readLatestFrame(FrameBuffer& buffer, int waitMs = 100) {
+        (void)waitMs;
         return readFrame(0, buffer);
     }
+
+    /**
+     * True while getFrameInfo() is a guess rather than the source's real
+     * format (an NDI source that has not sent a frame yet reports an
+     * invented 1920x1080). Placement computed from it must be redone once
+     * this turns false.
+     */
+    virtual bool isFrameInfoProvisional() const { return false; }
 
     // --- Shared decoder cache ---
     // Used by driver layers to store decoded frames for secondary layers to read.

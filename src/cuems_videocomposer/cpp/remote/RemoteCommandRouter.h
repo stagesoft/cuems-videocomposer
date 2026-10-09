@@ -142,6 +142,7 @@ private:
     bool handleLayerScale(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerXScale(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerYScale(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerFitOutput(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerRotation(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerCornerDeform(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerCornerDeformEnable(VideoLayer* layer, const std::vector<std::string>& args);
@@ -201,6 +202,7 @@ private:
     // Virtual output handlers (Phase 6)
     bool handleOutputCapture(const std::vector<std::string>& args);
     bool handleOutputList(const std::vector<std::string>& args);
+    bool handleNdiDiscover(const std::vector<std::string>& args);
 };
 
 } // namespace videocomposer

@@ -190,7 +190,11 @@ void LayerManager::updateAll() {
             // 3. No region loop is enabled
             bool wraparoundActive = layer->getWraparound() &&
                                    (props.fullFileLoopCount == -1 || props.currentFullFileLoopCount > 0);
-            if (currentFrame >= totalFrames &&
+            // totalFrames > 0: a source without a known length (a live NDI
+            // input reports 0) never "ends" — before this guard its first
+            // frame unloaded it.
+            if (totalFrames > 0 &&
+                currentFrame >= totalFrames &&
                 !wraparoundActive &&
                 !props.loopRegion.enabled) {
                 // Mark layer for removal. Always logged: this removal happens
