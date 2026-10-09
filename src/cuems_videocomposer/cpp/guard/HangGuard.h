@@ -141,7 +141,15 @@ public:
      */
     void disarm(const std::string& why);
 
-    /** Where the hang_guard setting came from: "compiled" or "flag". */
+    /**
+     * The startup state when neither --hang-guard=on nor =off was given: the
+     * profile keeps its measured cap (so advisories still quote it) but
+     * nothing is refused. Logged at INFO, not as a DISARMED warning, because
+     * it is the normal state and not an operator override.
+     */
+    void disarmByDefault();
+
+    /** Where the hang_guard setting came from: "compiled", "default" or "flag". */
     void setGuardSource(const std::string& src) { guardSource_ = src; }
 
     /** Whether a refusal can currently happen. */

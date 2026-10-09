@@ -114,6 +114,18 @@ void HangGuard::disarm(const std::string& why) {
                 << "enforced; counts and warnings keep running";
 }
 
+void HangGuard::disarmByDefault() {
+    const bool hadCap = profile_.armed && profile_.cap > 0;
+    profile_.armed = false;
+    guardSource_ = "default";
+    if (hadCap) {
+        LOG_INFO << "HangGuard: refusal off by default - profile " << profile_.name
+                 << " has a measured cap=" << profile_.cap
+                 << ", enforced only with --hang-guard=on; counts, advisories "
+                 << "and saturation warnings keep running";
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The armed-exposure counter
 // ---------------------------------------------------------------------------
@@ -280,11 +292,13 @@ HangGuard::RevealDecision HangGuard::requestReveal(int layerId, SessionClass cls
     d.activeFourK = activeFourK_.fetch_add(1, std::memory_order_relaxed) + 1;
 
     if (!willRefuse() && profile_.cap > 0 && d.activeFourK > profile_.cap) {
-        // Over the cap only because the guard is off. Loud, because this is
-        // the state in which the machine can hang.
+        // Over the cap only because the guard is off (the default). Loud,
+        // because past the cap the FP530 drops frames, and with the GPU's
+        // ATS off it is where it hung.
         LOG_WARNING << "HangGuard: " << d.activeFourK << " 4K-class sessions decoding, "
                     << "over the cap of " << profile_.cap
-                    << " - guard is off, this is the measured hang region";
+                    << " - guard is off, nothing refused; expect dropped frames "
+                    << "(this box hung here only with the GPU's ATS off)";
     }
     return d;
 }

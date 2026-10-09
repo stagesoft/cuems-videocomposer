@@ -41,6 +41,12 @@ namespace videocomposer {
  * the only such measurement today is the FP530 one - 4 concurrent 4K-class
  * decode sessions clean, 5 and beyond in the hang region.
  *
+ * ⚠️ **Since 2026-10-09 the compositor does not enforce that cap unless started
+ * with --hang-guard=on.** On the FP530 the hang needed the GPU's ATS off
+ * (pci=nommconf / pci=noats); on the stock kernel line the 5-and-beyond rungs
+ * drop frames but do not hang. The profile keeps the cap so the advisory and the
+ * opt-in still have the measured number.
+ *
  * ⚠️ **The profile does NOT key on RAM, and must not go back to doing so**
  * (changed 2026-09-04). It used to: a 12 GiB MemTotal ceiling split Picasso
  * into an armed `fp530-8gb` and a monitor-only `fp530-16gb`, which meant
@@ -67,7 +73,8 @@ struct MachineProfile {
 
     /**
      * Whether the guard may refuse. False on every profile without a measured
-     * boundary, and forced false by --hang-guard=off.
+     * boundary. At runtime it stays true only with --hang-guard=on: without
+     * the flag (the default) and with --hang-guard=off it is forced false.
      */
     bool armed = false;
 

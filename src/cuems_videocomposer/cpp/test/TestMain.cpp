@@ -95,6 +95,7 @@ extern bool test_HangGuard_AdmitsUpToCapThenRefuses();
 extern bool test_HangGuard_ExemptSessionsAreNeverRefused();
 extern bool test_HangGuard_MonitorOnlyProfileNeverRefuses();
 extern bool test_HangGuard_DisarmStopsRefusalButKeepsCounting();
+extern bool test_HangGuard_DefaultOffKeepsCapAndRefusesNothing();
 extern bool test_HangGuard_RepeatedRevealDoesNotDoubleCount();
 extern bool test_HangGuard_ReleaseIsIdempotentAndSafeWhenUnreserved();
 extern bool test_HangGuard_RefusedRevealReservesNothing();
@@ -193,6 +194,7 @@ int main() {
     TestFramework::instance().addTest("HangGuard_ExemptSessionsAreNeverRefused", test_HangGuard_ExemptSessionsAreNeverRefused);
     TestFramework::instance().addTest("HangGuard_MonitorOnlyProfileNeverRefuses", test_HangGuard_MonitorOnlyProfileNeverRefuses);
     TestFramework::instance().addTest("HangGuard_DisarmStopsRefusalButKeepsCounting", test_HangGuard_DisarmStopsRefusalButKeepsCounting);
+    TestFramework::instance().addTest("HangGuard_DefaultOffKeepsCapAndRefusesNothing", test_HangGuard_DefaultOffKeepsCapAndRefusesNothing);
     TestFramework::instance().addTest("HangGuard_RepeatedRevealDoesNotDoubleCount", test_HangGuard_RepeatedRevealDoesNotDoubleCount);
     TestFramework::instance().addTest("HangGuard_ReleaseIsIdempotentAndSafeWhenUnreserved", test_HangGuard_ReleaseIsIdempotentAndSafeWhenUnreserved);
     TestFramework::instance().addTest("HangGuard_RefusedRevealReservesNothing", test_HangGuard_RefusedRevealReservesNothing);

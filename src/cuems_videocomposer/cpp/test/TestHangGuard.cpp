@@ -205,6 +205,22 @@ bool test_HangGuard_DisarmStopsRefusalButKeepsCounting() {
     return true;
 }
 
+// No flag at all is the shipped state since 2026-10-09: the refusal is opt-in
+// (--hang-guard=on). The profile must keep its measured cap, because the
+// advisory quotes it and the opt-in needs it, and nothing may be refused.
+bool test_HangGuard_DefaultOffKeepsCapAndRefusesNothing() {
+    HangGuard g = armedFp530();
+    g.disarmByDefault();
+    TEST_ASSERT_FALSE(g.willRefuse());
+    TEST_ASSERT_EQ(g.profile().cap, 4);
+    for (int i = 1; i <= 6; ++i) {
+        TEST_ASSERT_TRUE(g.requestReveal(i, SessionClass::fourKClass, "cue").admitted);
+    }
+    TEST_ASSERT_EQ(g.activeFourK(), 6);
+    TEST_ASSERT_EQ(g.refusals(), 0L);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Idempotency - the property that keeps the cap from eroding
 // ---------------------------------------------------------------------------

@@ -203,6 +203,16 @@ bool VideoComposerApplication::initializeHangGuard() {
         // Mandatory escape hatch: the capacity harness has to be able to
         // exceed the cap, or no new boundary can ever be measured.
         hangGuard().disarm("--hang-guard=off");
+    } else if (config_->getBool("hang_guard_on", false)) {
+        hangGuard().setGuardSource("flag");
+    } else {
+        // Off unless asked for. The cap was armed for the vcn_dec ring hang,
+        // and on the FP530 that hang turned out to need the GPU's ATS off
+        // (pci=nommconf or pci=noats); on the stock kernel line five and more
+        // 4K sessions only drop frames. Refusing a cue in a show is a policy
+        // the operator chooses, so the refusal is opt-in and the counts,
+        // advisories and saturation warnings keep running either way.
+        hangGuard().disarmByDefault();
     }
 
     hangGuard().logStartupState();

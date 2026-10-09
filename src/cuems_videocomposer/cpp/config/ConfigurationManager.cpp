@@ -207,10 +207,14 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
                 // Validated here rather than where it is used, so a typo stops
                 // the operator at startup instead of silently leaving a safety
                 // feature in a state they did not choose.
+                // Two keys, because "not off" is no longer "on": the guard
+                // refuses nothing unless --hang-guard=on asked for it.
                 if (value == "off" || value == "0" || value == "false") {
                     setBool("hang_guard_off", true);
+                    setBool("hang_guard_on", false);
                 } else if (value == "on" || value == "1" || value == "true" || value.empty()) {
                     setBool("hang_guard_off", false);
+                    setBool("hang_guard_on", true);
                 } else {
                     std::cerr << "videocomposer: --hang-guard=" << value
                               << " is not a valid value (expected on or off)"
