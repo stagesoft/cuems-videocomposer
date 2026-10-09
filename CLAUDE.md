@@ -29,7 +29,7 @@ The engine→VC protocol is documented once in the cuems-RELATIONS CLAUDE.md ("V
 
 `LayerPlayback` clamps an overshooting media frame to `totalFrames-1` while `wraparound_` is false, and wraps (`% totalFrames`) once it's true. `wraparound_` is enabled by the engine's `/loop=1` — for infinite loops the engine now sends `/loop` **before** `/mtcfollow` (see field notes).
 
-## NDI input and the montaje preview (from deb 0.1.2-8)
+## NDI input and the montaje preview (from deb 0.1.2-7)
 
 ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-preview-montajes.md`. The operator tool lives on the controller (power-bridge `cuems-ndi-preview`, `/ndi/*`); the VC only provides these:
 
