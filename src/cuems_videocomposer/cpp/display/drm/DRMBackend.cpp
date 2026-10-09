@@ -521,6 +521,18 @@ void DRMBackend::renderLegacy(LayerManager* layerManager, OSDManager* osdManager
         // Schedule page flip (non-blocking)
         surface->schedulePageFlip();
     }
+
+    // Drop removed layers' cached textures, then delete what the renderer
+    // deferred this frame, after the swaps. Only with a context current: if no
+    // surface rendered, nothing was bound.
+    if (renderer_ && eglGetCurrentContext() != EGL_NO_CONTEXT) {
+        if (layerManager) {
+            auto layers = layerManager->getLayersSortedByZOrder();
+            std::vector<const VideoLayer*> liveLayers(layers.begin(), layers.end());
+            renderer_->evictRemovedLayerTextures(liveLayers);
+        }
+        renderer_->cleanupDeferredTextures();
+    }
 }
 
 void DRMBackend::handleEvents() {
