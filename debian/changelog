@@ -1,3 +1,43 @@
+cuems-videocomposer (0.1.2-7) unstable; urgency=medium
+
+  * NDI preview during montajes (ClickUp 869ekxuez / 869few41p; driven by
+    cuems-power-bridge >= 0.3.0-10, /ndi/ page and cuems-ndi-preview):
+    - ndi://<name> loads over OSC (/videocomposer/layer/load); before, only
+      the startup argument could open NDI. ndi://@<ipv4>:<port> opens a
+      source by address, no discovery (the controller's relay).
+    - NDI receive is forced to the base TCP connection: the package ships
+      /usr/share/cuems-videocomposer/ndi/ndi-config.v1.json and the binary
+      points NDI_CONFIG_DIR at it unless already set (applies to every NDI
+      receive of the process). Startup logs "NDI receive transport: ...".
+    - Live layers show their newest frame without MTC or /mtcfollow (before,
+      a live layer stayed black outside a show); non-blocking, no frame copy.
+    - New: /videocomposer/layer/<id>/fit_output [connector] [fill|native],
+      /videocomposer/ndi/discover [s], "region" lines in output/list, and a
+      "cuems-videocomposer <version> starting" line at startup (the package
+      version is passed to the build).
+  * Behaviour changes:
+    - Auto-unload only for sources with a known length (totalFrames > 0):
+      a layer whose source reports 0 frames is no longer removed at its
+      first frame.
+    - load_shared on a live (NDI) source is refused.
+  * NDI input fixes: open() no longer mistakes the post-connect status event
+    for "no video" (the format was invented as 1920x1080 every time); audio
+    and metadata frames are no longer requested and leaked; an exact source
+    name wins over a substring match; an empty name is refused.
+  * First package to carry the rc_1 work since 0.1.2-6:
+    - 869en65tm: a removed layer no longer strands an NV12 VAAPI decoder
+      surface and its GL textures (the GTT leak behind the long-run GPU
+      hangs); deferred texture deletes are drained with a context current;
+      the renderer no longer raises two GL errors per frame; headless
+      renders the live layers.
+    - 869f8j1ja: an OSC layer command addressed by a cue UUID whose layer is
+      gone is ignored and logged ("Layer not found"), never routed to an
+      integer layer id by atoi(); every auto-unload is logged.
+  * Numbering: rig test builds were 0.1.2-8~test1/~test2; this real release
+    is lower, so a box carrying one must be moved to it explicitly.
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 09 Oct 2026 21:26:02 +0200
+
 cuems-videocomposer (0.1.2-6) unstable; urgency=medium
 
   * Rebuild from the rc_1 tip: debian/bookworm had not picked up

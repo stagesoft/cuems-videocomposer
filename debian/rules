@@ -1,4 +1,11 @@
 #!/usr/bin/make -f
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+
+# DEB_VERSION: logged by the binary at startup ("cuems-videocomposer <v>
+# starting"), so a tool reading the journal knows which build answered.
+include /usr/share/dpkg/pkg-info.mk
 
 export DH_VERBOSE = 1
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
@@ -10,7 +17,8 @@ override_dh_auto_configure:
 	dh_auto_configure -- \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_INSTALL_PREFIX=/usr \
-		-DENABLE_NDI=ON
+		-DENABLE_NDI=ON \
+		-DCUEMS_DEB_VERSION=$(DEB_VERSION)
 
 override_dh_auto_build:
 	dh_auto_build
