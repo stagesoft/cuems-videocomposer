@@ -919,6 +919,12 @@ add_dependencies(cuems-videocomposer splash_png_embed)
 set(CUEMS_DEB_VERSION "unknown" CACHE STRING "Debian package version reported at startup")
 target_compile_definitions(cuems-videocomposer PRIVATE CUEMS_DEB_VERSION="${CUEMS_DEB_VERSION}")
 
+# NDI receive transport (plan 869ekxuez rev 9): the shipped config forces NDI's
+# base TCP connection so a node can receive through the controller's relay.
+# main() points NDI_CONFIG_DIR here unless the variable is already set.
+set(CUEMS_NDI_CONFIG_DIR "${CMAKE_INSTALL_PREFIX}/share/cuems-videocomposer/ndi")
+target_compile_definitions(cuems-videocomposer PRIVATE CUEMS_NDI_CONFIG_DIR="${CUEMS_NDI_CONFIG_DIR}")
+
 # Test executable (optional)
 option(BUILD_TESTS "Build test suite" ON)
 if(BUILD_TESTS)
@@ -1179,6 +1185,8 @@ endif()
 # Install
 install(TARGETS cuems-videocomposer DESTINATION bin)
 install(FILES src/cuems_videocomposer/fonts/ArdourMono.ttf DESTINATION share/cuems-videocomposer)
+install(FILES resources/ndi/ndi-config.v1.json resources/ndi/ndi-config.v1.json.license
+        DESTINATION share/cuems-videocomposer/ndi)
 
 # Clean targets
 # Standard CMake clean: 'make clean' removes build artifacts (objects, executables) but keeps CMake cache

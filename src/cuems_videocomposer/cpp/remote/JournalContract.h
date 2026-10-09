@@ -112,6 +112,20 @@ inline std::string ndiSourceFormatChanged(int width, int height, double fps) {
     return os.str();
 }
 
+// NDI receive transport, logged once at startup (plan rev 9). The bridge
+// relays to this videocomposer only after seeing the "base TCP" form.
+inline std::string ndiTransportBaseTcp(const std::string& configDir) {
+    return "NDI receive transport: base TCP (" + configDir + ")";
+}
+
+inline std::string ndiTransportNotBaseTcp(const std::string& why) {
+    return "NDI receive transport: NOT base TCP (" + why + ") - relay unavailable";
+}
+
+inline std::string ndiBadAddress(const std::string& spec, const std::string& why) {
+    return "NDI: bad source address '" + spec + "': " + why;
+}
+
 // --- NDI discovery (/videocomposer/ndi/discover) --------------------------
 // Parsers anchor on the "NDI discover: " prefix, never on a bare "NDI:":
 // other lines (output/list's "NDI: Not configured") also start with "NDI:".

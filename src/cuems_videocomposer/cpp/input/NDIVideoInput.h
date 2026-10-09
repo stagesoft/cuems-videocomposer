@@ -77,6 +77,8 @@ private:
     bool initializeNDI();
     void shutdownNDI();
     bool connectToSource(const std::string& sourceName);
+    // "ip:port" (no discovery): plan rev 9, the controller's relay.
+    bool connectToAddress(const std::string& address);
 
 #ifdef HAVE_NDI_SDK
     NDIlib_recv_instance_t ndiReceiver_;

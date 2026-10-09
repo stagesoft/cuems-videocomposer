@@ -20,6 +20,7 @@
  */
 
 #include "NDIVideoInput.h"
+#include "NdiAddress.h"
 #include "../remote/JournalContract.h"
 #include "../utils/Logger.h"
 #include <cmath>
@@ -163,6 +164,33 @@ bool NDIVideoInput::connectToSource(const std::string& sourceName) {
 #endif
 }
 
+bool NDIVideoInput::connectToAddress(const std::string& address) {
+#ifdef HAVE_NDI_SDK
+    // No finder: the receiver dials the address itself. Creation succeeds
+    // whether or not anything answers there, and a missing first frame is
+    // not an error either, so an unreachable address cannot be reported from
+    // here - the bridge's relay checks its upstream before sending the load.
+    NDIlib_recv_create_v3_t recv_desc;
+    recv_desc.source_to_connect_to.p_ndi_name = nullptr;
+    recv_desc.source_to_connect_to.p_url_address = address.c_str();
+    recv_desc.color_format = NDIlib_recv_color_format_BGRX_BGRA;
+    recv_desc.bandwidth = NDIlib_recv_bandwidth_highest;
+    recv_desc.allow_video_fields = false;
+    recv_desc.p_ndi_recv_name = "cuems-videocomposer";
+
+    ndiReceiver_ = NDIlib_recv_create_v3(&recv_desc);
+    if (!ndiReceiver_) {
+        LOG_ERROR << "NDI: Failed to create receiver";
+        return false;
+    }
+    LOG_INFO << journal::ndiConnected("@" + address);
+    return true;
+#else
+    (void)address;
+    return false;
+#endif
+}
+
 bool NDIVideoInput::open(const std::string& source) {
     if (!initializeNDI()) {
         return false;
@@ -182,7 +210,19 @@ bool NDIVideoInput::open(const std::string& source) {
         return false;
     }
 
-    if (!connectToSource(sourceName_)) {
+    bool connected = false;
+    if (sourceName_[0] == '@') {
+        std::string address, why;
+        if (!parseNdiAddress(sourceName_, address, why)) {
+            LOG_ERROR << journal::ndiBadAddress(sourceName_, why);
+            shutdownNDI();
+            return false;
+        }
+        connected = connectToAddress(address);
+    } else {
+        connected = connectToSource(sourceName_);
+    }
+    if (!connected) {
         shutdownNDI();
         return false;
     }

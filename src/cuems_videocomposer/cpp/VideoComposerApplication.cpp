@@ -24,6 +24,7 @@
 #include "input/VideoFileInput.h"
 #include "input/AsyncVideoLoader.h"
 #include "input/NDIDiscovery.h"
+#include "input/NdiTransport.h"
 #include "display/X11Display.h"
 #ifdef HAVE_WAYLAND
 #include "display/WaylandDisplay.h"
@@ -116,6 +117,16 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
         Logger::getInstance().setLevel(Logger::VERBOSE);
     }
     LOG_INFO << journal::starting(CUEMS_DEB_VERSION);
+    {
+        const NdiTransportState& t = ndiTransportState();
+#ifdef HAVE_NDI_SDK
+        LOG_INFO << (t.baseTcp ? journal::ndiTransportBaseTcp(t.detail)
+                               : journal::ndiTransportNotBaseTcp(t.detail));
+#else
+        (void)t;
+        LOG_INFO << journal::ndiTransportNotBaseTcp("built without the NDI SDK");
+#endif
+    }
 
     // Initialize display
     if (!initializeDisplay()) {

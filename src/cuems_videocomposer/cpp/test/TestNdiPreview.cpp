@@ -28,6 +28,8 @@
 
 #include "TestFramework.h"
 #include "../input/LiveInputSource.h"
+#include "../input/NdiAddress.h"
+#include "../input/NdiTransport.h"
 #include "../layer/LayerManager.h"
 #include "../layer/LayerPlayback.h"
 #include "../layer/OutputFit.h"
@@ -419,3 +421,55 @@ bool test_NdiPreview_JournalContract() {
                    std::string("fit_output: unknown output 'DP-9' (have: HDMI-A-1, HDMI-A-3)"));
     return true;
 }
+
+// --- rev 9: relay support ---------------------------------------------------
+
+bool test_NdiPreview_AddressForm() {
+    std::string addr, why;
+    TEST_ASSERT_TRUE(parseNdiAddress("@169.254.0.1:40123", addr, why));
+    TEST_ASSERT_EQ(addr, std::string("169.254.0.1:40123"));
+    TEST_ASSERT_FALSE(parseNdiAddress("@", addr, why));
+    TEST_ASSERT_FALSE(parseNdiAddress("@169.254.0.1", addr, why));
+    TEST_ASSERT_FALSE(parseNdiAddress("@169.254.0.1:", addr, why));
+    TEST_ASSERT_FALSE(parseNdiAddress("@169.254.0.1:0", addr, why));
+    TEST_ASSERT_FALSE(parseNdiAddress("@169.254.0.1:70000", addr, why));
+    TEST_ASSERT_FALSE(parseNdiAddress("@169.254.0.1:12a", addr, why));
+    TEST_ASSERT_FALSE(parseNdiAddress("@node01.local:5961", addr, why));  // IPv4 only
+    TEST_ASSERT_FALSE(parseNdiAddress("@[fe80::1]:5961", addr, why));
+    TEST_ASSERT_FALSE(parseNdiAddress("LAPTOP (OBS)", addr, why));         // a name
+    return true;
+}
+
+bool test_NdiPreview_TransportDecision() {
+    const std::string dir = "/usr/share/cuems-videocomposer/ndi";
+    NdiTransportState t = decideNdiTransport(nullptr, dir, true);
+    TEST_ASSERT_TRUE(t.baseTcp);
+    TEST_ASSERT_EQ(t.detail, dir);
+    t = decideNdiTransport("", dir, true);
+    TEST_ASSERT_TRUE(t.baseTcp);
+    t = decideNdiTransport(dir.c_str(), dir, true);  // set to ours: still ours
+    TEST_ASSERT_TRUE(t.baseTcp);
+    t = decideNdiTransport("/var/lib/cuems/.ndi", dir, true);  // operator override wins
+    TEST_ASSERT_FALSE(t.baseTcp);
+    TEST_ASSERT_EQ(t.detail, std::string("NDI_CONFIG_DIR=/var/lib/cuems/.ndi"));
+    t = decideNdiTransport(nullptr, dir, false);  // dev build, nothing installed
+    TEST_ASSERT_FALSE(t.baseTcp);
+    TEST_ASSERT_EQ(t.detail, "no config at " + dir + "/ndi-config.v1.json");
+    return true;
+}
+
+bool test_NdiPreview_JournalContractRelay() {
+    namespace j = journal;
+    TEST_ASSERT_EQ(j::ndiTransportBaseTcp("/usr/share/cuems-videocomposer/ndi"),
+                   std::string("NDI receive transport: base TCP (/usr/share/cuems-videocomposer/ndi)"));
+    TEST_ASSERT_EQ(j::ndiTransportNotBaseTcp("NDI_CONFIG_DIR=/x"),
+                   std::string("NDI receive transport: NOT base TCP (NDI_CONFIG_DIR=/x) - relay unavailable"));
+    TEST_ASSERT_EQ(j::ndiBadAddress("@1.2.3.4", "expected @<ipv4>:<port>"),
+                   std::string("NDI: bad source address '@1.2.3.4': expected @<ipv4>:<port>"));
+    TEST_ASSERT_EQ(j::ndiConnected("@169.254.0.1:40123"),
+                   std::string("NDI: Connected to source: @169.254.0.1:40123"));
+    TEST_ASSERT_EQ(j::asyncLoadComplete("ndi://@169.254.0.1:40123", "ndi-preview"),
+                   std::string("Async load complete: ndi://@169.254.0.1:40123 (cue ID: ndi-preview)"));
+    return true;
+}
+
