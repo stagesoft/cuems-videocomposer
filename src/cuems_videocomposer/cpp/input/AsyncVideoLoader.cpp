@@ -29,6 +29,10 @@
 #include "VideoFileInput.h"
 #include "HAPVideoInput.h"
 #include "HardwareDecoder.h"
+#ifdef HAVE_NDI_SDK
+#include "NDIVideoInput.h"
+#endif
+#include "../remote/JournalContract.h"
 #include "../utils/Logger.h"
 #include "../config/ConfigurationManager.h"
 #include "../display/DisplayBackend.h"
@@ -194,7 +198,7 @@ size_t AsyncVideoLoader::pendingCount() const {
 }
 
 void AsyncVideoLoader::workerThread() {
-    LOG_INFO << "AsyncVideoLoader: Worker thread running";
+    LOG_INFO << journal::workerThreadRunning();
 
     while (running_) {
         LoadRequest request;
@@ -222,7 +226,7 @@ void AsyncVideoLoader::workerThread() {
         {
             std::lock_guard<std::mutex> lock(pendingMutex_);
             if (pendingCueIds_.count(request.cueId) == 0) {
-                LOG_INFO << "AsyncVideoLoader: Skipping cancelled load for cue: " << request.cueId;
+                LOG_INFO << journal::skippingCancelledLoad(request.cueId);
                 continue;
             }
         }
@@ -248,7 +252,7 @@ void AsyncVideoLoader::workerThread() {
         {
             std::lock_guard<std::mutex> lock(pendingMutex_);
             if (pendingCueIds_.count(request.cueId) == 0) {
-                LOG_INFO << "AsyncVideoLoader: Discarding result for cancelled cue: " << request.cueId;
+                LOG_INFO << journal::discardingCancelledResult(request.cueId);
                 continue;
             }
         }
@@ -270,6 +274,26 @@ void AsyncVideoLoader::workerThread() {
 }
 
 std::unique_ptr<InputSource> AsyncVideoLoader::createInputSourceAsync(const std::string& filepath) {
+    // NDI live source: "ndi://<source name>". Prefix match only — never
+    // probe with NDI discovery here, every file cue arm comes through this
+    // function. The open (discovery + first frame) blocks this worker
+    // thread, not the render loop.
+    if (filepath.rfind("ndi://", 0) == 0) {
+#ifdef HAVE_NDI_SDK
+        auto ndiInput = std::make_unique<NDIVideoInput>();
+        ndiInput->setDiscoveryTimeout(5000);
+        if (!ndiInput->open(filepath)) {
+            LOG_ERROR << "AsyncVideoLoader: NDI source could not be opened: " << filepath.substr(6);
+            return nullptr;
+        }
+        return ndiInput;
+#else
+        LOG_ERROR << "AsyncVideoLoader: " << filepath
+                  << ": this videocomposer was built without the NDI SDK";
+        return nullptr;
+#endif
+    }
+
     // Check for HAP codec (uses custom decoder)
     std::string ext = filepath.substr(filepath.find_last_of('.') + 1);
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });

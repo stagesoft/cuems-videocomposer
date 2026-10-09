@@ -643,6 +643,23 @@ std::vector<OutputInfo> DRMBackend::getOutputs() const {
     return outputManager_->getOutputs();
 }
 
+bool DRMBackend::getCanvasSize(int& width, int& height) const {
+    if (multiRenderer_ && multiRenderer_->getCanvasWidth() > 0 && multiRenderer_->getCanvasHeight() > 0) {
+        width = multiRenderer_->getCanvasWidth();
+        height = multiRenderer_->getCanvasHeight();
+        return true;
+    }
+    // Canvas not allocated yet: the bounding box of the regions is what it
+    // will be sized to.
+    width = 0;
+    height = 0;
+    for (const auto& region : outputRegions_) {
+        width = std::max(width, region.canvasX + region.canvasWidth);
+        height = std::max(height, region.canvasY + region.canvasHeight);
+    }
+    return width > 0 && height > 0;
+}
+
 size_t DRMBackend::getOutputCount() const {
     return surfaces_.size();
 }

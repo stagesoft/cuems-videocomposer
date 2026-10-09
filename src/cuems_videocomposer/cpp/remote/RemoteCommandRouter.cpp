@@ -29,6 +29,8 @@
 #include "../display/OpenGLRenderer.h"
 #include "../display/DisplayBackend.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
+#include "../layer/OutputFit.h"
+#include "JournalContract.h"
 #include "../utils/SMPTEUtils.h"
 #include <sstream>
 #include <algorithm>
@@ -182,6 +184,9 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerLayerCommand("yscale", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerYScale(layer, args);
     });
+    registerLayerCommand("fit_output", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerFitOutput(layer, args);
+    });
     registerLayerCommand("rotation", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerRotation(layer, args);
     });
@@ -332,6 +337,9 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     });
     registerAppCommand("output/list", [this](const std::vector<std::string>& args) {
         return handleOutputList(args);
+    });
+    registerAppCommand("ndi/discover", [this](const std::vector<std::string>& args) {
+        return handleNdiDiscover(args);
     });
 }
 
@@ -655,6 +663,7 @@ bool RemoteCommandRouter::handleLayerPosition(VideoLayer* layer, const std::vect
     // Try parsing as float first (for smooth sub-pixel positioning)
     float x = std::atof(args[0].c_str());
     float y = std::atof(args[1].c_str());
+    layer->clearOutputFit();  // an explicit position wins over fit_output
     props.x = static_cast<int>(x);
     props.y = static_cast<int>(y);
     // Store sub-pixel precision if needed (for future interpolation)
@@ -1252,6 +1261,7 @@ bool RemoteCommandRouter::handleLayerScale(VideoLayer* layer, const std::vector<
     }
     
     auto& props = layer->properties();
+    layer->clearOutputFit();  // an explicit scale wins over fit_output
     props.scaleX = std::atof(args[0].c_str());
     props.scaleY = std::atof(args[1].c_str());
     return true;
@@ -1262,6 +1272,7 @@ bool RemoteCommandRouter::handleLayerXScale(VideoLayer* layer, const std::vector
         return false;
     }
     
+    layer->clearOutputFit();
     layer->properties().scaleX = std::atof(args[0].c_str());
     return true;
 }
@@ -1271,7 +1282,85 @@ bool RemoteCommandRouter::handleLayerYScale(VideoLayer* layer, const std::vector
         return false;
     }
     
+    layer->clearOutputFit();
     layer->properties().scaleY = std::atof(args[0].c_str());
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerFitOutput(VideoLayer* layer, const std::vector<std::string>& args) {
+    // /videocomposer/layer/<id>/fit_output [connector] [fill|native]
+    // Places the layer on one output of this videocomposer, so a caller that
+    // does not know the node's canvas (the controller's NDI preview tool) can
+    // still say "show it on HDMI-A-2". No connector: the leftmost output.
+    if (!layer || !app_) {
+        return false;
+    }
+    auto* backend = app_->getDisplayBackend();
+    int canvasWidth = 0, canvasHeight = 0;
+    if (!backend || !backend->getCanvasSize(canvasWidth, canvasHeight)) {
+        LOG_WARNING << "fit_output: no canvas on this display backend";
+        return false;
+    }
+
+    std::string name;
+    FitMode mode = FitMode::Fill;
+    for (const auto& arg : args) {
+        if (arg == "fill") {
+            mode = FitMode::Fill;
+        } else if (arg == "native") {
+            mode = FitMode::Native;
+        } else if (name.empty()) {
+            name = arg;
+        } else {
+            LOG_WARNING << "fit_output: ignoring extra argument '" << arg << "'";
+        }
+    }
+
+    std::vector<OutputRegion> regions;
+    for (const auto& region : backend->getCanvasRegions()) {
+        if (region.enabled && region.canvasWidth > 0 && region.canvasHeight > 0) {
+            regions.push_back(region);
+        }
+    }
+    std::stable_sort(regions.begin(), regions.end(), [](const OutputRegion& a, const OutputRegion& b) {
+        return a.canvasX < b.canvasX;
+    });
+    if (regions.empty()) {
+        LOG_WARNING << "fit_output: no output regions on this display backend";
+        return false;
+    }
+
+    const OutputRegion* chosen = nullptr;
+    if (name.empty()) {
+        chosen = &regions.front();
+    } else {
+        for (const auto& region : regions) {
+            if (region.name == name) {
+                chosen = &region;
+                break;
+            }
+        }
+    }
+    if (!chosen) {
+        std::vector<std::string> have;
+        for (const auto& region : regions) {
+            have.push_back(region.name);
+        }
+        LOG_WARNING << journal::fitOutputUnknown(name, have);
+        return false;
+    }
+
+    std::string label = layerManager_ ? layerManager_->getCueIdFromLayer(layer) : std::string();
+    if (label.empty()) {
+        label = std::to_string(layer->getLayerId());
+    }
+    FitRegion region;
+    region.name = chosen->name;
+    region.x = chosen->canvasX;
+    region.y = chosen->canvasY;
+    region.width = chosen->canvasWidth;
+    region.height = chosen->canvasHeight;
+    layer->setOutputFit(label, region, canvasWidth, canvasHeight, mode);
     return true;
 }
 
@@ -2018,6 +2107,17 @@ bool RemoteCommandRouter::handleOutputCapture(const std::vector<std::string>& ar
     return false;
 }
 
+bool RemoteCommandRouter::handleNdiDiscover(const std::vector<std::string>& args) {
+    // /videocomposer/ndi/discover [seconds]  (default 3, clamped to 1..10)
+    // Results go to the log: journal::ndiDiscoverSource / ndiDiscoverDone.
+    if (!app_) {
+        return false;
+    }
+    int seconds = args.empty() ? 3 : std::atoi(args[0].c_str());
+    app_->startNdiDiscovery(seconds);
+    return true;  // a busy discovery is logged, not an error
+}
+
 bool RemoteCommandRouter::handleOutputList(const std::vector<std::string>& args) {
     // Expected: /videocomposer/output/list
     (void)args;
@@ -2040,6 +2140,13 @@ bool RemoteCommandRouter::handleOutputList(const std::vector<std::string>& args)
                  << (out.enabled ? "" : " (disabled)");
     }
     
+    // Canvas regions: where each output reads from on the layer canvas
+    // (journal::region lines, parsed by the NDI preview tool)
+    for (const auto& region : backend->getCanvasRegions()) {
+        LOG_INFO << journal::region(region.name, region.canvasX, region.canvasY,
+                                    region.canvasWidth, region.canvasHeight);
+    }
+
     // Capture status
     LOG_INFO << "=== Capture Status ===";
     bool captureEnabled = backend->isCaptureEnabled();

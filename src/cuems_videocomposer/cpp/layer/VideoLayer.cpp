@@ -25,6 +25,7 @@
 #include "../sync/MIDISyncSource.h"
 #include "../input/VideoFileInput.h"
 #include "../input/HAPVideoInput.h"
+#include "../remote/JournalContract.h"
 #include <algorithm>
 #include <cmath>
 
@@ -110,6 +111,10 @@ void VideoLayer::update() {
     // Update playback (polls sync source and loads frames)
     int64_t frameBefore = playback_.getCurrentFrame();
     playback_.update();
+
+    if (outputFit_.active) {
+        applyOutputFit(false);
+    }
 
     // Clear awaitingFrame once a fresh frame has been loaded after
     // a 0→1 visibility transition (prevents stale frame flash).
@@ -323,6 +328,53 @@ const FrameBuffer& VideoLayer::getFrameBuffer() const {
     }
     
     return frameBufferCache_;
+}
+
+void VideoLayer::setOutputFit(const std::string& label, const FitRegion& region,
+                              int canvasWidth, int canvasHeight, FitMode mode) {
+    outputFit_.active = true;
+    outputFit_.label = label;
+    outputFit_.region = region;
+    outputFit_.canvasWidth = canvasWidth;
+    outputFit_.canvasHeight = canvasHeight;
+    outputFit_.mode = mode;
+    applyOutputFit(true);
+}
+
+void VideoLayer::applyOutputFit(bool force) {
+    int width = 0;
+    int height = 0;
+    std::string basis = "fallback";
+    if (isReady()) {
+        FrameInfo info = getFrameInfo();
+        if (info.width > 0 && info.height > 0) {
+            width = info.width;
+            height = info.height;
+            InputSource* src = getInputSource();
+            basis = (src && src->isFrameInfoProvisional()) ? "invented" : "dims";
+        }
+    }
+    if (!force && width == outputFit_.appliedWidth && height == outputFit_.appliedHeight &&
+        basis == outputFit_.appliedBasis) {
+        return;
+    }
+    outputFit_.appliedWidth = width;
+    outputFit_.appliedHeight = height;
+    outputFit_.appliedBasis = basis;
+
+    FitPlacement p = computeOutputFit(outputFit_.region, outputFit_.canvasWidth,
+                                      outputFit_.canvasHeight, width, height, outputFit_.mode);
+    auto& props = properties();
+    props.x = p.x;
+    props.y = p.y;
+    props.scaleX = static_cast<float>(p.scale);
+    props.scaleY = static_cast<float>(p.scale);
+
+    if (basis == "dims") {
+        basis = "dims " + std::to_string(width) + "x" + std::to_string(height);
+    }
+    LOG_INFO << journal::fitOutput(outputFit_.label, outputFit_.region.name,
+                                   fitModeName(outputFit_.mode), p.x, p.y, p.scale, p.scale, basis);
 }
 
 bool VideoLayer::getPreparedFrame(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const {

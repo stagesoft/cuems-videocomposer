@@ -636,6 +636,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/input/AsyncVideoLoader.cpp
     src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
     src/cuems_videocomposer/cpp/input/LiveInputSource.cpp
+    src/cuems_videocomposer/cpp/input/NDIDiscovery.cpp
     src/cuems_videocomposer/cpp/input/FFmpegLiveInput.cpp
     src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
     src/cuems_videocomposer/cpp/video/GPUTextureFrameBuffer.cpp
@@ -912,6 +913,12 @@ install(TARGETS cuems-videoindexer DESTINATION bin)
 add_executable(cuems-videocomposer ${C_SOURCES} ${CPP_SOURCES})
 add_dependencies(cuems-videocomposer splash_png_embed)
 
+# Debian package version, logged at startup ("cuems-videocomposer <v> starting")
+# so a tool reading the journal knows which build answered. debian/rules
+# passes -DCUEMS_DEB_VERSION=$(DEB_VERSION); a plain cmake build says "unknown".
+set(CUEMS_DEB_VERSION "unknown" CACHE STRING "Debian package version reported at startup")
+target_compile_definitions(cuems-videocomposer PRIVATE CUEMS_DEB_VERSION="${CUEMS_DEB_VERSION}")
+
 # Test executable (optional)
 option(BUILD_TESTS "Build test suite" ON)
 if(BUILD_TESTS)
@@ -952,9 +959,17 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/input/AsyncVideoLoader.cpp
         src/cuems_videocomposer/cpp/input/HAPVideoInput.cpp
         src/cuems_videocomposer/cpp/input/HardwareDecoder.cpp
+        src/cuems_videocomposer/cpp/input/LiveInputSource.cpp
         src/cuems_videocomposer/cpp/utils/TimeUtils.cpp
         src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
     )
+
+    # AsyncVideoLoader opens ndi:// sources when the SDK is there
+    if(NDI_FOUND)
+        list(APPEND TEST_CPP_SOURCES
+            src/cuems_videocomposer/cpp/input/NDIVideoInput.cpp
+        )
+    endif()
     
     # Add mtcreceiver driver if MIDI is enabled
     if(ENABLE_MIDI AND RTMIDI_FOUND)
@@ -1040,6 +1055,10 @@ if(BUILD_TESTS)
         )
     endif()
     
+    if(NDI_FOUND)
+        target_link_libraries(cuems_videocomposer_test "${NDI_LIBRARY}")
+    endif()
+
     # Add test to CTest
     enable_testing()
     add_test(NAME cuems_videocomposer_unit_tests COMMAND cuems_videocomposer_test)

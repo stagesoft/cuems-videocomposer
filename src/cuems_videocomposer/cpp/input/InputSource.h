@@ -144,9 +144,12 @@ public:
      * For live streams: get the latest available frame
      * Default implementation calls readFrame(0, buffer)
      * @param buffer FrameBuffer to store the decoded frame
-     * @return true on success, false on failure
+     * @param waitMs How long to wait when no new frame is available yet.
+     *               0 = never block (the render loop's live pull uses this).
+     * @return true when a new frame was delivered, false otherwise
      */
-    virtual bool readLatestFrame(FrameBuffer& buffer) {
+    virtual bool readLatestFrame(FrameBuffer& buffer, int waitMs = 100) {
+        (void)waitMs;
         return readFrame(0, buffer);
     }
 

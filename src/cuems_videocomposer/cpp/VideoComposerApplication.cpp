@@ -23,6 +23,7 @@
 #include "config/ConfigurationManager.h"
 #include "input/VideoFileInput.h"
 #include "input/AsyncVideoLoader.h"
+#include "input/NDIDiscovery.h"
 #include "display/X11Display.h"
 #ifdef HAVE_WAYLAND
 #include "display/WaylandDisplay.h"
@@ -46,6 +47,7 @@
 #include "display/OpenGLRenderer.h"
 #include "display/StartupSplash.h"
 #include "remote/OSCRemoteControl.h"
+#include "remote/JournalContract.h"
 
 #ifdef HAVE_VAAPI_INTEROP
 #endif
@@ -61,6 +63,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+
+// The Debian package version, passed by debian/rules (see CMakeLists.txt).
+// Logged at startup so a tool reading the journal knows which build it talks to.
+#ifndef CUEMS_DEB_VERSION
+#define CUEMS_DEB_VERSION "unknown"
+#endif
 
 namespace videocomposer {
 
@@ -107,6 +115,7 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
     if (verbose) {
         Logger::getInstance().setLevel(Logger::VERBOSE);
     }
+    LOG_INFO << journal::starting(CUEMS_DEB_VERSION);
 
     // Initialize display
     if (!initializeDisplay()) {
@@ -574,6 +583,11 @@ OpenGLRenderer& VideoComposerApplication::renderer() {
 void VideoComposerApplication::shutdown() {
     running_ = false;
     
+    if (ndiDiscovery_) {
+        ndiDiscovery_->shutdown();
+        ndiDiscovery_.reset();
+    }
+
     // Shutdown async video loader first (before layer manager)
     if (asyncVideoLoader_) {
         asyncVideoLoader_->shutdown();
@@ -913,8 +927,23 @@ bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, con
 }
 
 bool VideoComposerApplication::createSharedLayer(const std::string& layerId, const std::string& driverLayerId, const std::string& filepath) {
+    // A live source cannot be shared: its driver hands frames over by swap
+    // (LiveInputSource::readLatestFrame), so the non-owning pointer a
+    // secondary layer reads from the driver's cache would dangle.
+    if (filepath.rfind("ndi://", 0) == 0) {
+        LOG_WARNING << "load_shared refused for " << layerId << ": " << filepath
+                    << " is a live source, which cannot be shared (use layer/load per layer)";
+        return false;
+    }
+
     // Look up the driver layer
     VideoLayer* driverLayer = layerManager_->getLayerByCueId(driverLayerId);
+
+    if (driverLayer && driverLayer->getInputSource() && driverLayer->getInputSource()->isLiveStream()) {
+        LOG_WARNING << "load_shared refused for " << layerId << ": driver " << driverLayerId
+                    << " is a live source, which cannot be shared";
+        return false;
+    }
 
     // Driver not ready (async load still in flight): create empty placeholder layer
     // and register as pending. Will be set up when driver's onAsyncLoadComplete fires.
@@ -1014,7 +1043,7 @@ bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const
 }
 
 void VideoComposerApplication::resetAll() {
-    LOG_INFO << "Reset: removing all layers, cancelling loads, resetting master";
+    LOG_INFO << journal::resetAll();
 
     // Cancel all pending async loads
     if (asyncVideoLoader_) {
@@ -1064,6 +1093,13 @@ bool VideoComposerApplication::isLoadPending(const std::string& cueId) const {
     return false;
 }
 
+bool VideoComposerApplication::startNdiDiscovery(int seconds) {
+    if (!ndiDiscovery_) {
+        ndiDiscovery_ = std::make_unique<NDIDiscovery>();
+    }
+    return ndiDiscovery_->start(seconds);
+}
+
 void VideoComposerApplication::processAsyncLoads() {
     if (asyncVideoLoader_) {
         asyncVideoLoader_->pollCompleted();
@@ -1073,7 +1109,7 @@ void VideoComposerApplication::processAsyncLoads() {
 void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, const std::string& filepath,
                                                    std::unique_ptr<InputSource> inputSource, bool success) {
     if (!success || !inputSource) {
-        LOG_ERROR << "Async load failed for: " << filepath << " (cue ID: " << cueId << ")";
+        LOG_ERROR << journal::asyncLoadFailed(filepath, cueId);
         pendingSharedLayers_.erase(cueId);  // cleanup any pending secondaries
         return;
     }
@@ -1081,7 +1117,7 @@ void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, con
     // Get the layer for this cue ID
     VideoLayer* layer = layerManager_->getLayerByCueId(cueId);
     if (!layer) {
-        LOG_WARNING << "Layer no longer exists for cue ID: " << cueId;
+        LOG_WARNING << journal::layerNoLongerExists(cueId);
         pendingSharedLayers_.erase(cueId);
         return;
     }
@@ -1096,11 +1132,20 @@ void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, con
 
     // Setup layer with the loaded input source
     setupLayerWithInputSource(layer, std::move(inputSource));
-    LOG_INFO << "Async load complete: " << filepath << " (cue ID: " << cueId << ")";
+    LOG_INFO << journal::asyncLoadComplete(filepath, cueId);
 
     // Resolve pending shared layers waiting for this driver
     auto it = pendingSharedLayers_.find(cueId);
-    if (it != pendingSharedLayers_.end()) {
+    if (it != pendingSharedLayers_.end() && layer->getInputSource() &&
+        layer->getInputSource()->isLiveStream()) {
+        // Deferred half of the live-source refusal in createSharedLayer():
+        // the driver turned out to be live only now that it has loaded.
+        for (auto& pending : it->second) {
+            LOG_WARNING << "load_shared refused for " << pending.layerId << ": driver " << cueId
+                        << " is a live source (" << filepath << "), which cannot be shared";
+        }
+        pendingSharedLayers_.erase(it);
+    } else if (it != pendingSharedLayers_.end()) {
         auto sharedInput = layer->playback().getSharedInputSource();
         auto sharedSync = layer->playback().getSharedSyncSource();
         layer->playback().setDecodeDriver(true);
