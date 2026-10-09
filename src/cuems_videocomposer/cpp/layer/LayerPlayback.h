@@ -103,7 +103,8 @@ public:
     void setWraparound(bool enabled) { wraparound_ = enabled; }
     bool getWraparound() const { return wraparound_; }
     
-    // MTC follow control (enable/disable MTC following for this layer)
+    // MTC follow control (enable/disable MTC following for this layer).
+    // No effect on a live source (NDI): it always shows its newest frame.
     void setMtcFollow(bool enabled) { mtcFollow_ = enabled; }
     bool getMtcFollow() const { return mtcFollow_; }
     
@@ -126,6 +127,7 @@ private:
     bool playing_;
     int64_t currentFrame_;
     int64_t lastSyncFrame_;
+    int64_t liveFrames_ = 0;  // Frames delivered by a live source (no timeline)
     int64_t timeOffset_;  // Time offset applied to sync frames
     double timeScale_;    // Time multiplier (default: 1.0)
     bool wraparound_;     // Enable wrap-around/loop (seeks to 0 when playback ends)

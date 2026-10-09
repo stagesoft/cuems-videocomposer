@@ -129,6 +129,8 @@ public:
      * Get all detected outputs (override)
      */
     std::vector<OutputInfo> getOutputs() const override;
+    std::vector<OutputRegion> getCanvasRegions() const override { return outputRegions_; }
+    bool getCanvasSize(int& width, int& height) const override;
     
     /**
      * Get output count (override)

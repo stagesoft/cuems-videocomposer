@@ -86,6 +86,13 @@ public:
     // Cleanup deferred texture deletions (call after swapBuffers)
     void cleanupDeferredTextures();
 
+    // Drop the cached texture (and PBOs) of every layer not in liveLayers.
+    // A removed layer's id is not handed out again until a reset, so its
+    // entry is otherwise kept until exit. compositeLayers() calls this itself;
+    // backends that call renderLayer() directly must call it once per frame,
+    // with the context current. Textures go through the deferred-delete list.
+    void evictRemovedLayerTextures(const std::vector<const VideoLayer*>& liveLayers);
+
 private:
     // OpenGL state
     unsigned int textureId_;        // For GL_TEXTURE_RECTANGLE_ARB (regular textures)

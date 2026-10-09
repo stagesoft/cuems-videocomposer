@@ -34,6 +34,7 @@ extern "C" {
 #endif
 #include "../../homography.h"
 }
+#include <algorithm>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -245,6 +246,12 @@ void OpenGLRenderer::setViewport(int x, int y, int width, int height) {
 }
 
 void OpenGLRenderer::setupOrthoProjection() {
+    // Fixed-function matrices only exist in a compatibility context, and only
+    // the fixed-function fallback uses them (shaders build their own MVP). In
+    // a core profile these calls raise GL_INVALID_OPERATION on every frame.
+    if (isCoreProfile_) {
+        return;
+    }
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glOrtho(-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f);
@@ -814,6 +821,8 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
 }
 
 void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layers) {
+    evictRemovedLayerTextures(layers);
+
     // Check if master transforms are active
     bool useMasterFBO = masterProperties_.isActive();
     
@@ -867,6 +876,26 @@ void OpenGLRenderer::updateTexture(int width, int height) {
         glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA, 
                      width, height, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+    }
+}
+
+void OpenGLRenderer::evictRemovedLayerTextures(const std::vector<const VideoLayer*>& liveLayers) {
+    // Only CPU-path layers ever get an entry, so this is usually a no-op.
+    for (auto it = layerTextureCache_.begin(); it != layerTextureCache_.end();) {
+        const int layerId = it->first;
+        const bool live = std::any_of(liveLayers.begin(), liveLayers.end(),
+            [layerId](const VideoLayer* layer) {
+                return layer && layer->getLayerId() == layerId;
+            });
+        if (live) {
+            ++it;
+            continue;
+        }
+        if (it->second.textureId != 0) {
+            texturesToDelete_.push_back(it->second.textureId);
+        }
+        cleanupLayerPBOs(it->second);
+        it = layerTextureCache_.erase(it);
     }
 }
 
@@ -1090,23 +1119,31 @@ bool OpenGLRenderer::renderLayerFromGPU(const GPUTextureFrameBuffer& gpuFrame, c
         
         shader->unbind();
         
-        // Unbind and disable multi-plane textures (like mpv does)
+        // Unbind multi-plane textures (like mpv does). glDisable(GL_TEXTURE_2D)
+        // is fixed-function state: in a core profile it raises GL_INVALID_ENUM
+        // on every frame, so only issue it in a compatibility context.
         if (planeType == TexturePlaneType::YUV_NV12 || planeType == TexturePlaneType::YUV_420P) {
             // Unbind texture unit 1
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, 0);
-            glDisable(GL_TEXTURE_2D);
+            if (!isCoreProfile_) {
+                glDisable(GL_TEXTURE_2D);
+            }
             
             // Unbind texture unit 0
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, 0);
-            glDisable(GL_TEXTURE_2D);
+            if (!isCoreProfile_) {
+                glDisable(GL_TEXTURE_2D);
+            }
             
             if (planeType == TexturePlaneType::YUV_420P) {
                 // Also unbind texture unit 2 for YUV420P
                 glActiveTexture(GL_TEXTURE2);
                 glBindTexture(GL_TEXTURE_2D, 0);
-                glDisable(GL_TEXTURE_2D);
+                if (!isCoreProfile_) {
+                    glDisable(GL_TEXTURE_2D);
+                }
                 glActiveTexture(GL_TEXTURE0);
             }
         }

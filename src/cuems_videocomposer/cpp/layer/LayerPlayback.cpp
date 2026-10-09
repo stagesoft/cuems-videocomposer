@@ -62,6 +62,7 @@ void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
     isDecodeDriver_ = false;
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
+    liveFrames_ = 0;
     frameOnGPU_ = false;
 }
 
@@ -72,6 +73,7 @@ void LayerPlayback::setInputSource(std::shared_ptr<InputSource> input, bool isSh
     isDecodeDriver_ = isDriver;
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
+    liveFrames_ = 0;
     frameOnGPU_ = false;
 }
 
@@ -114,6 +116,18 @@ bool LayerPlayback::seek(int64_t frameNumber) {
 
 void LayerPlayback::update() {
     if (!isReady()) {
+        return;
+    }
+
+    // Live sources (NDI, ...) have no timeline: show the newest frame as soon
+    // as it arrives, with or without MTC, mtcfollow or a sync source. Before
+    // this, a live layer only pulled frames while following a moving MTC, so
+    // outside a show it stayed black. currentFrame_ counts delivered frames
+    // (it is what VideoLayer watches to see that a fresh frame arrived).
+    if (inputSource_->isLiveStream()) {
+        if (loadFrame(-1)) {
+            currentFrame_ = ++liveFrames_;
+        }
         return;
     }
 
@@ -376,8 +390,11 @@ bool LayerPlayback::loadFrame(int64_t frameNumber) {
     // Check if this is a live stream (NDI, V4L2, RTSP, etc.)
     if (inputSource_->isLiveStream()) {
         // Live streams: get latest available frame (ignore frameNumber)
-        // The async buffer in LiveInputSource keeps frames ready
-        if (inputSource_->readLatestFrame(cpuFrameBuffer_)) {
+        // The async buffer in LiveInputSource keeps frames ready.
+        // Never wait here: this runs on the render thread once per loop, and
+        // a 25 fps source would otherwise stall every output of a 60 Hz loop.
+        // No new frame = keep showing the current one.
+        if (inputSource_->readLatestFrame(cpuFrameBuffer_, 0)) {
             frameOnGPU_ = false;
             if (isDecodeDriver_) inputSource_->setCachedFrame(-1, cpuFrameBuffer_);
             return true;

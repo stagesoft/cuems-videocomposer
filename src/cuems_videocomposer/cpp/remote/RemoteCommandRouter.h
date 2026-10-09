@@ -24,6 +24,7 @@
 
 #include <string>
 #include <functional>
+#include <cstdint>
 #include <map>
 #include <vector>
 
@@ -66,6 +67,11 @@ private:
 
     // Parse command path
     bool parsePath(const std::string& path, std::string& command, int& layerId);
+
+    // Log a command addressed to a layer that does not exist: WARNING with a
+    // running count at the 1st, 10th, 100th... miss per id, VERBOSE otherwise.
+    void reportUnknownLayer(const std::string& id, const std::string& command);
+    std::map<std::string, uint64_t> unknownLayerMisses_;
 
     // App-level command handlers
     bool handleQuit(const std::vector<std::string>& args);
@@ -136,6 +142,7 @@ private:
     bool handleLayerScale(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerXScale(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerYScale(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerFitOutput(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerRotation(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerCornerDeform(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerCornerDeformEnable(VideoLayer* layer, const std::vector<std::string>& args);
@@ -195,6 +202,7 @@ private:
     // Virtual output handlers (Phase 6)
     bool handleOutputCapture(const std::vector<std::string>& args);
     bool handleOutputList(const std::vector<std::string>& args);
+    bool handleNdiDiscover(const std::vector<std::string>& args);
 };
 
 } // namespace videocomposer

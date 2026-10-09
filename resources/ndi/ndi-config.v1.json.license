@@ -1,0 +1,10 @@
+SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+
+ndi-config.v1.json: NDI receive transport for the videocomposer (ClickUp 869ekxuez,
+plan rev 9). Disables RUDP, multicast, multi-TCP and unicast-UDP receiving, so NDI
+falls back to its single base TCP connection. That stream can be carried by a plain
+TCP relay on the controller (cuems-power-bridge /ndi/preview), which is how a node
+shows a source it cannot reach directly. main() points NDI_CONFIG_DIR here unless
+the variable is already set. JSON has no comments, hence this REUSE sidecar.

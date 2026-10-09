@@ -21,6 +21,8 @@
 
 #include "LayerManager.h"
 #include "../utils/Logger.h"
+#include "LayerPathId.h"
+#include <cstdlib>
 #include <algorithm>
 #include <map>
 
@@ -188,11 +190,24 @@ void LayerManager::updateAll() {
             // 3. No region loop is enabled
             bool wraparoundActive = layer->getWraparound() &&
                                    (props.fullFileLoopCount == -1 || props.currentFullFileLoopCount > 0);
-            if (currentFrame >= totalFrames &&
+            // totalFrames > 0: a source without a known length (a live NDI
+            // input reports 0) never "ends" — before this guard its first
+            // frame unloaded it.
+            if (totalFrames > 0 &&
+                currentFrame >= totalFrames &&
                 !wraparoundActive &&
                 !props.loopRegion.enabled) {
-                // Mark layer for removal
-                layersToRemove.push_back(layer->getLayerId());
+                // Mark layer for removal. Always logged: this removal happens
+                // without any command, so without this line nothing records
+                // that the layer is gone (869f8j1ja).
+                const int layerId = layer->getLayerId();
+                std::string cueId = getCueIdFromLayer(layer);
+                if (cueId.empty()) {
+                    cueId = "-";
+                }
+                LOG_INFO << "Auto-unloaded layer (cue ID: " << cueId << ", id " << layerId
+                         << ") at end of file (frame " << currentFrame << "/" << totalFrames << ")";
+                layersToRemove.push_back(layerId);
             }
         }
     }
@@ -464,6 +479,20 @@ const VideoLayer* LayerManager::getLayerByCueId(const std::string& cueId) const 
         return getLayer(mapIt->second);
     }
     return nullptr;
+}
+
+int LayerManager::resolveLayerAddress(const std::string& address) const {
+    auto mapIt = cueIdToLayerId_.find(address);
+    if (mapIt != cueIdToLayerId_.end() && getLayer(mapIt->second)) {
+        return mapIt->second;
+    }
+    if (isIntegerLayerId(address)) {
+        const int layerId = std::atoi(address.c_str());
+        if (getLayer(layerId)) {
+            return layerId;
+        }
+    }
+    return 0;
 }
 
 std::string LayerManager::getCueIdFromLayer(VideoLayer* layer) const {
