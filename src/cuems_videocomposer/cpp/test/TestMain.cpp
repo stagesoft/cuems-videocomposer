@@ -64,6 +64,17 @@ extern bool test_LayerPathId_IntegerIds();
 extern bool test_LayerPathId_UuidsAreNotIntegerIds();
 extern bool test_LayerPathId_Malformed();
 
+extern bool test_NdiPreview_LiveLayerPullsWithoutMtc();
+extern bool test_NdiPreview_LivePullNeverBlocks();
+extern bool test_NdiPreview_ReadLatestFrameZeroWaitIsNonBlocking();
+extern bool test_NdiPreview_FileLayerUnchangedWithoutSync();
+extern bool test_NdiPreview_AutoUnloadSkipsUnknownLength();
+extern bool test_NdiPreview_FitOutputTest3Regions();
+extern bool test_NdiPreview_FitOutputNativeMatchesEngine();
+extern bool test_NdiPreview_FitOutputNarrowCanvasAndFallback();
+extern bool test_NdiPreview_FitOutputRefitsOnFormatChange();
+extern bool test_NdiPreview_JournalContract();
+
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
 extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
@@ -124,6 +135,17 @@ int main() {
     TestFramework::instance().addTest("PresentationTiming_StatisticsMedianAndP95", test_PresentationTiming_StatisticsMedianAndP95);
     TestFramework::instance().addTest("PresentationTiming_ResetClearsState", test_PresentationTiming_ResetClearsState);
     TestFramework::instance().addTest("PresentationTiming_ConcurrentSubmitFlip", test_PresentationTiming_ConcurrentSubmitFlip);
+
+    TestFramework::instance().addTest("NdiPreview_LiveLayerPullsWithoutMtc", test_NdiPreview_LiveLayerPullsWithoutMtc);
+    TestFramework::instance().addTest("NdiPreview_LivePullNeverBlocks", test_NdiPreview_LivePullNeverBlocks);
+    TestFramework::instance().addTest("NdiPreview_ReadLatestFrameZeroWaitIsNonBlocking", test_NdiPreview_ReadLatestFrameZeroWaitIsNonBlocking);
+    TestFramework::instance().addTest("NdiPreview_FileLayerUnchangedWithoutSync", test_NdiPreview_FileLayerUnchangedWithoutSync);
+    TestFramework::instance().addTest("NdiPreview_AutoUnloadSkipsUnknownLength", test_NdiPreview_AutoUnloadSkipsUnknownLength);
+    TestFramework::instance().addTest("NdiPreview_FitOutputTest3Regions", test_NdiPreview_FitOutputTest3Regions);
+    TestFramework::instance().addTest("NdiPreview_FitOutputNativeMatchesEngine", test_NdiPreview_FitOutputNativeMatchesEngine);
+    TestFramework::instance().addTest("NdiPreview_FitOutputNarrowCanvasAndFallback", test_NdiPreview_FitOutputNarrowCanvasAndFallback);
+    TestFramework::instance().addTest("NdiPreview_FitOutputRefitsOnFormatChange", test_NdiPreview_FitOutputRefitsOnFormatChange);
+    TestFramework::instance().addTest("NdiPreview_JournalContract", test_NdiPreview_JournalContract);
 
     return TestFramework::instance().runAll();
 }

@@ -934,6 +934,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
         src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
         src/cuems_videocomposer/cpp/test/TestLayerPathId.cpp
+        src/cuems_videocomposer/cpp/test/TestNdiPreview.cpp
     )
     
     # C++ implementation files needed by tests
