@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <mutex>
 
 #ifdef HAVE_NDI_SDK
 #include <Processing.NDI.Lib.h>
@@ -50,6 +51,7 @@ public:
     void close() override;
     bool isReady() const override;
     FrameInfo getFrameInfo() const override;
+    bool isFrameInfoProvisional() const override;
     int64_t getCurrentFrame() const override;
     CodecType detectCodec() const override;
     bool supportsDirectGPUTexture() const override { return false; }
@@ -81,7 +83,13 @@ private:
     NDIlib_find_instance_t ndiFinder_;
 #endif
 
+    // Written by open() and by the capture thread (a source's real format,
+    // or a format change), read by the render thread: guarded.
+    mutable std::mutex frameInfoMutex_;
     FrameInfo frameInfo_;
+    bool frameInfoInvented_ = false;  // 1920x1080 default, no frame seen yet
+    void updateFrameInfoFromCapture(int width, int height, double fps);
+
     std::string sourceName_;
     bool ready_;
     std::atomic<int64_t> frameCount_;

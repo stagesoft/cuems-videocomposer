@@ -150,6 +150,14 @@ public:
         return readFrame(0, buffer);
     }
 
+    /**
+     * True while getFrameInfo() is a guess rather than the source's real
+     * format (an NDI source that has not sent a frame yet reports an
+     * invented 1920x1080). Placement computed from it must be redone once
+     * this turns false.
+     */
+    virtual bool isFrameInfoProvisional() const { return false; }
+
     // --- Shared decoder cache ---
     // Used by driver layers to store decoded frames for secondary layers to read.
     // Cache stores frames by value inside InputSource (not raw pointers to external buffers).
