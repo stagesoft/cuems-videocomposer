@@ -25,6 +25,7 @@
 #include "LayerProperties.h"
 #include "LayerPlayback.h"
 #include "LayerDisplay.h"
+#include "OutputFit.h"
 #include "../input/InputSource.h"
 #include "../sync/SyncSource.h"
 #include "../video/FrameBuffer.h"
@@ -32,6 +33,7 @@
 #include <memory>
 #include <string>
 #include <cstdint>
+#include <string>
 
 namespace videocomposer {
 
@@ -153,7 +155,33 @@ public:
     // Reverse playback (multiplies timescale by -1.0 and adjusts offset)
     void reverse();
 
+    // Place the layer on one output region (layer/<id>/fit_output). The
+    // placement is applied at once and applied again by update() whenever the
+    // source's dimensions change or stop being provisional (the command
+    // usually arrives before the async load has delivered an input). Every
+    // application logs a journal::fitOutput() line. An explicit position or
+    // scale command clears it.
+    void setOutputFit(const std::string& label, const FitRegion& region,
+                      int canvasWidth, int canvasHeight, FitMode mode);
+    void clearOutputFit() { outputFit_.active = false; }
+    bool hasOutputFit() const { return outputFit_.active; }
+
 private:
+    struct OutputFitState {
+        bool active = false;
+        std::string label;  // cue/layer id, for the log line
+        FitRegion region;
+        int canvasWidth = 0;
+        int canvasHeight = 0;
+        FitMode mode = FitMode::Fill;
+        // What the last application was computed from
+        int appliedWidth = -1;
+        int appliedHeight = -1;
+        std::string appliedBasis;
+    };
+    OutputFitState outputFit_;
+    void applyOutputFit(bool force);
+
     // Composed components
     LayerPlayback playback_;
     LayerDisplay display_;

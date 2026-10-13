@@ -24,6 +24,7 @@
 
 #include "../video/FrameBuffer.h"
 #include "OutputInfo.h"
+#include "OutputRegion.h"
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -169,6 +170,29 @@ public:
      * @return Vector of OutputInfo structures
      */
     virtual std::vector<OutputInfo> getOutputs() const { return {}; }
+
+    /**
+     * Where each output reads from on the canvas the layers are composited
+     * on, and that canvas's size (layer/<id>/fit_output, output/list).
+     * Default for single-window backends: one region, named "window",
+     * covering the whole window.
+     */
+    virtual std::vector<OutputRegion> getCanvasRegions() const {
+        unsigned int w = 0, h = 0;
+        getWindowSize(&w, &h);
+        OutputRegion region;
+        region.name = "window";
+        region.canvasWidth = static_cast<int>(w);
+        region.canvasHeight = static_cast<int>(h);
+        return {region};
+    }
+    virtual bool getCanvasSize(int& width, int& height) const {
+        unsigned int w = 0, h = 0;
+        getWindowSize(&w, &h);
+        width = static_cast<int>(w);
+        height = static_cast<int>(h);
+        return w > 0 && h > 0;
+    }
     
     /**
      * Configure output region on virtual canvas

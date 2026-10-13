@@ -42,6 +42,7 @@ class DisplayManager;
 class OSDManager;
 class OpenGLRenderer;
 class AsyncVideoLoader;
+class NDIDiscovery;
 class StartupSplash;
 
 #ifdef HAVE_VAAPI_INTEROP
@@ -98,6 +99,10 @@ public:
     
     // Check if a video load is in progress for a cue ID
     bool isLoadPending(const std::string& cueId) const;
+
+    // /videocomposer/ndi/discover: list NDI sources to the log, off the
+    // render thread. False when a discovery is already running.
+    bool startNdiDiscovery(int seconds);
 
 private:
     // Component initialization
@@ -160,6 +165,9 @@ private:
     
     // Async video loader
     std::unique_ptr<AsyncVideoLoader> asyncVideoLoader_;
+
+    // On-demand NDI discovery (created on first use)
+    std::unique_ptr<NDIDiscovery> ndiDiscovery_;
 
     // Pending shared layers waiting for their driver's async load to complete.
     // Key: driver cueId, Value: list of {secondaryCueId, filepath}

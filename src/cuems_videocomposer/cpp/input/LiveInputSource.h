@@ -55,7 +55,10 @@ public:
     bool isLiveStream() const override { return true; }
     bool seek(int64_t frameNumber) override { return false; }  // No seeking for live streams
     bool readFrame(int64_t frameNumber, FrameBuffer& buffer) override;
-    bool readLatestFrame(FrameBuffer& buffer) override;
+    // Hands the newest captured frame over by swapping it with `buffer`
+    // (no copy: the previous contents of `buffer` go back to the ring and
+    // are overwritten by a later capture). waitMs = 0 never blocks.
+    bool readLatestFrame(FrameBuffer& buffer, int waitMs = 100) override;
 
     // Live stream specific - buffer management
     void setBufferSize(int frames);

@@ -175,13 +175,15 @@ void LiveInputSource::captureLoop() {
     }
 }
 
-bool LiveInputSource::readLatestFrame(FrameBuffer& buffer) {
+bool LiveInputSource::readLatestFrame(FrameBuffer& buffer, int waitMs) {
     std::unique_lock<std::mutex> lock(bufferMutex_);
     
     // Wait for frame with timeout
     if (availableFrames_.load() == 0) {
-        // Wait up to 100ms for a frame
-        bool gotFrame = frameAvailable_.wait_for(lock, std::chrono::milliseconds(100),
+        if (waitMs <= 0) {
+            return false;  // Non-blocking: nothing new since the last read
+        }
+        bool gotFrame = frameAvailable_.wait_for(lock, std::chrono::milliseconds(waitMs),
             [this] { return availableFrames_.load() > 0 || !running_; });
         
         if (!gotFrame || availableFrames_.load() == 0) {
@@ -193,8 +195,10 @@ bool LiveInputSource::readLatestFrame(FrameBuffer& buffer) {
     int idx = (writeIndex_.load() - 1) % bufferSize_;
     if (idx < 0) idx += bufferSize_;  // Handle wrap
     
-    // Copy the frame (we keep buffer intact for possible re-reads)
-    buffer = frameBuffer_[idx];
+    // Hand the frame over without copying it (a 4K BGRA frame is ~33 MB).
+    // Nothing re-reads a consumed slot: availableFrames_ drops to 0 below,
+    // and the capture thread overwrites the slot before it is read again.
+    frameBuffer_[idx].swap(buffer);
     
     // Mark all frames as consumed (we only care about latest)
     availableFrames_ = 0;
