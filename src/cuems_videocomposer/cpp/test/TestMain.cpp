@@ -78,6 +78,8 @@ extern bool test_NdiPreview_JournalContract();
 extern bool test_NdiPreview_AddressForm();
 extern bool test_NdiPreview_TransportDecision();
 extern bool test_NdiPreview_JournalContractRelay();
+extern bool test_NdiPreview_ExtraIps();
+extern bool test_NdiPreview_JournalContractExtraIps();
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
 extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
@@ -153,6 +155,8 @@ int main() {
     TestFramework::instance().addTest("NdiPreview_AddressForm", test_NdiPreview_AddressForm);
     TestFramework::instance().addTest("NdiPreview_TransportDecision", test_NdiPreview_TransportDecision);
     TestFramework::instance().addTest("NdiPreview_JournalContractRelay", test_NdiPreview_JournalContractRelay);
+    TestFramework::instance().addTest("NdiPreview_ExtraIps", test_NdiPreview_ExtraIps);
+    TestFramework::instance().addTest("NdiPreview_JournalContractExtraIps", test_NdiPreview_JournalContractExtraIps);
     return TestFramework::instance().runAll();
 }
 

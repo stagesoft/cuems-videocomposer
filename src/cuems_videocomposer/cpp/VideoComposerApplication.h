@@ -102,7 +102,7 @@ public:
 
     // /videocomposer/ndi/discover: list NDI sources to the log, off the
     // render thread. False when a discovery is already running.
-    bool startNdiDiscovery(int seconds);
+    bool startNdiDiscovery(int seconds, const std::string& extraIps = "");
 
 private:
     // Component initialization

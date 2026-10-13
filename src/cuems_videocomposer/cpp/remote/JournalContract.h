@@ -142,6 +142,24 @@ inline std::string ndiDiscoverSource(const std::string& name, const std::string&
     return "NDI discover: " + name + " @ " + (address.empty() ? std::string("-") : address);
 }
 
+// Rev 12.2 (§3.10): every discovery says how many extra IPs it asks; a VC
+// that omits " ips=" cannot search by IP (the bridge's capability check, on
+// every run so a vacuumed startup line cannot hide it).
+inline std::string ndiDiscoverStarted(int seconds, size_t extraIps) {
+    return ndiDiscoverStarted(seconds) + " ips=" + std::to_string(extraIps);
+}
+
+// A source the extra-IP pass found and the plain (mDNS) pass did not.
+inline std::string ndiDiscoverSourceByIp(const std::string& name, const std::string& address) {
+    return ndiDiscoverSource(name, address) + " (ip)";
+}
+
+// Terminal: the ips argument was refused and nothing was searched. arg is
+// already sanitised (printable, truncated).
+inline std::string ndiDiscoverBadIps(const std::string& arg, const std::string& why) {
+    return "NDI discover: bad ips '" + arg + "': " + why;
+}
+
 inline std::string ndiDiscoverDone(size_t count) {
     return "NDI discover: done (" + std::to_string(count) + ")";
 }

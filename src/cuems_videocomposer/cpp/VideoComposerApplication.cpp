@@ -1104,11 +1104,11 @@ bool VideoComposerApplication::isLoadPending(const std::string& cueId) const {
     return false;
 }
 
-bool VideoComposerApplication::startNdiDiscovery(int seconds) {
+bool VideoComposerApplication::startNdiDiscovery(int seconds, const std::string& extraIps) {
     if (!ndiDiscovery_) {
         ndiDiscovery_ = std::make_unique<NDIDiscovery>();
     }
-    return ndiDiscovery_->start(seconds);
+    return ndiDiscovery_->start(seconds, extraIps);
 }
 
 void VideoComposerApplication::processAsyncLoads() {
