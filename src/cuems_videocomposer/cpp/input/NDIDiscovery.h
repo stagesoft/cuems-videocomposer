@@ -23,6 +23,7 @@
 #define VIDEOCOMPOSER_NDIDISCOVERY_H
 
 #include <atomic>
+#include <string>
 #include <thread>
 
 namespace videocomposer {
@@ -33,7 +34,9 @@ namespace videocomposer {
  * The videocomposer has no OSC reply channel, so the result goes to the log
  * (journal::ndiDiscoverSource / ndiDiscoverDone), where the controller's NDI
  * preview tool reads it. One discovery at a time: a request while one runs
- * logs journal::ndiDiscoverBusy() and is dropped. Runs on its own thread so
+ * logs journal::ndiDiscoverBusy() and is dropped. With extra IPs a second
+ * pass, with its own finder and at most kExtraPassSeconds, asks those hosts
+ * directly; what only it found is tagged "(ip)" (rev 12.2 §3.10). Runs on its own thread so
  * the render loop never waits for it; shutdown() aborts it within ~0.5 s.
  */
 class NDIDiscovery {
@@ -44,12 +47,13 @@ public:
     NDIDiscovery(const NDIDiscovery&) = delete;
     NDIDiscovery& operator=(const NDIDiscovery&) = delete;
 
-    // seconds is clamped to 1..10. Returns false when one is already running.
-    bool start(int seconds);
+    // seconds is clamped to 1..10. extraIps: a list already checked by
+    // parseNdiExtraIps ("" = none). Returns false when one is already running.
+    bool start(int seconds, const std::string& extraIps = "");
     void shutdown();
 
 private:
-    void run(int seconds);
+    void run(int seconds, std::string extraIps);
 
     std::thread thread_;
     std::atomic<bool> busy_{false};
