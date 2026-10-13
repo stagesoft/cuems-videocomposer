@@ -29,6 +29,7 @@
 #include "TestFramework.h"
 #include "../input/LiveInputSource.h"
 #include "../input/NdiAddress.h"
+#include "../input/NdiExtraIps.h"
 #include "../input/NdiTransport.h"
 #include "../layer/LayerManager.h"
 #include "../layer/LayerPlayback.h"
@@ -455,6 +456,46 @@ bool test_NdiPreview_TransportDecision() {
     t = decideNdiTransport(nullptr, dir, false);  // dev build, nothing installed
     TEST_ASSERT_FALSE(t.baseTcp);
     TEST_ASSERT_EQ(t.detail, "no config at " + dir + "/ndi-config.v1.json");
+    return true;
+}
+
+// --- rev 12.2 §3.10: sources on another subnet, by IP -----------------------
+
+bool test_NdiPreview_ExtraIps() {
+    std::string ips, why;
+    size_t n = 99;
+    TEST_ASSERT_TRUE(parseNdiExtraIps("", ips, n, why));
+    TEST_ASSERT_EQ(ips, std::string(""));
+    TEST_ASSERT_EQ(n, static_cast<size_t>(0));
+    TEST_ASSERT_TRUE(parseNdiExtraIps("10.20.0.15,10.20.0.16,10.20.0.15", ips, n, why));
+    TEST_ASSERT_EQ(ips, std::string("10.20.0.15,10.20.0.16"));   // de-duplicated
+    TEST_ASSERT_EQ(n, static_cast<size_t>(2));
+    TEST_ASSERT_FALSE(parseNdiExtraIps("10.20.0.15, 10.20.0.16", ips, n, why));   // no spaces
+    TEST_ASSERT_FALSE(parseNdiExtraIps("10.20.0.15,", ips, n, why));               // empty item
+    TEST_ASSERT_FALSE(parseNdiExtraIps("laptop.local", ips, n, why));              // no names
+    TEST_ASSERT_FALSE(parseNdiExtraIps("fe80::1", ips, n, why));                   // IPv4 only
+    TEST_ASSERT_FALSE(parseNdiExtraIps("10.20.0.256", ips, n, why));
+    TEST_ASSERT_FALSE(parseNdiExtraIps("127.0.0.1", ips, n, why));                 // loopback
+    TEST_ASSERT_FALSE(parseNdiExtraIps("239.255.0.1", ips, n, why));               // multicast
+    TEST_ASSERT_FALSE(parseNdiExtraIps("0.0.0.0", ips, n, why));
+    TEST_ASSERT_FALSE(parseNdiExtraIps("255.255.255.255", ips, n, why));
+    TEST_ASSERT_TRUE(parseNdiExtraIps("10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4,10.0.0.5,10.0.0.6,10.0.0.7,10.0.0.8",
+                                      ips, n, why));
+    TEST_ASSERT_FALSE(parseNdiExtraIps("10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4,10.0.0.5,10.0.0.6,10.0.0.7,10.0.0.8,10.0.0.9",
+                                       ips, n, why));                              // more than 8
+    TEST_ASSERT_EQ(ndiSanitizeForLog(std::string("a\nb") + std::string(100, 'x')).size(), static_cast<size_t>(64));
+    TEST_ASSERT_EQ(ndiSanitizeForLog("a\nb"), std::string("a?b"));
+    return true;
+}
+
+bool test_NdiPreview_JournalContractExtraIps() {
+    namespace j = journal;
+    TEST_ASSERT_EQ(j::ndiDiscoverStarted(3, 0), std::string("NDI discover: started (3 s) ips=0"));
+    TEST_ASSERT_EQ(j::ndiDiscoverStarted(3, 2), std::string("NDI discover: started (3 s) ips=2"));
+    TEST_ASSERT_EQ(j::ndiDiscoverSourceByIp("LAPTOP (OBS)", "10.20.0.15:5961"),
+                   std::string("NDI discover: LAPTOP (OBS) @ 10.20.0.15:5961 (ip)"));
+    TEST_ASSERT_EQ(j::ndiDiscoverBadIps("10.20.0.1 x", "not a dotted IPv4 address: '10.20.0.1 x'"),
+                   std::string("NDI discover: bad ips '10.20.0.1 x': not a dotted IPv4 address: '10.20.0.1 x'"));
     return true;
 }
 
