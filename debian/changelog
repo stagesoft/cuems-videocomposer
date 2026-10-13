@@ -1,3 +1,19 @@
+cuems-videocomposer (0.1.2-8) unstable; urgency=medium
+
+  * NDI sources on another subnet, by IP (ClickUp 869ekxuez, plan rev 12.2
+    §3.10; driven by cuems-power-bridge's "Añadir equipo por IP" / ndi_hosts):
+    - /videocomposer/ndi/discover [seconds] [ips]: after the normal mDNS pass,
+      a second finder with p_extra_ips (show_local_sources off, at most 3 s)
+      asks those hosts directly; what only it found is logged
+      "NDI discover: <name> @ <ip:port> (ip)", one "done (<n>)" for both.
+    - The ips argument (from OSC) must be comma-separated dotted unicast IPv4,
+      at most 8; otherwise the terminal line
+      "NDI discover: bad ips '<arg>': <why>" and nothing is searched.
+    - Every discovery's "started" line ends " ips=<n>": the bridge's check
+      that this videocomposer can search by IP.
+
+ -- Ion Reguera <ion@stagelab.coop>  Tue, 13 Oct 2026 18:24:14 +0200
+
 cuems-videocomposer (0.1.2-7) unstable; urgency=medium
 
   * NDI preview during montajes (ClickUp 869ekxuez / 869few41p; driven by
