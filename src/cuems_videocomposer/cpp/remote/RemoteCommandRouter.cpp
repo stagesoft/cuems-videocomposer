@@ -30,6 +30,7 @@
 #include "../display/DisplayBackend.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
 #include "../layer/OutputFit.h"
+#include "../input/NdiExtraIps.h"
 #include "JournalContract.h"
 #include "../utils/SMPTEUtils.h"
 #include <sstream>
@@ -2122,13 +2123,24 @@ bool RemoteCommandRouter::handleOutputCapture(const std::vector<std::string>& ar
 }
 
 bool RemoteCommandRouter::handleNdiDiscover(const std::vector<std::string>& args) {
-    // /videocomposer/ndi/discover [seconds]  (default 3, clamped to 1..10)
+    // /videocomposer/ndi/discover [seconds] [ips]  (default 3, clamped to 1..10)
     // Results go to the log: journal::ndiDiscoverSource / ndiDiscoverDone.
+    // ips (rev 12.2 §3.10): "10.20.0.15,10.20.0.16", also asked directly;
+    // a malformed list is refused with a terminal line and nothing searched.
     if (!app_) {
         return false;
     }
     int seconds = args.empty() ? 3 : std::atoi(args[0].c_str());
-    app_->startNdiDiscovery(seconds);
+    std::string ips;
+    if (args.size() > 1 && !args[1].empty()) {
+        size_t count = 0;
+        std::string why;
+        if (!parseNdiExtraIps(args[1], ips, count, why)) {
+            LOG_INFO << journal::ndiDiscoverBadIps(ndiSanitizeForLog(args[1]), why);
+            return true;
+        }
+    }
+    app_->startNdiDiscovery(seconds, ips);
     return true;  // a busy discovery is logged, not an error
 }
 
