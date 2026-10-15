@@ -25,6 +25,8 @@
 #include "InputSource.h"
 #include "HardwareDecoder.h"
 #include "AsyncDecodeQueue.h"
+#include "RecoveryPolicy.h"
+#include "../guard/HangGuard.h"
 #include "../video/GPUTextureFrameBuffer.h"
 #include <cuems_mediadecoder/MediaFileReader.h>
 #include <cuems_mediadecoder/VideoDecoder.h>
@@ -129,13 +131,46 @@ public:
 #endif
 
     /**
-     * Pre-warm the VAAPI→EGL GPU pipeline by importing frame 0.
-     * Must be called from the GL thread (main thread) after file is loaded.
-     * Eliminates ~20ms first-frame latency from one-time driver setup.
+     * Index-only mode: open the file to build/refresh its .idx and nothing else.
+     *
+     * Suppresses creation of the async decode queue, which exists to feed a
+     * renderer - the indexer has no layers and no display. The hardware device
+     * is still initialized, so indexFrames() keeps its Pass-2 short-circuit and
+     * the .idx bytes are unchanged.
+     *
+     * NOTE with no queue there is no decode path at all, so getOptimalBackend()
+     * still answers GPU_HARDWARE while nothing can actually render. That is moot
+     * in the indexer, which never asks.
      */
-    void prewarmGPUPipeline();
+    void setIndexOnly(bool indexOnly) { indexOnly_ = indexOnly; }
+    bool getIndexOnly() const { return indexOnly_; }
+
+    // Decode-path health (see InputSource::Health)
+    Health getHealth() const override;
+    std::string getHealthReason() const override;
+
+    // Hang guard: classified once in open(), when width/height/framerate are
+    // known and before any decode session exists.
+    bool isFourKClass() const override { return classification_.isFourKClass(); }
+    const Classification& guardClassification() const { return classification_; }
 
 private:
+    /**
+     * What the hang guard makes of this file, and whether that has been
+     * counted.
+     *
+     * The count is taken once in open(), after the metadata is read, and
+     * dropped once in close() - which the destructor also runs, so a source
+     * that is cancelled mid-project-switch or discarded after a failed
+     * hardware open still gives its count back. `classificationCounted_`
+     * makes the pair idempotent: close() is reachable more than once, and a
+     * counter that could be decremented twice would eventually go negative
+     * and silence the advisory for the rest of the process's life.
+     */
+    Classification classification_;
+    bool classificationCounted_ = false;
+    bool countedAsFourK_ = false;
+
     struct FrameIndex {
         int64_t pkt_pts;
         int64_t pkt_pos;
@@ -149,7 +184,64 @@ private:
 
     bool initializeFFmpeg();
     bool openCodec();
-    bool openHardwareCodec();
+
+    /**
+     * Initialize the hardware DEVICE (not a codec).
+     *
+     * Was openHardwareCodec(): it opened a second, synchronous decoder on the
+     * same file, with a VAAPI surface pool of its own, alongside the async
+     * queue's. Only the device context survives - it is what the queue decodes
+     * against and what the EGL interop shares.
+     *
+     * @return true when a usable hardware device was created
+     */
+    bool initializeHardwareDevice();
+
+    /**
+     * Release everything initializeHardwareDevice() created and fall back to
+     * software. Without this the software tier would run with a live VAAPI
+     * device still attached and re-allocate frames on top of its own.
+     */
+    void teardownHardwareDevice();
+
+    /**
+     * Would this codec actually open on this hardware device?
+     *
+     * Opens a codec context and frees it again without ever decoding. This is
+     * NOT the decoder - it is the capability answer the deleted synchronous
+     * codec open used to give as a side effect, and the only thing that
+     * distinguishes "a decoder exists and passed every static gate" from "it
+     * will actually open". Wrapper decoders (cuvid/qsv/dxva2) refuse here; the
+     * static gates cannot see it.
+     *
+     * Costs no surfaces: the VAAPI pool is allocated lazily at first decode
+     * (ff_get_format), never at avcodec_open2 - which is also why pool
+     * exhaustion cannot be detected here. (Wrapper decoders do allocate at
+     * open, which is precisely how they refuse.)
+     *
+     * Without this probe a file whose codec open would fail indexes in hardware
+     * mode - skipping Pass 2 - and is only dropped to software later by the
+     * failure ladder, leaving a hardware-form index on a software-decoded
+     * layer.
+     *
+     * @return true if the codec opened (and was then closed again)
+     */
+    bool probeHardwareCodecOpens(const AVCodec* hwCodec,
+                                 AVCodecParameters* codecParams,
+                                 AVHWDeviceType hwDeviceType) const;
+
+    /**
+     * Codec parameters straight from the demuxer - valid in BOTH decode modes.
+     *
+     * Identity and geometry used to be read off codecCtx_, which only ever
+     * worked because the hardware path kept a codec context of its own open.
+     * That context is gone (F2), so codecCtx_ is null for every hardware layer
+     * and codecpar is the only source that answers in both modes.
+     *
+     * @return codec parameters of the selected video stream, or nullptr when
+     *         no file is open / no video stream was selected.
+     */
+    AVCodecParameters* streamCodecParams() const;
     bool indexFrames();
     bool isIntraFrameCodec() const;  // Check if codec is intra-frame only (all keyframes)
     void setupDirectSeekMode();      // Setup direct seek mode for intra-frame codecs
@@ -180,11 +272,10 @@ private:
 
     // Hardware decoding
     AVBufferRef* hwDeviceCtx_;        // Hardware device context
-    AVFrame* hwFrame_;                // Hardware frame (for hardware decoding)
     HardwareDecoder::Type hwDecoderType_;  // Type of hardware decoder in use
     bool useHardwareDecoding_;        // Whether hardware decoding is enabled
-    bool codecCtxAllocated_;          // Whether codecCtx_ was allocated separately (hardware) or is part of stream (software)
     HardwareDecodePreference hwPreference_;
+    bool indexOnly_ = false;          // Index-only mode: no decode queue (see setIndexOnly)
     
 #ifdef HAVE_VAAPI_INTEROP
     std::unique_ptr<VaapiInterop> vaapiInterop_;  // VAAPI zero-copy interop (owned per-instance)
@@ -210,30 +301,58 @@ private:
     bool ready_;
     AVRational frameRateQ_;
     
-    // Async frame pre-buffering (like mpv's decode-ahead)
-    struct CachedFrame {
-        int64_t frameNumber;
-        FrameBuffer buffer;
-        bool valid;
-    };
-    
-    static constexpr size_t FRAME_CACHE_SIZE = 4;  // Pre-buffer up to 4 frames
-    std::deque<CachedFrame> frameCache_;
-    std::mutex cacheMutex_;
-    
-    // Async decode thread
-    std::unique_ptr<std::thread> decodeThread_;
-    std::condition_variable decodeCond_;
-    std::atomic<bool> decodeThreadRunning_{false};
-    std::atomic<int64_t> decodeTargetFrame_{-1};
-    std::atomic<bool> decodeThreadStop_{false};
-    
-    void decodeThreadFunc();
-    bool decodeFrameInternal(int64_t frameNumber, FrameBuffer& buffer);
-    void startAsyncDecode(int64_t startFrame);
-    void stopAsyncDecode();
-    CachedFrame* findCachedFrame(int64_t frameNumber);
-    
+    // Decode-path health, written by open()'s failure ladder (loader thread)
+    // and by the recovery worker; read by the render thread and by a future
+    // load-time health ping.
+    std::atomic<Health> health_{Health::ok};
+    mutable std::mutex healthReasonMutex_;
+    std::string healthReason_;
+    void setHealth(Health health, const std::string& reason);
+
+    // --- decode-queue recovery -------------------------------------------
+    //
+    // ONE long-lived thread, parked on a condition variable, created at the
+    // first successful hardware open. Not a thread per recovery: re-assigning a
+    // joinable std::thread member terminates the process on the second one, and
+    // spawning from the vsync loop is not free under memory pressure - which is
+    // exactly the condition that triggers recovery.
+    //
+    // queueAccessMutex_ is the gate. The render thread try_locks it around ALL
+    // queue access and holds its last texture if it cannot get it; the worker
+    // holds it for the whole recovery. Without it the render thread can be
+    // borrowing a frame from a queue the worker is destroying.
+    // mutable: getHealth()/getHealthReason() are const and try_lock this gate to
+    // refine the answer from the queue's own state (defect 6(b)). They NEVER
+    // block on it - see those two functions.
+    std::unique_ptr<std::thread> recoveryThread_;
+    mutable std::mutex queueAccessMutex_;
+    std::mutex recoveryWakeMutex_;
+    std::condition_variable recoveryWakeCond_;
+    std::atomic<bool> recoveryWake_{false};
+    std::atomic<bool> recoveryStop_{false};
+    std::atomic<bool> recoveryActive_{false};
+    std::atomic<int64_t> recoveryTargetFrame_{0};
+
+    // Loop state mirrored here so a recovery reopen can re-assert it: the
+    // queue's open() deliberately clears all latched playback state.
+    std::atomic<bool> loopModeActive_{false};
+    std::atomic<int64_t> loopTotalFrames_{0};
+
+    // Episode accounting for the recovery ladder: how many episodes this fault
+    // run has consumed, and when the run is over. Touched ONLY by the recovery
+    // worker between wake and park (stopRecoveryWorker() joins it), so it needs
+    // no synchronisation of its own.
+    RecoveryPolicy recoveryPolicy_;
+
+    void startRecoveryWorker();
+    void stopRecoveryWorker();
+    void recoveryWorkerFunc();
+    void maybeWakeRecovery(int64_t currentFrame);
+
+    // Throttle for the "frame not in queue" warning. Per-instance, NOT static:
+    // a static counter is shared by every layer in the process.
+    int queueMissCount_ = 0;
+
     // Hardware decode frame tracking (per-instance, NOT static)
     int64_t lastDecodedHWFrame_;
     

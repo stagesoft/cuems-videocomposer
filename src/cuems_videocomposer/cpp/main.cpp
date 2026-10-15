@@ -21,6 +21,7 @@
 
 #include "VideoComposerApplication.h"
 #include "input/NDIVideoInput.h"
+#include "utils/ExitReporter.h"
 #include "input/NdiTransport.h"
 #include <iostream>
 #ifdef HAVE_CUEMS_LOGGER
@@ -93,6 +94,12 @@ int main(int argc, char** argv) {
     static CuemsLogger vcLogger("videocomposer");
 #endif
 
+    // Arm the exit reporter before anything can die. Placed after the logger
+    // singleton so the handler outlives it, and after the --discover-ndi
+    // early-exit so a pure CLI run installs nothing. It stays silent until
+    // markRunning() below; see utils/ExitReporter.h for the policy.
+    videocomposer::exitreport::install();
+
     videocomposer::VideoComposerApplication app;
 
     if (!app.initialize(argc, argv)) {
@@ -107,6 +114,17 @@ int main(int argc, char** argv) {
         // Real initialization error
         return 1;
     }
-    
-    return app.run();
+
+    videocomposer::exitreport::markRunning();
+
+    const int rc = app.run();
+
+    // Tear down here rather than leaving it to ~VideoComposerApplication, so
+    // that "orderly" means the decoders and the display backend are actually
+    // released by the time the reporter states it.
+    app.shutdown();
+    if (rc == 0) {
+        videocomposer::exitreport::markCleanShutdown();
+    }
+    return rc;
 }
