@@ -1,3 +1,21 @@
+cuems-videocomposer (0.1.2-9) unstable; urgency=medium
+
+  * FP530 campaign (ClickUp 869en65tm; PR #8, supersedes #2):
+    - Per-CRTC frame pacing: each refresh-rate class flips on its own vblank,
+      so mixed refresh rates no longer break the canvas (869emcrwa).
+    - Decode path: the synchronous decoder is gone (probe context only,
+      freed at once) - one hardware decode context per layer instead of two.
+      An 8 GB FP530 now survives a 4-layer fade show for 5 h; 0.1.2-7
+      starved it in 14 min.
+    - G12 hang guard, saturation monitor and machine profiles (keyed on the
+      GPU). The cue refusal is OFF by default: --hang-guard=on enforces the
+      measured cap, --hang-guard=off disarms everything; counts, advisories
+      and saturation warnings always run.
+    - The compositor's death is reported (exit reporter); recovery-policy
+      tests.
+
+ -- Ion Reguera <ion@stagelab.coop>  Thu, 15 Oct 2026 15:12:01 +0200
+
 cuems-videocomposer (0.1.2-8) unstable; urgency=medium
 
   * NDI sources on another subnet, by IP (ClickUp 869ekxuez, plan rev 12.2
