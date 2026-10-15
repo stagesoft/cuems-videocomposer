@@ -52,6 +52,14 @@ namespace videocomposer {
 // Static map for atomic flip: maps crtc_id → DRMSurface* for pageFlipHandler2
 std::map<uint32_t, DRMSurface*> DRMSurface::s_crtcSurfaceMap_;
 
+namespace {
+// How long a flip may stay pending before per-surface pacing writes it off.
+// Comfortably longer than any refresh this compositor drives (24Hz is 41.7ms,
+// the slowest contemplated), and matched to DRMBackend's own wait ceiling. A
+// surface running below 24Hz would need both re-derived from its real period.
+constexpr auto kStuckFlipTimeout = std::chrono::milliseconds(250);
+}  // namespace
+
 DRMSurface::DRMSurface(DRMOutputManager* outputManager, const std::string& outputName)
     : outputManager_(outputManager)
     , outputName_(outputName)
@@ -441,9 +449,9 @@ gbm_surface_created:
     // Initialize presentation timing with display refresh rate
     const OutputInfo& outputInfo = getOutputInfo();
     if (outputInfo.refreshRate > 0) {
-        presentationTiming_.init(outputInfo.refreshRate);
+        presentationTiming_.init(outputInfo.refreshRate, outputName_);
     } else {
-        presentationTiming_.init(60.0);  // Fallback to 60Hz
+        presentationTiming_.init(60.0, outputName_);  // Fallback to 60Hz
     }
     
     initialized_ = true;
@@ -661,6 +669,16 @@ gbm_resize_surface_created:
         return false;
     }
     
+    // A mode change invalidates the vsync model: displayHz_/expectedVsyncNs_
+    // still describe the old mode, so every drop figure after this point would
+    // be measured against the wrong refresh. setOutputMode's prepareMode() has
+    // already refreshed the connector info by the time it calls resize(), so
+    // getOutputInfo() reports the new rate here.
+    {
+        const double newRefresh = getOutputInfo().refreshRate;
+        presentationTiming_.init(newRefresh > 0.0 ? newRefresh : 60.0, outputName_);
+    }
+
     LOG_INFO << "DRMSurface::resize: Successfully resized to " << width << "x" << height;
     return true;
 }
@@ -1110,6 +1128,11 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
         }
         currentBo_ = bo;
         std::swap(currentFb_, nextFb_);
+        // SetCrtc is synchronous and fires no flip event, so this surface has
+        // nothing to wait on. Per-surface pacing must rate-limit it by time or
+        // the render loop would spin on it.
+        usesFlipEvents_ = false;
+        lastPresentTime_ = std::chrono::steady_clock::now();
         return true;
     };
 
@@ -1147,6 +1170,8 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
                 if (failCount >= 10 && !useSetCrtcOnly_) {
                     LOG_WARNING << "DRMSurface: Page flip consistently failing, switching to SetCrtc mode";
                     useSetCrtcOnly_ = true;
+                    // From here on this surface presents without flip events.
+                    usesFlipEvents_ = false;
                 }
                 if (doSetCrtc()) {
                     return 0;
@@ -1171,6 +1196,8 @@ int DRMSurface::doPageFlip(bool allowSetCrtcFallback) {
     }
 
     flipPending_ = true;
+    usesFlipEvents_ = true;
+    flipSubmitTime_ = lastPresentTime_ = std::chrono::steady_clock::now();
     presentationTiming_.recordSubmit();
 
     // DON'T release previous buffer yet — it's still being displayed.
@@ -1266,6 +1293,11 @@ void DRMSurface::finalizeAtomicFlipAsync() {
 
     // Mark flip pending so processFlipEvents/waitForFlip will handle it
     flipPending_ = true;
+
+    // Per-surface pacing: this present will report back via a flip event, so
+    // it needs no time gate; date it so a dead CRTC can be timed out.
+    usesFlipEvents_ = true;
+    flipSubmitTime_ = lastPresentTime_ = std::chrono::steady_clock::now();
 
     // Register in the crtc → surface map for pageFlipHandler2
     s_crtcSurfaceMap_[crtcId_] = this;
@@ -1363,6 +1395,104 @@ void DRMSurface::pageFlipHandler2(int fd, unsigned int sequence,
 
         surface->flipPending_ = false;
     }
+}
+
+int64_t DRMSurface::vsyncIntervalNs() const {
+    const int64_t ns = presentationTiming_.getExpectedVsyncDuration();
+    // PresentationTiming::init() already applies the 60Hz fallback when the
+    // connector reports nothing usable; this only covers "not initialised yet".
+    return ns > 0 ? ns : 16666667;
+}
+
+double DRMSurface::effectiveRefreshHz() const {
+    return 1e9 / static_cast<double>(vsyncIntervalNs());
+}
+
+bool DRMSurface::isAtomicEligible() const {
+    const DRMPlane* plane = getPlane();
+    return plane != nullptr && plane->propertiesLoaded && modeSet_;
+}
+
+std::chrono::steady_clock::time_point DRMSurface::timeGateDeadline() const {
+    if (usesFlipEvents_) {
+        return std::chrono::steady_clock::time_point::max();
+    }
+    return lastPresentTime_ + std::chrono::nanoseconds(vsyncIntervalNs());
+}
+
+bool DRMSurface::isReadyToPresent(std::chrono::steady_clock::time_point now) const {
+    if (!initialized_ || flipPending_) {
+        return false;
+    }
+    // Belt and braces against the failure this whole path has to avoid: a
+    // surface that swaps without flipping drains the GBM pool.
+    if (!hasFreeBuffers()) {
+        return false;
+    }
+    if (!usesFlipEvents_) {
+        return now >= timeGateDeadline();
+    }
+    return true;
+}
+
+bool DRMSurface::expireStuckFlip(std::chrono::steady_clock::time_point now) {
+    if (!flipPending_ || flipSubmitTime_.time_since_epoch().count() == 0) {
+        return false;
+    }
+    if (now - flipSubmitTime_ < kStuckFlipTimeout) {
+        return false;
+    }
+
+    LOG_WARNING << "DRMSurface[" << outputName_ << "]: no flip completion after "
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       kStuckFlipTimeout).count()
+                << "ms -- abandoning it so the other outputs keep running";
+
+    // The event that would have released previousBo_ is not coming. Release it
+    // here: finalizeAtomicFlipAsync() overwrites previousBo_ on the next
+    // present, which would drop the last reference to this buffer.
+    if (previousBo_ && gbmSurface_) {
+        gbm_surface_release_buffer(gbmSurface_, previousBo_);
+        previousBo_ = nullptr;
+    }
+    // Same reason waitForFlip()'s timeout branch does it: an orphaned submit
+    // would mispair with a later flip and skew the FIFO by one.
+    presentationTiming_.discardPendingSubmit();
+    // Drop the routing entry too, so a late event cannot land on a flip that
+    // has already been written off.
+    s_crtcSurfaceMap_.erase(crtcId_);
+
+    flipPending_ = false;
+    lastPresentTime_ = now;
+    return true;
+}
+
+bool DRMSurface::waitForAnyFlip(int drmFd, int timeoutMs) {
+    if (drmFd < 0) {
+        return false;
+    }
+
+    struct pollfd pfd = {};
+    pfd.fd = drmFd;
+    pfd.events = POLLIN;
+
+    int ret = poll(&pfd, 1, timeoutMs);
+    if (ret < 0) {
+        if (errno != EINTR) {
+            LOG_ERROR << "DRMSurface::waitForAnyFlip: poll error: " << strerror(errno);
+        }
+        return false;  // caller re-evaluates readiness and retries
+    }
+    if (ret == 0 || !(pfd.revents & POLLIN)) {
+        return false;
+    }
+
+    drmEventContext evctx = {};
+    evctx.version = 3;
+    evctx.page_flip_handler = pageFlipHandler;
+    evctx.page_flip_handler2 = pageFlipHandler2;
+    drmHandleEvent(drmFd, &evctx);
+    return true;
 }
 
 bool DRMSurface::hasFreeBuffers() const {

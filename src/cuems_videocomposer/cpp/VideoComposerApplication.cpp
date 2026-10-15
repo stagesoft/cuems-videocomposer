@@ -20,6 +20,8 @@
  */
 
 #include "VideoComposerApplication.h"
+#include "guard/HangGuard.h"
+#include "guard/SaturationMonitor.h"
 #include "config/ConfigurationManager.h"
 #include "input/VideoFileInput.h"
 #include "input/AsyncVideoLoader.h"
@@ -128,6 +130,11 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
 #endif
     }
 
+    // Before anything can be loaded or played.
+    if (!initializeHangGuard()) {
+        return false;
+    }
+
     // Initialize display
     if (!initializeDisplay()) {
         LOG_ERROR << "Failed to initialize display";
@@ -186,6 +193,59 @@ bool VideoComposerApplication::initializeConfiguration(int argc, char** argv) {
         return false;
     }
     
+    return true;
+}
+
+bool VideoComposerApplication::initializeHangGuard() {
+    // A misspelled flag is not a harmless typo here: --hang-gaurd=off leaves
+    // the guard armed while the operator believes it is off, and the only
+    // evidence used to be silence.
+    for (const std::string& opt : config_->unrecognizedOptions()) {
+        LOG_WARNING << "Unrecognized option '" << opt
+                    << "' was ignored - check the spelling; it changed nothing";
+    }
+
+    MachineProfile profile;
+    const std::string forced = config_->getString("vc_profile", "");
+    if (!forced.empty()) {
+        if (!MachineProfile::byName(forced, profile)) {
+            LOG_ERROR << "--vc-profile=" << forced << " is not a known profile "
+                      << "(known: " << MachineProfile::knownNames() << ")";
+            return false;
+        }
+    } else {
+        profile = MachineProfile::detect();
+    }
+
+    initHangGuard(profile);
+
+    if (config_->getBool("hang_guard_off", false)) {
+        // Mandatory escape hatch: the capacity harness has to be able to
+        // exceed the cap, or no new boundary can ever be measured.
+        hangGuard().disarm("--hang-guard=off");
+    } else if (config_->getBool("hang_guard_on", false)) {
+        hangGuard().setGuardSource("flag");
+    } else {
+        // Off unless asked for. The cap was armed for the vcn_dec ring hang,
+        // and on the FP530 that hang turned out to need the GPU's ATS off
+        // (pci=nommconf or pci=noats); on the stock kernel line five and more
+        // 4K sessions only drop frames. Refusing a cue in a show is a policy
+        // the operator chooses, so the refusal is opt-in and the counts,
+        // advisories and saturation warnings keep running either way.
+        hangGuard().disarmByDefault();
+    }
+
+    hangGuard().logStartupState();
+
+    if (config_->getBool("saturation_monitor_off", false)) {
+        // The guard is untouched: this silences the instrument, never the
+        // limit. Used to measure what the instrument itself costs.
+        LOG_WARNING << "SaturationMonitor: DISABLED by --saturation-monitor=off "
+                    << "- no saturation warnings will be produced (the hang "
+                    << "guard is unaffected)";
+    } else {
+        saturationMonitor().start(hangGuard().profile());
+    }
     return true;
 }
 
@@ -593,6 +653,12 @@ OpenGLRenderer& VideoComposerApplication::renderer() {
 
 void VideoComposerApplication::shutdown() {
     running_ = false;
+
+    // Stop the monitor before the things it describes go away. It never holds
+    // a pointer into a layer, so this is ordering hygiene rather than a
+    // correctness requirement - but a monitor still sampling through teardown
+    // would log a stream of meaningless transitions on the way out.
+    saturationMonitor().stop();
     
     if (ndiDiscovery_) {
         ndiDiscovery_->shutdown();
@@ -1121,8 +1187,19 @@ void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, con
                                                    std::unique_ptr<InputSource> inputSource, bool success) {
     if (!success || !inputSource) {
         LOG_ERROR << journal::asyncLoadFailed(filepath, cueId);
+        // Written before the source is discarded - which is the whole point of
+        // keeping the record on the manager rather than on the object that is
+        // about to cease to exist.
+        if (layerManager_) {
+            layerManager_->recordLoadOutcome(cueId, LoadOutcome::Result::failed,
+                                             "load failed: " + filepath);
+        }
         pendingSharedLayers_.erase(cueId);  // cleanup any pending secondaries
         return;
+    }
+
+    if (layerManager_) {
+        layerManager_->recordLoadOutcome(cueId, LoadOutcome::Result::ok, std::string());
     }
 
     // Get the layer for this cue ID

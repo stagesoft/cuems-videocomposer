@@ -26,11 +26,14 @@
  */
 
 #include "AsyncDecodeQueue.h"
+#include "../guard/SaturationSignals.h"
+#include "../utils/ExitReporter.h"
 #include "../utils/Logger.h"
 #include <chrono>
 
 extern "C" {
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>      // av_get_pix_fmt_name() - defect 6(b) reporting
 #include <libavutil/opt.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vaapi.h>
@@ -60,13 +63,47 @@ AsyncDecodeQueue::~AsyncDecodeQueue() {
     close();
 }
 
-bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCtx) {
+bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCtx,
+                            int extraHwFrames, size_t fillDepth) {
     close();  // Close any existing
     
     filename_ = filename;
     hwDeviceCtx_ = hwDeviceCtx;
-    
-    
+    extraHwFrames_ = extraHwFrames;
+
+    // Clamp: a fill depth below the trim window is a permanent miss, above the
+    // queue capacity is meaningless.
+    if (fillDepth < FILL_DEPTH_REDUCED) fillDepth = FILL_DEPTH_REDUCED;
+    if (fillDepth > MAX_QUEUE_SIZE)     fillDepth = MAX_QUEUE_SIZE;
+    fillDepth_ = fillDepth;
+
+    lastOpenFailure_ = OpenFailure::NONE;
+    lastOpenAVError_ = 0;
+    consecutiveErrors_ = 0;
+    lastDecodeAVError_ = 0;
+    // Recovery reads this as "good frames since the reopen that ended the last
+    // episode", which is only true because it is reset here. See framesDecoded().
+    framesDecoded_ = 0;
+
+    // Reset latched playback state. close() clears the queue and the thread but
+    // NOT these: reopening on a recovery attempt with eofReached_ or a virtual
+    // loop offset still set would leave the fresh queue refusing to decode, or
+    // numbering frames into a window the renderer never asks for.
+    // Loop mode is reset too - the caller re-asserts it after a successful open.
+    // Defect 6(b): re-arm the first-frame format latch. A reopen can land on a
+    // different decode path than the open before it, so a stale "we already
+    // looked" would report the previous attempt's answer forever.
+    softDespiteHwClaim_ = false;
+    firstDecodedPixFmt_ = AV_PIX_FMT_NONE;
+
+    eofReached_ = false;
+    virtualOffset_ = 0;
+    seekGoal_ = -1;
+    seekRequested_ = false;
+    seekTarget_ = 0;
+    loopMode_ = false;
+    totalFrames_ = 0;
+
     // Open format context
     formatCtx_ = nullptr;
     int ret = avformat_open_input(&formatCtx_, filename.c_str(), nullptr, nullptr);
@@ -74,6 +111,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, sizeof(errbuf));
         LOG_ERROR << "AsyncDecodeQueue: Failed to open " << filename << ": " << errbuf;
+        lastOpenFailure_ = OpenFailure::DEMUX;
+        lastOpenAVError_ = ret;
         return false;
     }
     
@@ -82,6 +121,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     if (ret < 0) {
         LOG_ERROR << "AsyncDecodeQueue: Failed to find stream info";
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::DEMUX;
+        lastOpenAVError_ = ret;
         return false;
     }
     
@@ -97,6 +138,7 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     if (videoStream_ < 0) {
         LOG_ERROR << "AsyncDecodeQueue: No video stream found";
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::NO_STREAM;
         return false;
     }
     
@@ -132,6 +174,7 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     if (!codec) {
         LOG_ERROR << "AsyncDecodeQueue: No decoder found for codec " << codecpar->codec_id;
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::DECODER_LOOKUP;
         return false;
     }
     
@@ -140,6 +183,7 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     if (!codecCtx_) {
         LOG_ERROR << "AsyncDecodeQueue: Failed to allocate codec context";
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::INTERNAL;
         return false;
     }
     
@@ -149,6 +193,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         LOG_ERROR << "AsyncDecodeQueue: Failed to copy codec parameters";
         avcodec_free_context(&codecCtx_);
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::INTERNAL;
+        lastOpenAVError_ = ret;
         return false;
     }
     
@@ -166,10 +212,16 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         codecCtx_->thread_count = 4;
         codecCtx_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     } else {
-        // Request extra VAAPI surfaces so the queue can hold 8 frames
-        // without exhausting the pool (default pool ~17 is too small
-        // when sync fallback + EGL import also hold surfaces).
-        codecCtx_->extra_hw_frames = 16;
+        // Request extra VAAPI surfaces for the frames this queue pins outside
+        // the decoder's own DPB: MAX_QUEUE_SIZE in the queue, plus the borrowed
+        // frame, the frame being transferred, and the one the interop still
+        // holds for the previous vsync - MAX_QUEUE_SIZE + 3.
+        //
+        // This was 16, sized when a second (synchronous) decoder held surfaces
+        // of its own on the same file. That decoder is gone, and the surplus is
+        // not free: it is VRAM reserved per layer against a carve-out that the
+        // eviction-storm hang is measured against.
+        codecCtx_->extra_hw_frames = extraHwFrames_;
     }
     
     // Open codec
@@ -180,6 +232,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         LOG_ERROR << "AsyncDecodeQueue: Failed to open codec: " << errbuf;
         avcodec_free_context(&codecCtx_);
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::CODEC_OPEN;
+        lastOpenAVError_ = ret;
         return false;
     }
     
@@ -189,6 +243,7 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         LOG_ERROR << "AsyncDecodeQueue: Failed to allocate frame";
         avcodec_free_context(&codecCtx_);
         avformat_close_input(&formatCtx_);
+        lastOpenFailure_ = OpenFailure::INTERNAL;
         return false;
     }
     
@@ -221,10 +276,21 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     }
     
     ready_ = true;
-    
+
+    // Join the live-decoder census (F1). Paired with close() through ready_,
+    // which is the only thing that distinguishes "open() got this far" from a
+    // failed open that still calls close() on the way out.
+    if (useHardware_) {
+        exitreport::decoderOpened(extraHwFrames_);
+    }
+
     LOG_INFO << "AsyncDecodeQueue: Opened " << filename 
              << " (" << width_ << "x" << height_ << " @ " << framerate_ << "fps"
-             << ", " << (useHardware_ ? "hardware" : "software") << " decode)";
+             << ", " << (useHardware_ ? "hardware" : "software") << " decode"
+             << (useHardware_ ? ", pool +" + std::to_string(extraHwFrames_) +
+                                ", fill depth " + std::to_string(fillDepth_.load())
+                              : std::string())
+             << ")";
     
     // Start decode thread
     threadStop_ = false;
@@ -236,6 +302,10 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
 }
 
 void AsyncDecodeQueue::close() {
+    if (ready_ && useHardware_) {
+        exitreport::decoderClosed(extraHwFrames_);
+    }
+
     // Stop decode thread
     if (decodeThread_) {
         threadStop_ = true;
@@ -581,10 +651,14 @@ void AsyncDecodeQueue::decodeThreadFunc() {
         bool shouldDecode = false;
         if (eofReached_) {
             // Non-loop EOF: hold last frames, don't decode more until a seek clears this
-        } else if (queueSize < MAX_QUEUE_SIZE) {
+        } else if (queueSize < fillDepth_.load()) {
+            // Fill gate only. The jump thresholds, the loop-boundary
+            // discriminant and the trim window below keep the compile-time
+            // MAX_QUEUE_SIZE: they describe queue geometry, not how deep this
+            // open() is allowed to buffer.
             if (newestInQueue < 0) {
                 shouldDecode = true;
-            } else if (newestInQueue < target + static_cast<int64_t>(MAX_QUEUE_SIZE)) {
+            } else if (newestInQueue < target + static_cast<int64_t>(fillDepth_.load())) {
                 shouldDecode = true;
             }
         }
@@ -622,9 +696,97 @@ void AsyncDecodeQueue::decodeThreadFunc() {
     LOG_INFO << "AsyncDecodeQueue: Decode thread stopped";
 }
 
+void AsyncDecodeQueue::noteDecodedFormat(const AVFrame* frame) {
+    // Decode thread only, first decoded frame of each open().
+    //
+    // useHardware_ is decided inside open(), from "a VAAPI device attached and
+    // the codec is whitelisted" - a statement of intent. This is the first
+    // moment the truth exists: a frame came back, and its format says which
+    // path produced it. The disagreement case used to be silently ignored (the
+    // two VAAPI sync sites just took their else branch), which is defect 6(b):
+    // the layer reports Health::ok and hardware while the CPU does the work,
+    // and the only thing that disagrees is the GPU's decode engine at zero.
+    if (!frame || firstDecodedPixFmt_.load() != AV_PIX_FMT_NONE) {
+        return;
+    }
+    firstDecodedPixFmt_.store(frame->format);
+
+    if (useHardware_ && frame->format != AV_PIX_FMT_VAAPI) {
+        softDespiteHwClaim_.store(true);
+        const char* fmt = av_get_pix_fmt_name((AVPixelFormat)frame->format);
+        // ERROR, not WARNING, and deliberately: this is the silent-wrong-answer
+        // class the whole 869en65tm campaign is about, and it is the only
+        // observable there is until the F9 health ping exists.
+        LOG_ERROR << "AsyncDecodeQueue: opened with hardware acceleration for "
+                  << filename_ << " but frames are decoding in SOFTWARE ("
+                  << (fmt ? fmt : "unknown pixel format")
+                  << ") - this layer is on the CPU; the GPU decode engine will "
+                     "show idle for it";
+    }
+}
+
+
+void AsyncDecodeQueue::recordDecodeError(int averr, const char* where) {
+    lastDecodeAVError_ = averr;
+    // F1's live-decoder census. This is the only production caller: the unit
+    // suite drives decodeErrorObserved() directly, so a death record's
+    // decode_errors field is trustworthy only while this line is here.
+    exitreport::decodeErrorObserved(averr);
+
+    // The same event, but keyed by queue so the saturation monitor can tell
+    // one sick file from a platform-wide event. Errors on a single layer are
+    // that layer's own recovery story; two or more layers erroring within the
+    // same window is a property of the GPU, and that is what raises an alarm.
+    // `this` is only ever compared for equality, never dereferenced.
+    signals::decodeErrorOnLayer(reinterpret_cast<uint64_t>(this));
+
+    const int n = ++consecutiveErrors_;
+    const int suppressed = ++decodeErrorsSinceLog_;
+
+    // A declared-failed layer keeps erroring at its retry cadence forever.
+    // Counting continues (above); saying so does not - see quiesceErrorLog().
+    if (errorLogQuiesced_.load()) {
+        return;
+    }
+
+    // Crossing the threshold always speaks - that is the transition to
+    // unhealthy, and recovery follows it.
+    if (n == DECODE_ERROR_THRESHOLD) {
+        LOG_ERROR << "AsyncDecodeQueue: " << n << " consecutive decode errors for "
+                  << filename_ << " - queue declared unhealthy, recovery may reopen it";
+        lastDecodeErrorLog_ = std::chrono::steady_clock::now();
+        decodeErrorsSinceLog_ = 0;
+        return;
+    }
+
+    // Otherwise report at a bounded rate. Un-throttled this floods the journal
+    // on a stream that is damaged but still decoding, because every good frame
+    // resets the run and re-arms the "first error" line.
+    const auto now = std::chrono::steady_clock::now();
+    const bool firstEver = (lastDecodeErrorLog_.time_since_epoch().count() == 0);
+    const auto sinceLog = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              now - lastDecodeErrorLog_).count();
+    if (!firstEver && sinceLog < DECODE_ERROR_LOG_INTERVAL_MS) {
+        return;
+    }
+
+    char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+    av_strerror(averr, errbuf, AV_ERROR_MAX_STRING_SIZE);
+    LOG_ERROR << "AsyncDecodeQueue: decode error in " << where << " for "
+              << filename_ << ": " << errbuf << " (" << averr << ")"
+              << (suppressed > 1
+                      ? " [" + std::to_string(suppressed) + " errors since last report]"
+                      : std::string());
+    lastDecodeErrorLog_ = now;
+    decodeErrorsSinceLog_ = 0;
+}
+
 bool AsyncDecodeQueue::decodeNextFrame() {
     AVPacket* packet = av_packet_alloc();
-    if (!packet) return false;
+    if (!packet) {
+        recordDecodeError(AVERROR(ENOMEM), "av_packet_alloc");
+        return false;
+    }
     
     bool gotFrame = false;
     int maxPackets = 100;  // Safety limit
@@ -639,11 +801,12 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         } else if (ret == AVERROR(EAGAIN)) {
             // Need more input
         } else if (ret == AVERROR_EOF) {
-            // End of stream
+            // End of stream - NOT an error. This is the bare receive-EOF at the
+            // loop top; the post-drain eofReached_ path below is the other one.
             av_packet_free(&packet);
             return false;
         } else {
-            // Error
+            recordDecodeError(ret, "avcodec_receive_frame");
             av_packet_free(&packet);
             return false;
         }
@@ -677,6 +840,10 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                     // Apply virtual offset (should be 0 at end-of-file)
                     int64_t voff = virtualOffset_.load();
                     if (voff > 0) drainFrameNum += voff;
+
+                    // A very short clip can reach EOF with its first frame,
+                    // so the latch has to be armed from here too (defect 6(b)).
+                    noteDecodedFormat(decodeFrame_);
 
                     // Sync VAAPI surface if hardware decoding
                     if (useHardware_ && decodeFrame_->format == AV_PIX_FMT_VAAPI) {
@@ -740,12 +907,14 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                     continue;  // Re-read packet from seeked position
                 } else {
                     // Non-loop mode: stop decoding and hold last frames.
+                    // Clean end of stream, not a fault - do NOT count it.
                     eofReached_ = true;
                     LOG_INFO << "AsyncDecodeQueue: EOF reached, stopping decode (non-loop)";
                     av_packet_free(&packet);
                     return false;
                 }
             } else {
+                recordDecodeError(ret, "av_read_frame");
                 av_packet_free(&packet);
                 return false;
             }
@@ -762,6 +931,7 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         av_packet_unref(packet);
         
         if (ret < 0 && ret != AVERROR(EAGAIN)) {
+            recordDecodeError(ret, "avcodec_send_packet");
             av_packet_free(&packet);
             return false;
         }
@@ -770,6 +940,8 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     av_packet_free(&packet);
     
     if (!gotFrame) {
+        // Not an error: the packet budget ran out (or a stop was requested)
+        // without the decoder producing a frame. The thread simply tries again.
         return false;
     }
     
@@ -800,6 +972,10 @@ bool AsyncDecodeQueue::decodeNextFrame() {
         frameNum += voff;
     }
     
+    // Defect 6(b): the same comparison the sync below makes, but recorded when
+    // it FAILS instead of only acted on when it succeeds.
+    noteDecodedFormat(decodeFrame_);
+
     // For VAAPI hardware frames, sync the GPU before marking frame as ready
     // This ensures the decode is complete before we put it in the queue
     if (useHardware_ && decodeFrame_->format == AV_PIX_FMT_VAAPI) {
@@ -822,9 +998,18 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     qf.frameNumber = frameNum;
     qf.frame = av_frame_alloc();
     if (!qf.frame) {
+        recordDecodeError(AVERROR(ENOMEM), "av_frame_alloc");
         return false;
     }
     
+    // A decoded frame clears the error run, and counts as recovery's evidence
+    // that this layer is actually delivering pictures again (RecoveryPolicy's
+    // decay input). Counted here, at the one point a frame is known good -
+    // decodeNextFrame() also returns false for EOF and for "no frame after 100
+    // packets", neither of which is a delivered picture.
+    consecutiveErrors_ = 0;
+    ++framesDecoded_;
+
     // Move frame data (avoids copy for hardware frames)
     av_frame_move_ref(qf.frame, decodeFrame_);
     qf.ready = true;

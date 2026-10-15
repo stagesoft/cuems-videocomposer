@@ -135,6 +135,61 @@ public:
     virtual DecodeBackend getOptimalBackend() const = 0;
 
     /**
+     * Health of this input's decode path.
+     *
+     * A layer that loads but cannot produce frames used to be indistinguishable
+     * from a healthy one: the engine's OSC load is fire-and-forget, so the node
+     * reports the cue armed either way. This is the machine-readable state a
+     * load-time health ping answers from.
+     */
+    enum class Health {
+        ok,               // decoding as intended
+        // Two ways to reach this, and they are found at different moments:
+        //   - open() asked for hardware and was refused outright (the ladder's
+        //     tier 3), known before any frame exists; or
+        //   - open() got hardware and the FIRST DECODED FRAME came back in
+        //     software anyway - a 4:2:2 clip on VAAPI does this. That one
+        //     cannot be known until a frame exists, so it is DERIVED at read
+        //     time in VideoFileInput::getHealth() rather than stored. Defect
+        //     6(b): before that derivation the layer reported ok while the CPU
+        //     did the work.
+        // Either way the layer PLAYS. sw_fallback is not a failure state.
+        sw_fallback,      // hardware refused this file, or quietly went soft
+        // CURRENTLY NEVER EMITTED - it has no writer. It meant "recovered onto
+        // a reduced surface pool"; that ladder was retired once measurement
+        // showed no platform we run answers pool pressure with a decode error
+        // (amdgpu evicts to GTT, the Intel iGPUs are UMA). Kept as part of the
+        // health contract surface, but do not build on it without giving it a
+        // writer first.
+        degraded,
+        declared_failed,  // recovery over; holding the last frame until reload
+        load_failed       // never produced a first frame
+    };
+
+    /**
+     * Current decode health. Default ok - inputs that cannot fail this way
+     * (and those that do not track it yet) are honest to report ok.
+     */
+    virtual Health getHealth() const { return Health::ok; }
+
+    /**
+     * Human-readable detail behind getHealth(), or empty when healthy.
+     */
+    virtual std::string getHealthReason() const { return std::string(); }
+
+    /**
+     * Whether this source counts as a 4K-class decode session for the hang
+     * guard.
+     *
+     * Decided once, when the file is opened and its metadata is known, so the
+     * check at reveal is a counter comparison and never a probe. The default
+     * is false and that is correct for every path that does not drive the
+     * VCN: HAP layers decode DXT blobs on the CPU and upload textures, so
+     * they neither consume a decode session nor risk the ring hang.
+     */
+    virtual bool isFourKClass() const { return false; }
+
+    /**
      * Check if this is a live stream (no seeking, continuous reading)
      * @return true for live streams (NDI, V4L2, RTSP), false for files
      */
