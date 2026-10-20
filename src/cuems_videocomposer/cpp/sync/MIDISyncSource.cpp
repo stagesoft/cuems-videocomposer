@@ -241,10 +241,10 @@ long MIDISyncSource::getTimeMs() const {
     // position jitter) while the rate slowly tracks the MTC source clock
     // (eliminating long-term drift).
     //
-    // The rate is estimated from mtcHead step intervals: each time mtcHead
-    // changes, measure the ratio of MTC advance to wall-clock advance and
-    // feed it into an exponential moving average (α=0.05).  This gives a
-    // stable rate estimate with a ~2s time constant.
+    // The rate is the ratio of MTC advance to wall-clock advance over windows
+    // of at least 500 ms (never a single head step, see below), clamped to
+    // ±5 % and fed into an exponential moving average (α=0.05 per window,
+    // τ ≈ 10 s). The position nudge further down tracks anything faster.
     //
     // Static locals are safe: called only from the single-threaded render loop.
     static long long s_smoothUs  = -1;
@@ -252,6 +252,21 @@ long MIDISyncSource::getTimeMs() const {
     static double    s_rate      = 1.0;  // MTC µs per wall µs
     static long      s_prevMtcMs = -1;
     static long long s_prevMtcWcUs = 0;  // wall time when mtcHead last changed
+    // Rate samples are accumulated over a window, never taken from a single
+    // head step: the head moves in quarter-frame quanta (10 ms at 25 fps) and
+    // the render loop polls at whatever cadence the display backend wakes it.
+    // step/elapsed over one step is then noise -- at 60 Hz the 10 ms step seen
+    // across a 16.6 ms poll reads 0.6 or 1.2, and with per-surface pacing a step
+    // seen across a 1 ms sibling wake reads 10 -- and the EMA drifts, after
+    // which the smooth clock overtakes or lags the head and is hard-snapped
+    // (the +11 ms snaps 0.1.2-6 logged at 2x4K30, the -11 ms ones of 0.1.2-9).
+    // Over >= 500 ms the quantisation is <= 2 %, whatever the poll cadence.
+    // MTC runs at crystal rate, so the sample is also clamped: anything outside
+    // +-5 % is measurement, not clock. The position nudge below tracks the rest.
+    static long      s_accStepMs    = 0;
+    static long long s_accElapsedUs = 0;
+    constexpr long long kRateWindowUs = 500000;
+    constexpr double    kRateClamp    = 0.05;
 
     if (!isRunning || s_smoothUs < 0) {
         s_smoothUs   = static_cast<long long>(baseMtcMs) * 1000LL;
@@ -259,6 +274,8 @@ long MIDISyncSource::getTimeMs() const {
         s_rate       = 1.0;
         s_prevMtcMs  = baseMtcMs;
         s_prevMtcWcUs = nowUs;
+        s_accStepMs = 0;
+        s_accElapsedUs = 0;
         return baseMtcMs + displayLatencyMs_.load();
     }
 
@@ -268,12 +285,27 @@ long MIDISyncSource::getTimeMs() const {
         long long wcElapsedUs = nowUs - s_prevMtcWcUs;
         long mtcStepMs = baseMtcMs - s_prevMtcMs;
 
-        // Only update rate from forward, reasonable steps
-        if (mtcStepMs > 0 && mtcStepMs < 100 && wcElapsedUs > 1000) {
-            double measuredRate = (static_cast<double>(mtcStepMs) * 1000.0)
-                                / static_cast<double>(wcElapsedUs);
-            // Exponential moving average, α=0.05 → τ ≈ 20 MTC steps ≈ 200ms
-            s_rate = 0.95 * s_rate + 0.05 * measuredRate;
+        // Only accumulate forward, reasonable steps; sample the ratio once the
+        // window is long enough for the quarter-frame quantisation to vanish.
+        if (wcElapsedUs > 250000) {
+            // The head stood still for a quarter second while running: an MTC
+            // glitch, not a rate. Drop the window rather than average it in.
+            s_accStepMs = 0;
+            s_accElapsedUs = 0;
+        } else if (mtcStepMs > 0 && mtcStepMs < 100 && wcElapsedUs > 1000) {
+            s_accStepMs    += mtcStepMs;
+            s_accElapsedUs += wcElapsedUs;
+            if (s_accElapsedUs >= kRateWindowUs) {
+                double measuredRate = (static_cast<double>(s_accStepMs) * 1000.0)
+                                    / static_cast<double>(s_accElapsedUs);
+                if (measuredRate > 1.0 + kRateClamp) measuredRate = 1.0 + kRateClamp;
+                if (measuredRate < 1.0 - kRateClamp) measuredRate = 1.0 - kRateClamp;
+                // Exponential moving average, α=0.05 over 500 ms windows → τ ≈ 10 s;
+                // the position nudge below handles anything faster.
+                s_rate = 0.95 * s_rate + 0.05 * measuredRate;
+                s_accStepMs    = 0;
+                s_accElapsedUs = 0;
+            }
         }
 
         // Large jump (seek / cue change): snap and reset
@@ -288,6 +320,8 @@ long MIDISyncSource::getTimeMs() const {
             // when video fps differs from MTC fps.
             s_lastWcUs = nowUs;
             s_rate = 1.0;
+            s_accStepMs = 0;
+            s_accElapsedUs = 0;
             justSnapped = true;
         }
 
@@ -325,6 +359,8 @@ long MIDISyncSource::getTimeMs() const {
                      << " (base=" << baseMtcMs << " smooth=" << smoothMs << ")";
             s_smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
             s_rate = 1.0;
+            s_accStepMs = 0;
+            s_accElapsedUs = 0;
         } else if (errorMs != 0) {
             s_smoothUs += (errorMs * 1000LL) / CORRECTION_DIVISOR;
         }
