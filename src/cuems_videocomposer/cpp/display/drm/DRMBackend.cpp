@@ -222,14 +222,30 @@ bool DRMBackend::openWindow() {
             useVirtualCanvas_ = false;
         }
 
-        // Escape hatch for A/B measurement: one binary, one md5, both pacing
-        // models. TODO(869emcrwa): remove once per-surface pacing is proven.
-        const char* coupled = std::getenv("VIDEOCOMPOSER_COUPLED_PACING");
-        coupledPacing_ = coupled && (std::string(coupled) == "1" || std::string(coupled) == "true");
+        // Frame pacing model. Coupled is the default: every output presents on
+        // the slowest CRTC's vblank, one atomic commit for all. It is the model
+        // the cadence smoother in FramerateConverterSyncSource was written
+        // against ("pollFrame is called once per vsync") and the one the
+        // stutter-free pulldown work (25/30 fps on 50/60 Hz, 4K at 30) was
+        // validated on. Per-surface pacing (869emcrwa: each refresh-rate class
+        // on its own vblank) wakes the loop once per CRTC flip; that starved the
+        // smoother on every content and biased the MTC rate estimator (the
+        // -11 ms anti-drift snaps of 0.1.2-9), so it is opt-in until the
+        // per-output cadence work lands. Enable it only on a canvas that mixes
+        // refresh rates, and watch `anti-drift SNAP` in the journal.
+        // VIDEOCOMPOSER_COUPLED_PACING=1 is still honoured and wins.
+        auto envTrue = [](const char* name) {
+            const char* v = std::getenv(name);
+            return v && (std::string(v) == "1" || std::string(v) == "true");
+        };
+        const bool wantPerSurface = envTrue("VIDEOCOMPOSER_PER_SURFACE_PACING");
+        const bool forceCoupled   = envTrue("VIDEOCOMPOSER_COUPLED_PACING");
+        coupledPacing_ = !wantPerSurface || forceCoupled;
         LOG_INFO << "DRMBackend: frame pacing = "
-                 << (coupledPacing_ ? "coupled (all outputs share the slowest CRTC"
-                                      " -- VIDEOCOMPOSER_COUPLED_PACING)"
-                                    : "per-surface (each refresh-rate class flips on its own vblank)");
+                 << (coupledPacing_ ? "coupled (all outputs present on the slowest CRTC's"
+                                      " vblank; default)"
+                                    : "per-surface (each refresh-rate class flips on its own"
+                                      " vblank -- VIDEOCOMPOSER_PER_SURFACE_PACING=1, opt-in)");
         
         if (useVirtualCanvas_) {
             // Virtual Canvas mode: use MultiOutputRenderer
@@ -575,8 +591,9 @@ void DRMBackend::warnIfMixedRefreshRates(const char* context) {
               << "them are paced by the slowest CRTC (" << std::fixed << std::setprecision(2)
               << minHz << "Hz). The faster outputs will present at that rate and report "
               << "dropped frames.";
-    LOG_ERROR << "  Mitigation: give every output the same refresh= in display.conf, or "
-              << "unset VIDEOCOMPOSER_COUPLED_PACING. Refs ClickUp 869emcrwa.";
+    LOG_ERROR << "  Mitigation: give every output the same refresh= in display.conf; "
+              << "per-surface pacing (VIDEOCOMPOSER_PER_SURFACE_PACING=1) is opt-in and "
+              << "not yet validated for stutter-free playback. Refs ClickUp 869emcrwa.";
 }
 
 bool DRMBackend::atomicPageFlip() {
