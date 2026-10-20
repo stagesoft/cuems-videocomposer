@@ -46,6 +46,30 @@ ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-previe
 - **Relay support (rev 9):** `ndi://@<ipv4>:<port>` opens a source by address, no discovery (what a node loads when the controller's bridge relays a source the node cannot reach). NDI receive is forced to the **base TCP** connection by `/usr/share/cuems-videocomposer/ndi/ndi-config.v1.json`; `main()` sets `NDI_CONFIG_DIR` to it first thing unless already set, and startup logs `NDI receive transport: base TCP (...)` or `... NOT base TCP (...) - relay unavailable` (the bridge reads it). Base TCP applies to **every** NDI receive of the process (per-receiver transport needs the Advanced SDK). A bad address logs `NDI: bad source address ...`; an unreachable one cannot be detected here (receiver creation always succeeds) — the relay checks its upstream.
 - Logging: a VC started by hand still logs to the **journal** (`SYSLOG_IDENTIFIER=Cuems:videocomposer`), not to stdout — read it with `journalctl _PID=<pid>`. The OSD is not rendered on DRM. The CLI has no `--layer`/`--file`; only a non-dash argument is the movie file and unknown `--flags` are ignored.
 
+## Frame pacing (0.1.2-10): coupled by default, per-surface opt-in
+
+- **Default = coupled**: every output presents on the slowest CRTC's vblank, one atomic commit for all.
+  This is the model the cadence smoother in `FramerateConverterSyncSource` was written against
+  ("pollFrame is called once per vsync") and the one the stutter-free pulldown work (25/30 fps on
+  50/60 Hz, 4K at 30) was validated on.
+- **Per-surface pacing** (PR #8, 869emcrwa: each refresh-rate class flips on its own vblank) is
+  **opt-in**: `VIDEOCOMPOSER_PER_SURFACE_PACING=1` in the service environment
+  (`/etc/cuems/videocomposer-flags.env`). It shipped as the default in 0.1.2-9 and regressed playback:
+  the loop wakes once per CRTC flip, so (a) the MTC rate estimator sampled 10 ms head steps across
+  1–5 ms sibling wakes and the smooth clock was hard-snapped back 11 ms several times a second
+  (journal `MIDISync: anti-drift SNAP errorMs=-11`), and (b) the smoother counted calls as vsyncs and
+  lost its minimum hold on every content. Full analysis, measurements and the per-output cadence design
+  that must land before it becomes the default again:
+  `cuems-RELATIONS/Plans/2026-10-20-vc-per-surface-pacing-stutter-review.md`. Use it only on a canvas
+  that mixes refresh rates (the FP530 case) and watch the snap line.
+- **MTC rate estimator** (`MIDISyncSource::getTimeMs`): since 0.1.2-10 the rate is sampled over
+  ≥ 500 ms windows and clamped to ±5 % (`kRateWindowUs`, `kRateClamp`), so it is independent of the
+  poll cadence. This also removes the rare +11…+19 ms snaps 0.1.2-6 logged at 2×4K30. Regression test:
+  `Integration_MIDISyncSource_RateWindowImmuneToPollCadence`.
+- `anti-drift SNAP` in the journal is the health signal for this whole area: after GO settle it must be
+  zero. `VIDEOCOMPOSER_COUPLED_PACING=1` is still honoured and forces coupled; `=0` no longer selects
+  per-surface (it did on 0.1.2-9), the startup line `frame pacing = …` always states the model in force.
+
 ## Resolution control
 
 Precedence (after the DRMBackend patch on `main`/`rc_1`): **`--resolution` CLI flag > `resolution_policy` in `/run/cuems/display.conf` (general) > built-in 1080p default**, with **per-output `resolution=WxH` lines always overriding on top**. So this works:

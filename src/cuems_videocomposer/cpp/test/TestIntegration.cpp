@@ -36,6 +36,7 @@
 #include <cstdlib>
 #include <memory>
 #include <thread>
+#include <random>
 
 using namespace videocomposer;
 using namespace videocomposer::test;
@@ -289,6 +290,65 @@ bool test_Integration_MIDISyncSource_NoJumpSnapBias() {
     // Be a good citizen — don't leave isTimecodeRunning=true for later tests.
     MtcReceiver::isTimecodeRunning.store(false);
     MtcReceiver::mtcHead.store(0);
+    return true;
+}
+#endif
+
+#ifdef HAVE_MTCRECEIVER
+// Regression test for the MTC rate estimator under an irregular poll cadence
+// (cuems-RELATIONS review 2026-10-20, P1). The display backend may call
+// getTimeMs() at gaps of 1-20 ms while mtcHead moves in 10 ms quarter-frame
+// steps. Pre-fix the estimator sampled step/elapsed per head change, so a
+// 10 ms step seen across a 1-2 ms gap was a rate of 5-10, the EMA ran away,
+// the smooth clock overtook the head and the anti-drift layer snapped it back
+// 11+ ms every few hundred ms -- the mini-jumps seen on test2/.111 with
+// 0.1.2-9. With the windowed, clamped estimator the smooth clock must never
+// run backwards and must stay within a quarter frame of wall time.
+bool test_Integration_MIDISyncSource_RateWindowImmuneToPollCadence() {
+    using namespace std::chrono;
+    MIDISyncSource sync;
+    sync.setDisplayLatencyMs(0);
+
+    // Reset the function-scope static state via the !isRunning path.
+    MtcReceiver::isTimecodeRunning.store(false);
+    MtcReceiver::mtcHead.store(0);
+    (void)sync.getTimeMs();
+
+    // Start: one large jump (GO), which snaps and resets the estimator.
+    MtcReceiver::isTimecodeRunning.store(true);
+    MtcReceiver::mtcHead.store(1000);
+    (void)sync.getTimeMs();
+    const auto t0 = steady_clock::now();
+
+    std::mt19937 rng(20261020);
+    std::uniform_int_distribution<int> gapUs(1000, 20000);
+    long head = 1000, prev = -1, worst = 0;
+    int backwards = 0;
+    for (int i = 0; i < 300; ++i) {               // ~3 s of irregular polling
+        std::this_thread::sleep_for(microseconds(gapUs(rng)));
+        long elapsedMs = static_cast<long>(duration_cast<milliseconds>(steady_clock::now() - t0).count());
+        long wantHead = 1000 + (elapsedMs / 10) * 10;   // 10 ms quanta, as mtcreceiver advances it
+        if (wantHead != head) {
+            head = wantHead;
+            MtcReceiver::mtcHead.store(head);
+        }
+        long t = sync.getTimeMs();
+        // The position nudge may legitimately floor to 1 ms less; the regression
+        // signature is a snap of 11 ms or more.
+        if (prev >= 0 && t < prev - 2) ++backwards;
+        long err = std::labs(t - (1000 + elapsedMs));
+        if (err > worst) worst = err;
+        prev = t;
+    }
+
+    MtcReceiver::isTimecodeRunning.store(false);
+    MtcReceiver::mtcHead.store(0);
+
+    // Pre-fix the EMA runs away and the clock is snapped back 11+ ms many times
+    // per run; post-fix never, and the clock sits within the 10 ms head quantum
+    // plus scheduler jitter.
+    TEST_ASSERT_EQ(backwards, 0);
+    TEST_ASSERT_TRUE(worst <= 20);
     return true;
 }
 #endif

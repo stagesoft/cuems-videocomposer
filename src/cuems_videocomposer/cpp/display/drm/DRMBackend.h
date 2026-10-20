@@ -357,9 +357,14 @@ private:
      */
     std::vector<DRMSurface*> collectReadySurfaces(std::chrono::steady_clock::time_point now);
 
-    // VIDEOCOMPOSER_COUPLED_PACING=1 restores the old all-outputs barrier.
-    // TODO(869emcrwa): drop once per-surface pacing is proven on the fleet.
-    bool coupledPacing_ = false;
+    // Coupled is the default (0.1.2-10): every output presents on the slowest
+    // CRTC's vblank with one atomic commit for all. It is the model the cadence
+    // smoother was written against ("one pollFrame per vsync") and the one the
+    // stutter-free pulldown work was validated on. Per-surface pacing (869emcrwa)
+    // is opt-in with VIDEOCOMPOSER_PER_SURFACE_PACING=1 until the per-output
+    // cadence work lands -- see cuems-RELATIONS Plans/2026-10-20-vc-per-surface-
+    // pacing-stutter-review.md. VIDEOCOMPOSER_COUPLED_PACING=1 still forces coupled.
+    bool coupledPacing_ = true;
 
     // Last time the canvas was composited, to bound composites to the fastest
     // output's rate rather than the loop's iteration rate.
