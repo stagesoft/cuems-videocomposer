@@ -66,6 +66,11 @@ ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-previe
   ≥ 500 ms windows and clamped to ±5 % (`kRateWindowUs`, `kRateClamp`), so it is independent of the
   poll cadence. This also removes the rare +11…+19 ms snaps 0.1.2-6 logged at 2×4K30. Regression test:
   `Integration_MIDISyncSource_RateWindowImmuneToPollCadence`.
+- **Same-rate content goes through the smoother too** (0.1.2-11): `FramerateConverterSyncSource` used to
+  bypass the time-based path when the content rate equalled the MTC rate (25 fps), so 25 fps followed the
+  raw quarter-frame-quantised MTC head and showed ~1 single-vsync frame per second on 60 Hz under load.
+  Every rate now takes the smooth clock + cadence smoother. Test:
+  `Integration_FramerateConverter_SameRateFollowsTimeNotRawFrame`.
 - `anti-drift SNAP` in the journal is the health signal for this whole area: after GO settle it must be
   zero. `VIDEOCOMPOSER_COUPLED_PACING=1` is still honoured and forces coupled; `=0` no longer selects
   per-surface (it did on 0.1.2-9), the startup line `frame pacing = …` always states the model in force.
