@@ -53,6 +53,7 @@ extern bool test_Integration_LayerProperties();
 extern bool test_Integration_MIDISyncSource_DisplayLatencyAtomicity();
 extern bool test_Integration_MIDISyncSource_GetDisplayLatencyMs();
 extern bool test_Integration_FramerateConverter_DelegatesDisplayLatency();
+extern bool test_Integration_FramerateConverter_SameRateFollowsTimeNotRawFrame();
 #ifdef HAVE_MTCRECEIVER
 extern bool test_Integration_MIDISyncSource_NoJumpSnapBias();
 extern bool test_Integration_MIDISyncSource_RateWindowImmuneToPollCadence();
@@ -177,6 +178,7 @@ int main() {
     TestFramework::instance().addTest("Integration_MIDISyncSource_DisplayLatencyAtomicity", test_Integration_MIDISyncSource_DisplayLatencyAtomicity);
     TestFramework::instance().addTest("Integration_MIDISyncSource_GetDisplayLatencyMs", test_Integration_MIDISyncSource_GetDisplayLatencyMs);
     TestFramework::instance().addTest("Integration_FramerateConverter_DelegatesDisplayLatency", test_Integration_FramerateConverter_DelegatesDisplayLatency);
+    TestFramework::instance().addTest("Integration_FramerateConverter_SameRateFollowsTimeNotRawFrame", test_Integration_FramerateConverter_SameRateFollowsTimeNotRawFrame);
 #ifdef HAVE_MTCRECEIVER
     TestFramework::instance().addTest("Integration_MIDISyncSource_NoJumpSnapBias", test_Integration_MIDISyncSource_NoJumpSnapBias);
     TestFramework::instance().addTest("Integration_MIDISyncSource_RateWindowImmuneToPollCadence", test_Integration_MIDISyncSource_RateWindowImmuneToPollCadence);

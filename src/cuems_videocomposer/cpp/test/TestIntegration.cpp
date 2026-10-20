@@ -228,6 +228,39 @@ bool test_Integration_MIDISyncSource_GetDisplayLatencyMs() {
 
 // FramerateConverterSyncSource must delegate getDisplayLatencyMs() to its
 // wrapped source, matching the pattern of every other accessor on the class.
+// Content at the MTC rate (25 fps) must follow the smooth time clock through the
+// cadence smoother, never the raw MTC frame. The raw frame comes from mtcHead in
+// 10 ms quarter-frame steps timed by MIDI arrival, and following it made 25 fps
+// on 60 Hz show single-vsync frames under load (cuems-RELATIONS review
+// 2026-10-20). A fake source whose raw frame disagrees with its time pins which
+// one the converter uses.
+namespace {
+class FakeTimeSyncSource : public SyncSource {
+public:
+    long timeMs = 0;
+    bool connect(const char*) override { return true; }
+    void disconnect() override {}
+    bool isConnected() const override { return true; }
+    int64_t pollFrame(uint8_t* rolling) override { if (rolling) *rolling = 1; return 999; }
+    int64_t getCurrentFrame() const override { return 999; }
+    const char* getName() const override { return "fake"; }
+    double getFramerate() const override { return 25.0; }
+    long getTimeMs() const override { return timeMs; }
+};
+}
+
+bool test_Integration_FramerateConverter_SameRateFollowsTimeNotRawFrame() {
+    FakeTimeSyncSource fake;
+    MockInputSource input;   // 25 fps, the MTC rate
+    FramerateConverterSyncSource frc(&fake, &input);
+    fake.timeMs = 2000;                 // 2.000 s at 25 fps = frame 50
+    TEST_ASSERT_EQ(frc.pollFrame(nullptr), static_cast<int64_t>(50));
+    fake.timeMs = 2041;                 // one frame later
+    TEST_ASSERT_EQ(frc.pollFrame(nullptr), static_cast<int64_t>(50)); // minimum hold: second call
+    TEST_ASSERT_EQ(frc.pollFrame(nullptr), static_cast<int64_t>(51)); // advances once the hold is met
+    return true;
+}
+
 bool test_Integration_FramerateConverter_DelegatesDisplayLatency() {
     MIDISyncSource sync;
     FramerateConverterSyncSource wrapper(&sync, nullptr);
