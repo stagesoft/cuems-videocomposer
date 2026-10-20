@@ -1,3 +1,16 @@
+cuems-videocomposer (0.1.2-11) unstable; urgency=high
+
+  * Sync: content at the MTC rate (25 fps) now goes through the smooth clock
+    and the cadence smoother like every other rate. It used to take the raw
+    MTC frame from the quarter-frame-quantised head, so under load 25 fps on
+    a 60 Hz output showed about one single-vsync frame per second (jumps
+    inside the 3:2 cadence). Measured on .111: from ~1.0/s to 0 in 140 s,
+    a clean 3:2; confirmed by eye on 25@60, 29.97@50 and 29.97@60.
+  * Regression test Integration_FramerateConverter_SameRateFollowsTimeNotRawFrame
+    (fails without the fix, passes with it; suite 101/101 on an N97).
+
+ -- Ion Reguera <ion@stagelab.coop>  Mon, 20 Oct 2026 21:30:00 +0200
+
 cuems-videocomposer (0.1.2-10) unstable; urgency=high
 
   * Frame pacing: coupled pacing (every output presents on the slowest
