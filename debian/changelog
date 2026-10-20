@@ -1,3 +1,30 @@
+cuems-videocomposer (0.1.2-10) unstable; urgency=high
+
+  * Frame pacing: coupled pacing (every output presents on the slowest
+    CRTC's vblank, one atomic commit for all) is the default again.
+    Per-surface pacing (PR #8, 869emcrwa) shipped as default in 0.1.2-9 and
+    regressed multi-output playback: the loop woke once per CRTC flip, the
+    MTC rate estimator sampled 10 ms head steps across 1-5 ms sibling wakes
+    and the smooth clock was hard-snapped back 11 ms several times a second
+    (`MIDISync: anti-drift SNAP errorMs=-11`), and the cadence smoother
+    counted those wakes as vsyncs and lost its minimum hold. Per-surface
+    pacing stays opt-in: VIDEOCOMPOSER_PER_SURFACE_PACING=1 (mixed-refresh
+    canvases only, not yet validated for stutter-free playback).
+    VIDEOCOMPOSER_COUPLED_PACING=1 still forces coupled.
+  * MIDISyncSource: the MTC rate is sampled over >= 500 ms windows and
+    clamped to +-5 % (independent of the poll cadence); also removes the rare
+    +11..+19 ms snaps 0.1.2-6 logged at 2x4K30.
+  * Regression test Integration_MIDISyncSource_RateWindowImmuneToPollCadence
+    (fails on the 0.1.2-9 estimator, passes here; suite 100/100 on an N97).
+  * Verified by eye on .111 (2026-10-20): stock 0.1.2-9 with two outputs
+    shows the jumps; this build plays a 60 fps clip over three decoding
+    layers on a single matched output without a hitch.
+  * Analysis: cuems-RELATIONS Plans/2026-10-20-vc-per-surface-pacing-
+    stutter-review.md. FP530 operators: a mixed-refresh canvas is back on
+    the pre-PR #8 behaviour (paced by the slowest CRTC) unless opted in.
+
+ -- Ion Reguera <ion@stagelab.coop>  Mon, 20 Oct 2026 20:30:00 +0200
+
 cuems-videocomposer (0.1.2-9) unstable; urgency=medium
 
   * FP530 campaign (ClickUp 869en65tm; PR #8, supersedes #2):
