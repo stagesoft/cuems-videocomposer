@@ -70,7 +70,15 @@ int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
             FrameInfo info = inputSource_->getFrameInfo();
             double inputFps = info.framerate;
 
-            if (inputFps > 0 && std::abs(syncFps - inputFps) > 0.01) {
+            // Every content rate goes through the time-based path and the cadence
+            // smoother below, including content at the MTC rate (CUEMS MTC is
+            // always 25 fps). Equal rates used to take the raw MTC frame from
+            // mtcHead, which moves in 10 ms quarter-frame steps at whatever moment
+            // each quarter frame is processed: with any load on the box, frames
+            // near a vsync boundary tipped early and 25 fps on 60 Hz showed about
+            // one single-vsync frame per second (measured on .111, 2026-10-20;
+            // 0 per 140 s with this path, a clean 3:2).
+            if (inputFps > 0) {
                 // When framerates differ, compute video frame directly from
                 // the continuous millisecond time to avoid double-quantization.
                 long timeMs = wrappedSyncSource_->getTimeMs();
