@@ -43,6 +43,7 @@
 #include "../MultiOutputRenderer.h"
 #include "DRMOutputManager.h"
 #include "DRMSurface.h"
+#include "../CadenceStats.h"
 #include <vector>
 #include <map>
 #include <memory>
@@ -339,6 +340,16 @@ private:
 
     // Per-surface pacing: each output presents on its own vblank.
     void renderVirtualCanvasDecoupled(LayerManager* layerManager, OSDManager* osdManager);
+
+    // Cadence statistics (plan R9 step S1), VIDEOCOMPOSER_CADENCE_STATS=1.
+    // The composite of iteration k is presented by the flip that completes
+    // during iteration k+1, so each surface keeps the samples of its last
+    // submitted composite until that flip's msc is known.
+    std::unique_ptr<CadenceStats> cadenceStats_;
+    std::map<std::string, std::vector<CadenceStats::Sample>> cadencePending_;
+    std::map<std::string, int64_t> cadenceStampedMsc_;
+    std::vector<CadenceStats::Sample> collectCadenceSamples(LayerManager* layerManager) const;
+    void stampCadenceFlips();
 
     /**
      * Surfaces that may present this iteration, in physical layout order.

@@ -60,6 +60,11 @@ constexpr const char* kStartupDisplayConf = "/run/cuems/display.conf";
 }
 
 DRMBackend::DRMBackend() {
+    if (CadenceStats::enabledFromEnv()) {
+        cadenceStats_ = std::make_unique<CadenceStats>();
+        LOG_INFO << "DRMBackend: CadenceStats enabled (VIDEOCOMPOSER_CADENCE_STATS) -- "
+                 << "coupled path only; one line per output and layer every 60 s";
+    }
     outputManager_ = std::make_unique<DRMOutputManager>();
     configManager_ = std::make_unique<DisplayConfigurationManager>();
 }
@@ -283,6 +288,9 @@ void DRMBackend::closeWindow() {
     }
     
     LOG_INFO << "DRMBackend: Closing";
+    if (cadenceStats_) {
+        cadenceStats_->logFinal();
+    }
     
 #ifdef HAVE_VAAPI_INTEROP
     if (vaDisplay_) {
@@ -363,12 +371,21 @@ void DRMBackend::renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManag
 
     primary->releaseCurrent();
 
+    std::vector<CadenceStats::Sample> cadenceSamples;
+    if (cadenceStats_) {
+        cadenceSamples = collectCadenceSamples(layerManager);
+    }
+
     // Wait for all pending flips to complete first
     for (const auto& name : orderedSurfaceNames()) {
         auto& surface = surfaces_.at(name);
         if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
+    }
+
+    if (cadenceStats_) {
+        stampCadenceFlips();
     }
 
     // Check if we can use atomic modesetting with planes
@@ -401,6 +418,54 @@ void DRMBackend::renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManag
         for (const auto& name : orderedSurfaceNames()) {
             surfaces_.at(name)->schedulePageFlip();
         }
+    }
+
+    if (cadenceStats_) {
+        for (const auto& name : orderedSurfaceNames()) {
+            cadencePending_[name] = cadenceSamples;
+        }
+    }
+}
+
+std::vector<CadenceStats::Sample> DRMBackend::collectCadenceSamples(LayerManager* layerManager) const {
+    std::vector<CadenceStats::Sample> samples;
+    if (!layerManager) {
+        return samples;
+    }
+    for (const VideoLayer* layer : layerManager->getLayers()) {
+        if (!layer || !layer->properties().visible) {
+            continue;
+        }
+        const int64_t frame = layer->getCurrentFrame();
+        if (frame < 0) {
+            continue;
+        }
+        samples.push_back({layer->getLayerId(), frame, layer->getFrameInfo().framerate});
+    }
+    return samples;
+}
+
+void DRMBackend::stampCadenceFlips() {
+    const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
+        const PresentationEntry info = surface->getPresentationTiming().getInfo();
+        if (!info.valid) {
+            continue;
+        }
+        auto stamped = cadenceStampedMsc_.find(name);
+        if (stamped != cadenceStampedMsc_.end() && stamped->second == info.msc) {
+            continue;  // no new flip on this surface since the last stamp
+        }
+        cadenceStampedMsc_[name] = info.msc;
+        auto pending = cadencePending_.find(name);
+        if (pending == cadencePending_.end()) {
+            continue;
+        }
+        cadenceStats_->onPresented(name, info.msc, surface->getOutputInfo().refreshRate,
+                                   pending->second, nowNs);
+        cadencePending_.erase(pending);
     }
 }
 
