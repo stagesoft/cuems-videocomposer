@@ -659,6 +659,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/display/DisplayConfiguration.cpp
     src/cuems_videocomposer/cpp/display/DisplayConfigurationManager.cpp
     src/cuems_videocomposer/cpp/display/MultiOutputRenderer.cpp
+    src/cuems_videocomposer/cpp/display/OutputSnapshot.cpp
     src/cuems_videocomposer/cpp/display/VirtualCanvas.cpp
     src/cuems_videocomposer/cpp/display/OutputBlitShader.cpp
     src/cuems_videocomposer/cpp/display/HeadlessDisplay.cpp
@@ -957,6 +958,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestIntegration.cpp
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
         src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
+        src/cuems_videocomposer/cpp/test/TestOutputSnapshot.cpp
         src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
         src/cuems_videocomposer/cpp/test/TestLayerPathId.cpp
         src/cuems_videocomposer/cpp/test/TestExitReporter.cpp
@@ -969,6 +971,7 @@ if(BUILD_TESTS)
     set(TEST_CPP_SOURCES
         src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
         src/cuems_videocomposer/cpp/display/drm/PresentationTiming.cpp
+        src/cuems_videocomposer/cpp/display/OutputSnapshot.cpp
         src/cuems_videocomposer/cpp/layer/VideoLayer.cpp
         src/cuems_videocomposer/cpp/layer/LayerPlayback.cpp
         src/cuems_videocomposer/cpp/layer/LayerDisplay.cpp
