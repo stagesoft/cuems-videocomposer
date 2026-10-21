@@ -24,6 +24,7 @@
 #include <nlohmann/json.hpp>
 
 #include <filesystem>
+#include <set>
 #include <system_error>
 
 namespace videocomposer {
@@ -39,6 +40,7 @@ double round2(double v) {
 json modeJson(const ContractMode& m) {
     const auto& t = m.timing;
     return json{
+        {"id", contractModeId(m)},
         {"mode_id", m.modeId},
         {"width", m.width},
         {"height", m.height},
@@ -55,6 +57,37 @@ json modeJson(const ContractMode& m) {
             {"flags", t.flags}, {"type", t.type},
         }},
     };
+}
+
+// Default view (Ion + manager team, 2026-10-22): what a configuration tool
+// needs -- typed fields to sort and filter, and an exact id to hand back.
+json simpleHardwareDoc(const ContractSnapshot& s) {
+    json outputs = json::array();
+    for (const auto& o : s.hardware) {
+        json modes = json::array();
+        std::set<std::string> seen;
+        std::string preferred;
+        for (const auto& m : o.modes) {
+            const std::string id = contractModeId(m);
+            if (m.preferred && preferred.empty()) {
+                preferred = id;
+            }
+            if (!seen.insert(id).second) {
+                continue;  // CEA/CVT or EDID duplicates collapse onto one id
+            }
+            modes.push_back(json{{"id", id}, {"width", m.width}, {"height", m.height},
+                                 {"hz", round2(m.fieldRateHz)}, {"interlaced", m.interlaced}});
+        }
+        outputs.push_back(json{
+            {"connector", o.connector},
+            {"connection", o.connection},
+            {"edid", json{{"make", o.make}, {"model", o.model}, {"serial", o.serial}}},
+            {"current", o.hasCurrent ? json(contractModeId(o.current)) : json(nullptr)},
+            {"preferred", preferred.empty() ? json(nullptr) : json(preferred)},
+            {"modes", modes},
+        });
+    }
+    return json{{"outputs", outputs}};
 }
 
 json hardwareDoc(const ContractSnapshot& s) {
@@ -85,7 +118,7 @@ json stateDoc(const ContractSnapshot& s, bool showLoaded) {
             {"region", json::array({o.x, o.y, o.width, o.height})},
             {"blend", json{{"left", o.blendLeft}, {"right", o.blendRight}, {"top", o.blendTop},
                            {"bottom", o.blendBottom}, {"gamma", o.blendGamma}}},
-            {"mode_id", o.modeId.empty() ? json(nullptr) : json(o.modeId)},
+            {"current", o.modeId.empty() ? json(nullptr) : json(o.modeId)},
         });
     }
     return json{
@@ -150,11 +183,14 @@ std::string ContractProtocol::handle(const std::string& request, const ContractS
         return ok(id, json{{"caps", identity.caps}});
     }
     if (op == "get_hardware") {
+        if (req.contains("detail") && req["detail"] == "full") {
+            return ok(id, hardwareDoc(snapshot));  // diagnostics: timings, flags, unique mode_id
+        }
         if (cachedHardware) {
             return "{\"v\":" + std::to_string(kVersion) + ",\"id\":" + id.dump() +
                    ",\"ok\":true,\"result\":" + *cachedHardware + "}";
         }
-        return ok(id, hardwareDoc(snapshot));
+        return ok(id, simpleHardwareDoc(snapshot));
     }
     if (op == "get_state") {
         return ok(id, stateDoc(snapshot, lockPresent(identity.showLockPath)));
@@ -163,7 +199,7 @@ std::string ContractProtocol::handle(const std::string& request, const ContractS
 }
 
 std::string ContractProtocol::hardwareJson(const ContractSnapshot& snapshot) {
-    return hardwareDoc(snapshot).dump();
+    return simpleHardwareDoc(snapshot).dump();
 }
 
 std::string ContractProtocol::stateJson(const ContractSnapshot& snapshot, bool showLoaded) {

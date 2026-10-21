@@ -58,6 +58,16 @@ class VcContractClient:
             raise ContractError(err.get("code"), err.get("message"), reply)
         return reply["result"]
 
+    def request_raw(self, fields, v=VERSION):
+        """Send a request with extra fields, e.g. {"op": "get_hardware", "detail": "full"}."""
+        req = {"v": v, "id": next(self._ids), **fields}
+        self._sock.send(json.dumps(req).encode())
+        reply = json.loads(self._sock.recv().decode())
+        if not reply.get("ok"):
+            err = reply.get("error", {})
+            raise ContractError(err.get("code"), err.get("message"), reply)
+        return reply["result"]
+
     def hello(self):
         return self.request("hello")
 

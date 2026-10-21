@@ -2120,7 +2120,7 @@ void DRMBackend::publishContractSnapshot(bool announce) {
                 }
             }
             hw.hasCurrent = true;
-            currentIdByConnector[hw.connector] = hw.current.modeId;
+            currentIdByConnector[hw.connector] = contractModeId(hw.current);
         }
         snap.hardware.push_back(std::move(hw));
     }

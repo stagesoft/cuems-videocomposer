@@ -22,7 +22,7 @@ import mock_vc
 from vc_contract_client import ContractError, VcContractClient, VcContractEvents
 
 REAL = os.environ.get("VC_CONTRACT_REAL") == "1"
-MODE_ID = re.compile(r"^\d+x\d+@\d+\.\d{2}[pi](/\d+)?(#\d+)?$")
+MODE_ID = re.compile(r"^(\d+)x(\d+)@(\d+\.\d{2})([pi])$")
 
 
 @pytest.fixture(scope="module")
@@ -75,16 +75,26 @@ def test_hardware_schema(client):
     assert hw, "no connector reported"
     for o in hw:
         assert o["connection"] in ("connected", "disconnected", "unknown")
-        ids = [m["mode_id"] for m in o["modes"]]
-        assert len(ids) == len(set(ids)), f"{o['connector']}: duplicate mode ids"
-        for m in o["modes"] + ([o["current"]] if o["current"] else []):
-            assert MODE_ID.match(m["mode_id"]), m["mode_id"]
+        ids = [m["id"] for m in o["modes"]]
+        assert len(ids) == len(set(ids)), f"{o['connector']}: duplicate ids"
+        for m in o["modes"]:
+            w, h, hz, kind = MODE_ID.match(m["id"]).groups()
+            assert (int(w), int(h)) == (m["width"], m["height"])
+            assert float(hz) == pytest.approx(m["hz"], abs=0.006)
+            assert (kind == "i") == m["interlaced"]
+            assert "timing" not in m
+        for ref in (o["current"], o["preferred"]):
+            assert ref is None or ref in ids
+
+
+def test_hardware_full_detail(client):
+    full = client.request_raw({"op": "get_hardware", "detail": "full"})["outputs"]
+    for o in full:
+        for m in o["modes"]:
             t = m["timing"]
-            hz = t["clock_khz"] * 1000.0 / (t["htotal"] * t["vtotal"])
-            assert abs(round(hz, 2) - m["refresh_hz"]) < 0.011
+            frame = t["clock_khz"] * 1000.0 / (t["htotal"] * t["vtotal"])
+            assert abs(round(frame, 2) - m["refresh_hz"]) < 0.011
             assert m["field_rate_hz"] == pytest.approx(m["refresh_hz"] * (2 if m["interlaced"] else 1), abs=0.02)
-        if o["current"]:
-            assert o["current"]["mode_id"] in ids or not ids
 
 
 def test_state_schema(client):
@@ -94,8 +104,8 @@ def test_state_schema(client):
     hw = {o["connector"]: o for o in client.hardware()["outputs"]}
     for o in s["outputs"]:
         assert len(o["region"]) == 4
-        if o["enabled"] and o["mode_id"]:
-            assert hw[o["connector"]]["current"]["mode_id"] == o["mode_id"]
+        if o["enabled"] and o["current"]:
+            assert hw[o["connector"]]["current"] == o["current"]
 
 
 @pytest.mark.skipif(REAL, reason="the real VC publishes only on configuration changes")

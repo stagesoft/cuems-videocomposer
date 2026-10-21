@@ -79,13 +79,10 @@ exist. Until then, re-read `get_hardware` when you need fresh connector state.
 ### 2.3 `get_hardware`
 
 Ask for it **when you connect, after a `state_changed` event and after a `pid` change** — not in a polling
-loop. The reply is large (every mode of every connector with its timing, tens of kB on a three-output node)
-and the hardware only changes with the configuration. **Keep any work on a video node light during
-playback**: on test2 node01 (N97, 2×4K@50 + 1080p50, GPU at its PL4 power limit) a client parsing this reply
-at 10 Hz — and the same parsing done by a plain script with no contract traffic at all — each produced one
-~0.25–0.4 s presentation hitch per 10–20 minutes, while the idle node and `get_state` at 10 Hz produced none
-(2026-10-21). The VC serves the reply from a cache; the cost is on the client's side of the same CPU. If you
-need to poll, poll `get_state`.
+loop (the hardware only changes with the configuration). **Keep any work on a video node light during
+playback**: on test2 node01 (N97, 2×4K@50 + 1080p50, GPU at its PL4 power limit) a sustained 10 Hz JSON job on
+the node produced a rare ~0.3 s presentation hitch even with no contract traffic at all; the show layout
+(2×4K@30) kept full cadence under the same load (2026-10-21). If you need to poll, poll `get_state`.
 
 One entry per connector of the GPU, connected or not (example values):
 
@@ -93,33 +90,38 @@ One entry per connector of the GPU, connected or not (example values):
 {"outputs": [
   {"connector": "HDMI-A-1",
    "connection": "connected",
-   "edid": {"make": "GSM", "model": "LG UltraFine", "serial": "506NTMXDV771"},
-   "physical_mm": [600, 340],
-   "current": {"mode_id": "3840x2160@30.00p", "width": 3840, "height": 2160,
-               "refresh_hz": 30.0, "field_rate_hz": 30.0, "interlaced": false, "preferred": false,
-               "timing": {"clock_khz": 297000, "hdisplay": 3840, "hsync_start": 4016, "hsync_end": 4104,
-                          "htotal": 4400, "vdisplay": 2160, "vsync_start": 2168, "vsync_end": 2178,
-                          "vtotal": 2250, "flags": 5, "type": 64}},
-   "modes": [ { …same shape as current… }, … ]},
-  {"connector": "HDMI-A-3", "connection": "disconnected", "edid": {"make":"","model":"","serial":""},
-   "physical_mm": [0, 0], "current": null, "modes": []}
+   "edid": {"make": "GSM", "model": "LG ULTRAFINE", "serial": "506NTMXDV771"},
+   "current": "3840x2160@29.97p",
+   "preferred": "3840x2160@60.00p",
+   "modes": [
+     {"id": "3840x2160@60.00p", "width": 3840, "height": 2160, "hz": 60.0,  "interlaced": false},
+     {"id": "3840x2160@29.97p", "width": 3840, "height": 2160, "hz": 29.97, "interlaced": false},
+     {"id": "1920x1080@60.00i", "width": 1920, "height": 1080, "hz": 60.0,  "interlaced": true}
+   ]},
+  {"connector": "HDMI-A-3", "connection": "disconnected", "edid": {"make": "", "model": "", "serial": ""},
+   "current": null, "preferred": null, "modes": []}
 ]}
 ```
 
+- **`id`** is the key: `"<width>x<height>@<hz with 2 decimals><p|i>"`, unique per connector and stable while the
+  monitor is the same. `current` and `preferred` refer to it. In version 2 you will hand an `id` back to
+  choose a mode; the VC resolves it to the exact timing itself. Use the typed fields (`width`, `height`, `hz`,
+  `interlaced`) for sorting and filtering; never parse the `id`.
+- **`hz`** is the rate people and tools quote: for an interlaced mode it is the **field** rate (1080i at 60
+  fields per second → `60.0`, `"…@60.00i"`), the number `modetest` prints and the one a `display.conf`
+  `refresh=60i` asks for. Interlaced modes are listed but the VC never selects one unless asked explicitly.
+- Modes that differ only in timing details (CEA and CVT variants, EDID duplicates) collapse onto one `id`.
 - `connection`: `connected`, `disconnected` or `unknown` (the kernel could not tell; do not treat it as
   disconnected).
-- `current` is the mode the VC **drives** on that connector, or `null` when the VC has no output there
-  (disconnected, `enabled=false` in `display.conf`, or plugged after the VC started — the VC only builds its
-  outputs at start).
-- `refresh_hz` is the **frame** rate, `clock / (htotal × vtotal)`, two decimals as computed (59.94, not 60).
-  For an interlaced mode it is half the field rate: 1080i60 reports `refresh_hz: 30.0, field_rate_hz: 60.0,
-  interlaced: true`. Tools such as `modetest` print the field rate for those modes.
-- `timing` is the raw DRM mode (`flags`, `type` are the `DRM_MODE_FLAG_*` / `DRM_MODE_TYPE_*` bits); v2 will
-  address modes by it.
-- `mode_id` is `"<w>x<h>@<refresh_hz>p"` or `…i`, unique **per connector**. When two modes would share it
-  (CEA and CVT timings of the same size and rate) it gets `"/<clock_khz>"`, and `"#n"` if even that
-  collides. Stable across VC restarts for the same monitor.
+- `current` is the mode the VC **drives** on that connector, or `null` when it drives nothing there
+  (disconnected, `enabled=false` in `display.conf`, or plugged after the VC started — the VC builds its outputs
+  only at start).
 - EDID serial numbers are personal-ish data; the socket permissions keep them to `cuems`.
+
+**Diagnostics view.** `{"v": 1, "id": …, "op": "get_hardware", "detail": "full"}` returns every mode as reported
+by the kernel, without collapsing: the same `id`, plus `mode_id` (unique even across timing variants),
+`refresh_hz` (frame rate), `field_rate_hz`, `preferred`, `physical_mm`, and `timing` (`clock_khz`, the h/v
+display/sync/total values, DRM `flags` and `type`). Configuration tools do not need it.
 
 ### 2.4 `get_state`
 
@@ -132,7 +134,7 @@ One entry per connector of the GPU, connected or not (example values):
  "outputs": [
    {"connector": "HDMI-A-1", "enabled": true, "region": [0, 0, 3840, 2160],
     "blend": {"left": 0, "right": 0, "top": 0, "bottom": 0, "gamma": 2.2},
-    "mode_id": "3840x2160@30.00p"}
+    "current": "3840x2160@30.00p"}
  ]}
 ```
 
@@ -143,7 +145,8 @@ One entry per connector of the GPU, connected or not (example values):
 - `show_loaded`: the engine's lock file `/tmp/cuems.show.lock` exists. The engines create it when a
   project loads; after an engine crash it can be stale. In v2 configuration writes
   will be refused while it is present.
-- `outputs` lists the outputs of the VC's canvas; `region` is `[x, y, width, height]` in canvas pixels.
+- `outputs` lists the outputs of the VC's canvas; `region` is `[x, y, width, height]` in canvas pixels;
+  `current` is the `id` of the mode driven there (as in `get_hardware`), `null` when not driven.
 
 ## 3. Events
 

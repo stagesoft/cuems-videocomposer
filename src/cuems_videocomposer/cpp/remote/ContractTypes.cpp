@@ -53,6 +53,13 @@ std::string baseModeId(const ContractMode& m) {
     return buf;
 }
 
+std::string contractModeId(const ContractMode& m) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%dx%d@%.2f%c", m.width, m.height, m.fieldRateHz,
+                  m.interlaced ? 'i' : 'p');
+    return buf;
+}
+
 void assignModeIds(std::vector<ContractMode>& modes) {
     std::map<std::string, int> baseCount;
     for (const auto& m : modes) {

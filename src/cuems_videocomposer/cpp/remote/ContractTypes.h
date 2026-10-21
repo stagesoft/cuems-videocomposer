@@ -95,6 +95,11 @@ struct ContractSnapshot {
 void assignModeIds(std::vector<ContractMode>& modes);
 std::string baseModeId(const ContractMode& m);
 
+/// The id the contract exposes by default: "<w>x<h>@<hz>p|i" with hz the rate
+/// people and tools quote -- the FIELD rate for interlaced modes (1080i60 ->
+/// "1920x1080@60.00i"), matching modetest and display.conf refresh=60i.
+std::string contractModeId(const ContractMode& m);
+
 /// Thread-safe holder: the backend publishes, the contract threads read copies.
 class ContractSnapshotHolder {
 public:

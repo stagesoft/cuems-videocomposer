@@ -137,6 +137,7 @@ extern bool test_Contract_ModeFromTimingAndIds();
 extern bool test_Contract_HelloIgnoresVersion();
 extern bool test_Contract_Errors();
 extern bool test_Contract_HardwareShape();
+extern bool test_Contract_DuplicateModesCollapse();
 extern bool test_Contract_StateShowLock();
 extern bool test_Contract_CachedHardwareMatches();
 extern bool test_Contract_ServerRoundTripAndBindFailure();
@@ -250,6 +251,7 @@ int main() {
     TestFramework::instance().addTest("Contract_HelloIgnoresVersion", test_Contract_HelloIgnoresVersion);
     TestFramework::instance().addTest("Contract_Errors", test_Contract_Errors);
     TestFramework::instance().addTest("Contract_HardwareShape", test_Contract_HardwareShape);
+    TestFramework::instance().addTest("Contract_DuplicateModesCollapse", test_Contract_DuplicateModesCollapse);
     TestFramework::instance().addTest("Contract_StateShowLock", test_Contract_StateShowLock);
     TestFramework::instance().addTest("Contract_CachedHardwareMatches", test_Contract_CachedHardwareMatches);
     TestFramework::instance().addTest("Contract_ServerRoundTripAndBindFailure", test_Contract_ServerRoundTripAndBindFailure);

@@ -76,7 +76,7 @@ ContractSnapshot sampleSnapshot() {
     s.state.configSource = "/run/cuems/display.conf";
     ContractOutputState o;
     o.connector = "HDMI-A-1"; o.enabled = true; o.width = 1920; o.height = 1080;
-    o.modeId = a.modes[0].modeId;
+    o.modeId = contractModeId(a.modes[0]);
     s.state.outputs = {o};
     return s;
 }
@@ -155,17 +155,35 @@ bool test_Contract_Errors() {
 }
 
 bool test_Contract_HardwareShape() {
+    // Default view: typed fields + exact id, interlaced at its field rate, no timings.
     auto r = call(R"({"v":1,"id":"h","op":"get_hardware"})");
     if (r["ok"] != true) return false;
     const auto& outs = r["result"]["outputs"];
     if (outs.size() != 2) return false;
     const auto& a = outs[0];
     const auto& b = outs[1];
-    return a["connector"] == "HDMI-A-1" && a["connection"] == "connected" && a["edid"]["serial"] == "506NTMXDV771" &&
-           a["current"]["mode_id"] == "1920x1080@60.00p" && a["modes"].size() == 2 &&
-           a["modes"][1]["interlaced"] == true && a["modes"][1]["field_rate_hz"] == 60.0 &&
-           a["modes"][0]["timing"]["htotal"] == 2200 &&
-           b["connection"] == "disconnected" && b["current"].is_null() && b["modes"].empty();
+    const bool simple = a["connector"] == "HDMI-A-1" && a["connection"] == "connected" &&
+        a["edid"]["serial"] == "506NTMXDV771" && a["current"] == "1920x1080@60.00p" &&
+        a["preferred"] == "1920x1080@60.00p" && a["modes"].size() == 2 &&
+        a["modes"][1]["id"] == "1920x1080@60.00i" && a["modes"][1]["hz"] == 60.0 &&
+        a["modes"][1]["interlaced"] == true && !a["modes"][0].contains("timing") &&
+        b["connection"] == "disconnected" && b["current"].is_null() && b["preferred"].is_null() &&
+        b["modes"].empty();
+    // Full view on request: timings and the unique per-connector mode_id.
+    auto f = call(R"({"v":1,"id":"f","op":"get_hardware","detail":"full"})");
+    const auto& fa = f["result"]["outputs"][0];
+    const bool full = fa["modes"][1]["timing"]["htotal"] == 2200 && fa["modes"][1]["field_rate_hz"] == 60.0 &&
+        fa["modes"][1]["id"] == "1920x1080@60.00i" && fa["current"]["mode_id"] == "1920x1080@60.00p";
+    return simple && full;
+}
+
+bool test_Contract_DuplicateModesCollapse() {
+    ContractSnapshot s = sampleSnapshot();
+    s.hardware[0].modes.push_back(s.hardware[0].modes[0]);  // EDID duplicate
+    s.hardware[0].modes.push_back(ContractMode::fromTiming(timing(297000, 1920, 4400, 1080, 1125)));  // other timing, same id
+    assignModeIds(s.hardware[0].modes);
+    auto r = json::parse(ContractProtocol::handle(R"({"v":1,"id":1,"op":"get_hardware"})", s, identity()));
+    return r["result"]["outputs"][0]["modes"].size() == 2;
 }
 
 bool test_Contract_CachedHardwareMatches() {
@@ -190,7 +208,7 @@ bool test_Contract_StateShowLock() {
     return absent["result"]["show_loaded"] == false && present["result"]["show_loaded"] == true &&
            present["result"]["mode"] == "show" && present["result"]["pacing"] == "coupled" &&
            present["result"]["outputs"][0]["region"] == json::array({0, 0, 1920, 1080}) &&
-           present["result"]["outputs"][0]["mode_id"] == "1920x1080@60.00p";
+           present["result"]["outputs"][0]["current"] == "1920x1080@60.00p";
 }
 
 bool test_Contract_ServerRoundTripAndBindFailure() {

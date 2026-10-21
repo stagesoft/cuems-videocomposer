@@ -22,7 +22,9 @@ VERSION = 1
 
 def mode(w, h, clock, htotal, vtotal, interlaced=False, preferred=False, suffix=""):
     hz = clock * 1000.0 / (htotal * vtotal)
+    field = hz * (2 if interlaced else 1)
     return {
+        "id": f"{w}x{h}@{field:.2f}{'i' if interlaced else 'p'}",
         "mode_id": f"{w}x{h}@{hz:.2f}{'i' if interlaced else 'p'}{suffix}",
         "width": w, "height": h,
         "refresh_hz": round(hz, 2), "field_rate_hz": round(hz * (2 if interlaced else 1), 2),
@@ -32,6 +34,25 @@ def mode(w, h, clock, htotal, vtotal, interlaced=False, preferred=False, suffix=
                    "vtotal": vtotal, "flags": 5 | (16 if interlaced else 0),
                    "type": 64 | (8 if preferred else 0)},
     }
+
+
+def simple(hw):
+    """Default view: typed fields + exact id; duplicates collapse; no timings."""
+    outs = []
+    for o in hw["outputs"]:
+        seen, modes, preferred = set(), [], None
+        for m in o["modes"]:
+            if m["preferred"] and preferred is None:
+                preferred = m["id"]
+            if m["id"] in seen:
+                continue
+            seen.add(m["id"])
+            modes.append({"id": m["id"], "width": m["width"], "height": m["height"],
+                          "hz": m["field_rate_hz"], "interlaced": m["interlaced"]})
+        outs.append({"connector": o["connector"], "connection": o["connection"], "edid": o["edid"],
+                     "current": o["current"]["id"] if o["current"] else None,
+                     "preferred": preferred, "modes": modes})
+    return {"outputs": outs}
 
 
 def canned_hardware():
@@ -54,7 +75,7 @@ def canned_state(show_lock="/tmp/cuems.show.lock"):
             "config_source": "mock", "show_loaded": os.path.exists(show_lock),
             "outputs": [{"connector": f"HDMI-A-{i + 1}", "enabled": True, "region": [3840 * i, 0, 3840, 2160],
                          "blend": {"left": 0, "right": 0, "top": 0, "bottom": 0, "gamma": 2.2},
-                         "mode_id": "3840x2160@30.00p"} for i in range(2)]}
+                         "current": "3840x2160@30.00p"} for i in range(2)]}
 
 
 def handle(raw, ident):
@@ -85,7 +106,8 @@ def handle(raw, ident):
     if op == "get_caps":
         return ok({"caps": ["report_v1", "mode_timing", "interlace_flag"]})
     if op == "get_hardware":
-        return ok(canned_hardware())
+        full = canned_hardware()
+        return ok(full if req.get("detail") == "full" else simple(full))
     if op == "get_state":
         return ok(canned_state())
     return err("unsupported_op", f"unknown op '{op}'")
