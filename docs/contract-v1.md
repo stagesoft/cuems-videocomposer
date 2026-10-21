@@ -80,10 +80,12 @@ exist. Until then, re-read `get_hardware` when you need fresh connector state.
 
 Ask for it **when you connect, after a `state_changed` event and after a `pid` change** — not in a polling
 loop. The reply is large (every mode of every connector with its timing, tens of kB on a three-output node)
-and the hardware only changes with the configuration. On a thermally limited node, sustained heavy traffic
-competes for the same package power as the GPU: a 10 Hz `get_hardware` poll during playback coincided with a
-single ~0.3 s presentation hitch in each of two 10-minute rig windows (test2 node01, 2026-10-21), while
-`get_state` at 10 Hz did not. `get_state` is small and cheap if you need to poll something.
+and the hardware only changes with the configuration. **Keep any work on a video node light during
+playback**: on test2 node01 (N97, 2×4K@50 + 1080p50, GPU at its PL4 power limit) a client parsing this reply
+at 10 Hz — and the same parsing done by a plain script with no contract traffic at all — each produced one
+~0.25–0.4 s presentation hitch per 10–20 minutes, while the idle node and `get_state` at 10 Hz produced none
+(2026-10-21). The VC serves the reply from a cache; the cost is on the client's side of the same CPU. If you
+need to poll, poll `get_state`.
 
 One entry per connector of the GPU, connected or not (example values):
 
