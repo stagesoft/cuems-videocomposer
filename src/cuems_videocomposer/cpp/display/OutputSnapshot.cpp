@@ -75,7 +75,7 @@ void OutputSnapshot::installFromEnv() {
     sa.sa_flags = SA_RESTART;
     ::sigaction(SIGUSR2, &sa, nullptr);
     LOG_INFO << "OutputSnapshot: enabled -- kill -USR2 <pid> writes one post-blit PPM per output to "
-             << g_dir << " (test aid; stalls one frame)";
+             << g_dir << " (test aid: each round stalls the render loop, ~50-90 ms at 2x4K)";
 }
 
 bool OutputSnapshot::enabled() {
