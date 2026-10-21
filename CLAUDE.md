@@ -75,6 +75,29 @@ ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-previe
   zero. `VIDEOCOMPOSER_COUPLED_PACING=1` is still honoured and forces coupled; `=0` no longer selects
   per-surface (it did on 0.1.2-9), the startup line `frame pacing = …` always states the model in force.
 
+## Multi-output: the rule for shows and what is guaranteed (2026-10-22)
+
+The rule below is the industry's (disguise, Pixera, Resolume, 7thSense all require it and lock outputs in
+hardware); the research and the decisions are in `cuems-RELATIONS/Plans/2026-10-20-vc-per-output-cadence-research.md`
+and `2026-10-20-vc-multi-output-presentation-decisions.md`, the work that follows in
+`2026-10-21-vc-multi-output-programme.md`.
+
+- **Rule.** Every output of a node runs the **same progressive mode line**. Write both `resolution=` and
+  `refresh=` for each `[output:…]` in `display.conf`, then check the startup log: each output must report a
+  progressive mode with the expected two-decimal rate. A bare `refresh=30` once selected **1080i60** on .111
+  (nearest-refresh mode match, no interlace filter yet). If two projectors cannot share one mode line, use
+  **one node per projector**. Outputs that **overlap (edge blend) must always run at equal rates**: the
+  overlap shows both outputs' frames at once.
+- **Guarantee.** Stutter-free **per output**: a regular cadence for the content/refresh ratio (all-2 for
+  30@60, 3:2 for 25@60, 2-2-1 for 29.97@50, all-1 with one inherent 2-hold per ~1000 frames for 29.97@30),
+  never irregular pairs or random hitches. **Never** frame lock across the seam between outputs of different
+  refresh rates — no product achieves that without genlock.
+- **What a mixed-rate node does today.** Coupled pacing (the default) presents every output on the slowest
+  CRTC's vblank, so the faster output runs at the slower rate. Per-surface pacing
+  (`VIDEOCOMPOSER_PER_SURFACE_PACING=1`) runs each output at its own rate but has the known cadence defect
+  until per-output cadence (plan R9) lands; use it only on the FP530 mixed-refresh case and watch the
+  `anti-drift SNAP` line.
+
 ## Resolution control
 
 Precedence (after the DRMBackend patch on `main`/`rc_1`): **`--resolution` CLI flag > `resolution_policy` in `/run/cuems/display.conf` (general) > built-in 1080p default**, with **per-output `resolution=WxH` lines always overriding on top**. So this works:
