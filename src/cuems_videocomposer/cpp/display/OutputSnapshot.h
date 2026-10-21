@@ -35,8 +35,11 @@ namespace videocomposer {
  *
  * Off unless VIDEOCOMPOSER_SNAPSHOT_DIR names a directory. Then SIGUSR2 asks
  * for one round: every enabled output writes <dir>/<output>-<round>.ppm at its
- * next blit, and one INFO line names each file. A 4K readback stalls that one
- * frame, so this is for rigs and test builds, never for shows.
+ * next blit, and one INFO line names each file. The readback and the write are
+ * synchronous on the render thread: measured on test2 node01 (N97, 2x4K + 1080p)
+ * a round stalls the loop ~50-90 ms and the MTC smooth clock snaps once
+ * ("anti-drift SNAP errorMs=51..91"). Rigs and test builds only, never shows;
+ * an async PBO readback with the write on another thread would remove it.
  *
  * Exists for the keep-working matrix (K5/K6) of cuems-RELATIONS
  * Plans/2026-10-21-vc-multi-output-programme.md, phase 0.5: output/capture
