@@ -421,7 +421,7 @@ bool DisplayConfigurationManager::saveToFile(const std::string& path) const {
             file << "resolution=" << out.width << "x" << out.height << "\n";
         }
         if (out.refreshRate > 0) {
-            file << "refresh=" << out.refreshRate << "\n";
+            file << "refresh=" << out.refreshRate << (out.refreshInterlaced ? "i" : "") << "\n";
         }
         file << "canvas_region=" << out.canvasX << "," << out.canvasY 
              << "," << out.canvasWidth << "," << out.canvasHeight << "\n";
@@ -497,6 +497,7 @@ bool DisplayConfigurationManager::loadFromFile(const std::string& path) {
                 sscanf(value.c_str(), "%dx%d", &out->width, &out->height);
             } else if (key == "refresh") {
                 out->refreshRate = std::stod(value);
+                out->refreshInterlaced = !value.empty() && (value.back() == 'i' || value.back() == 'I');
             } else if (key == "canvas_region") {
                 sscanf(value.c_str(), "%d,%d,%d,%d",
                        &out->canvasX, &out->canvasY,

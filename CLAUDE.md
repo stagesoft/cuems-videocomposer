@@ -89,6 +89,15 @@ canvas_layout=custom
 
 The patch lives in `cpp/display/drm/DRMBackend.cpp` (`openWindow`/`initializeVirtualCanvas`): load display.conf before the global modeset (unless `-r` was explicit); the per-output override block applies unconditionally. **Deploy gotcha:** `cuems-generate-display-conf` does NOT emit `resolution_policy=`, so a fresh node with no operator override falls back to the 1080p default.
 
+**Interlaced modes (R11, ClickUp 1amfwm7evfj).** The VC's rate of a mode is the FRAME rate (`clock/(htotal·vtotal)`),
+so 1080i60 reads 30 Hz; every monitor on the rigs offers 1080 at 25/29.97/30 only as interlaced. Since this fix a
+`refresh=` never selects an interlaced mode unless asked for: a progressive mode within 0.5 Hz wins; if the rate does
+not exist in progressive the native progressive mode of that size is used with an ERROR naming both
+(`… 1920x1080@30 does not exist as a progressive mode on this monitor; using the native progressive …`); an
+interlaced mode is taken only with `refresh=<field rate>i` (e.g. `refresh=60i`, matched against the field rate that
+`modetest` shows) or when the size has no progressive mode at all (WARNING). Auto-selection and refresh
+harmonization skip interlaced modes too.
+
 ## Branch layout (after 2026-07-02 cleanup)
 
 - **`rc_1`** = production truth (the deployed 24h binary). Carries async HAP decoder, shared-decoder, forward-jump safety-net + post-seek catch-up, gputexture sub-upload, videoindexer AUTO hwdec, 24h `mtcreceiver`. `main` trails rc_1.

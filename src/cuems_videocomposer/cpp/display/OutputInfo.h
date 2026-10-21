@@ -44,6 +44,7 @@ struct OutputMode {
     int32_t height = 0;
     double refreshRate = 0.0;  // Hz
     bool preferred = false;     // Preferred/native mode
+    bool interlaced = false;    // DRM_MODE_FLAG_INTERLACE; refreshRate is then the FRAME rate
     
     /**
      * Get mode as string (e.g., "1920x1080@60Hz")
@@ -137,8 +138,15 @@ struct OutputInfo {
      * @return Pointer to matching mode, or nullptr if not found
      */
     const OutputMode* findMode(int w, int h, double refresh = 0.0) const {
+        // Progressive first: an interlaced mode reports its frame rate (1080i60
+        // reads 30 Hz), so a bare refresh would otherwise land on it (R11).
         for (const auto& mode : modes) {
-            if (mode.matches(w, h, refresh)) {
+            if (!mode.interlaced && mode.matches(w, h, refresh)) {
+                return &mode;
+            }
+        }
+        for (const auto& mode : modes) {
+            if (mode.interlaced && mode.matches(w, h, refresh)) {
                 return &mode;
             }
         }

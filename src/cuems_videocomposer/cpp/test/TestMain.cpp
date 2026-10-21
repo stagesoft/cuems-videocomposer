@@ -132,6 +132,12 @@ extern bool test_NdiPreview_TransportDecision();
 extern bool test_NdiPreview_JournalContractRelay();
 extern bool test_NdiPreview_ExtraIps();
 extern bool test_NdiPreview_JournalContractExtraIps();
+extern bool test_ModeSelect_Refresh30On1080PicksNativeProgressiveNotInterlaced();
+extern bool test_ModeSelect_ExplicitInterlacedMatchesFieldRate();
+extern bool test_ModeSelect_ProgressiveWithinToleranceWinsClosest();
+extern bool test_ModeSelect_NoProgressiveSizeFallsBackToInterlacedWithKind();
+extern bool test_ModeSelect_NoRefreshPrefersPreferredProgressive();
+extern bool test_ModeSelect_OutputInfoFindModePrefersProgressive();
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
 extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
@@ -233,6 +239,12 @@ int main() {
     TestFramework::instance().addTest("HangGuard_TransferMovesTheSlotWithoutChangingCounts", test_HangGuard_TransferMovesTheSlotWithoutChangingCounts);
     TestFramework::instance().addTest("HangGuard_TransferFromUnreservedIsANoOp", test_HangGuard_TransferFromUnreservedIsANoOp);
 
+    TestFramework::instance().addTest("ModeSelect_Refresh30On1080PicksNativeProgressiveNotInterlaced", test_ModeSelect_Refresh30On1080PicksNativeProgressiveNotInterlaced);
+    TestFramework::instance().addTest("ModeSelect_ExplicitInterlacedMatchesFieldRate", test_ModeSelect_ExplicitInterlacedMatchesFieldRate);
+    TestFramework::instance().addTest("ModeSelect_ProgressiveWithinToleranceWinsClosest", test_ModeSelect_ProgressiveWithinToleranceWinsClosest);
+    TestFramework::instance().addTest("ModeSelect_NoProgressiveSizeFallsBackToInterlacedWithKind", test_ModeSelect_NoProgressiveSizeFallsBackToInterlacedWithKind);
+    TestFramework::instance().addTest("ModeSelect_NoRefreshPrefersPreferredProgressive", test_ModeSelect_NoRefreshPrefersPreferredProgressive);
+    TestFramework::instance().addTest("ModeSelect_OutputInfoFindModePrefersProgressive", test_ModeSelect_OutputInfoFindModePrefersProgressive);
     TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing_UsesKernelUst", test_PresentationTiming_FifoPairing_UsesKernelUst);
