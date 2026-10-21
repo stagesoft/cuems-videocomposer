@@ -31,6 +31,9 @@
 #include "../../layer/VideoLayer.h"
 #include "../../osd/OSDManager.h"
 #include "../../utils/Logger.h"
+#ifdef HAVE_CONTRACT
+#include <unistd.h>
+#endif
 #include <cerrno>
 #include <cmath>
 #include <limits>
@@ -273,6 +276,9 @@ bool DRMBackend::openWindow() {
     initialized_ = true;
     LOG_INFO << "DRMBackend: Initialized with " << surfaces_.size() << " output(s)"
              << (useVirtualCanvas_ ? " (Virtual Canvas mode)" : " (Legacy mode)");
+#ifdef HAVE_CONTRACT
+    startContract();
+#endif
     
     return true;
 }
@@ -283,6 +289,12 @@ void DRMBackend::closeWindow() {
     }
     
     LOG_INFO << "DRMBackend: Closing";
+#ifdef HAVE_CONTRACT
+    if (contractServer_) {
+        contractServer_->stop();
+        contractServer_.reset();
+    }
+#endif
     
 #ifdef HAVE_VAAPI_INTEROP
     if (vaDisplay_) {
@@ -317,6 +329,12 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
     if (!initialized_ || surfaces_.empty()) {
         return;
     }
+#ifdef HAVE_CONTRACT
+    if (contractDirty_) {
+        contractDirty_ = false;
+        publishContractSnapshot(true);
+    }
+#endif
 
     if (useVirtualCanvas_ && multiRenderer_) {
         renderVirtualCanvas(layerManager, osdManager);
@@ -575,6 +593,9 @@ void DRMBackend::warnIfMixedRefreshRates(const char* context) {
         return;
     }
     lastMixedRefreshSignature_ = signature.str();
+#ifdef HAVE_CONTRACT
+    publishContractWarning("mixed_refresh", std::string(context) + ": " + signature.str());
+#endif
 
     if (!coupledPacing_ && surfaces_.size() > 1) {
         // Per-surface pacing handles this: each class flips on its own vblank.
@@ -931,6 +952,7 @@ bool DRMBackend::hasFatalError() const {
 bool DRMBackend::configureOutputRegion(const std::string& outputName, 
                                         int canvasX, int canvasY,
                                         int canvasWidth, int canvasHeight) {
+    contractDirty_ = true;  // the contract re-reads state on the next frame
     // Find the output region by name
     OutputRegion* region = nullptr;
     for (auto& r : outputRegions_) {
@@ -995,6 +1017,7 @@ bool DRMBackend::configureOutputRegion(const std::string& outputName,
 bool DRMBackend::configureOutputBlend(const std::string& outputName,
                                        float left, float right,
                                        float top, float bottom, float gamma) {
+    contractDirty_ = true;  // the contract re-reads state on the next frame
     // Find the output region by name
     OutputRegion* region = nullptr;
     for (auto& r : outputRegions_) {
@@ -1054,6 +1077,7 @@ DRMSurface* DRMBackend::getPrimarySurface() {
 }
 
 bool DRMBackend::setOutputMode(const std::string& outputName, int width, int height, double refresh) {
+    contractDirty_ = true;  // the contract re-reads state on the next frame
     LOG_INFO << "DRMBackend::setOutputMode called: " << outputName 
              << " width=" << width << " height=" << height << " refresh=" << refresh;
     
@@ -1203,6 +1227,7 @@ void DRMBackend::setOutputSinkManager(OutputSinkManager* sinkManager) {
 }
 
 bool DRMBackend::setResolutionMode(const std::string& mode) {
+    contractDirty_ = true;  // the contract re-reads state on the next frame
     if (!configManager_) {
         return false;
     }
@@ -1306,6 +1331,7 @@ bool DRMBackend::saveConfiguration(const std::string& path) {
 }
 
 bool DRMBackend::loadConfiguration(const std::string& path) {
+    contractDirty_ = true;  // the contract re-reads state on the next frame
     if (!configManager_) {
         return false;
     }
@@ -1713,6 +1739,7 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
 }
 
 bool DRMBackend::configureOutputRegion(const std::string& outputName, const OutputRegion& region) {
+    contractDirty_ = true;  // the contract re-reads state on the next frame
     // Find the output
     for (auto& r : outputRegions_) {
         if (r.name == outputName) {
@@ -2022,6 +2049,122 @@ int DRMBackend::measureDisplayLatencyMs(int warmupFrames, int sampleFrames,
     LOG_INFO << "DisplayLatency: applied = " << appliedMs << "ms (auto)";
     return appliedMs;
 }
+
+
+#ifdef HAVE_CONTRACT
+namespace {
+ContractModeTiming toContractTiming(const drmModeModeInfo& m) {
+    ContractModeTiming t;
+    t.clockKhz = m.clock;
+    t.hdisplay = m.hdisplay; t.hsyncStart = m.hsync_start; t.hsyncEnd = m.hsync_end; t.htotal = m.htotal;
+    t.vdisplay = m.vdisplay; t.vsyncStart = m.vsync_start; t.vsyncEnd = m.vsync_end; t.vtotal = m.vtotal;
+    t.flags = m.flags;
+    t.type = m.type;
+    return t;
+}
+bool sameTiming(const ContractModeTiming& a, const ContractModeTiming& b) {
+    return a.clockKhz == b.clockKhz && a.hdisplay == b.hdisplay && a.hsyncStart == b.hsyncStart &&
+           a.hsyncEnd == b.hsyncEnd && a.htotal == b.htotal && a.vdisplay == b.vdisplay &&
+           a.vsyncStart == b.vsyncStart && a.vsyncEnd == b.vsyncEnd && a.vtotal == b.vtotal &&
+           (a.flags == b.flags);
+}
+}  // namespace
+
+void DRMBackend::startContract() {
+    ContractProtocol::Identity id;
+#ifdef CUEMS_DEB_VERSION
+    id.vcVersion = CUEMS_DEB_VERSION;
+#else
+    id.vcVersion = "unknown";
+#endif
+    char host[256] = {0};
+    if (gethostname(host, sizeof(host) - 1) == 0) {
+        id.hostname = host;
+    }
+    id.pid = static_cast<int64_t>(getpid());
+    id.caps = {"report_v1", "mode_timing", "interlace_flag"};
+    contractServer_ = std::make_unique<ContractServer>(contractSnapshot_, id);
+    publishContractSnapshot(false);
+    if (!contractServer_->start()) {
+        contractServer_.reset();
+    }
+}
+
+void DRMBackend::publishContractSnapshot(bool announce) {
+    if (!contractServer_ || !outputManager_) {
+        return;
+    }
+    ContractSnapshot snap;
+    std::map<std::string, std::string> currentIdByConnector;
+    for (const auto& r : outputManager_->getConnectorReports()) {
+        ContractOutputHardware hw;
+        hw.connector = r.info.name;
+        hw.connection = r.connection == 1 ? "connected" : (r.connection == 2 ? "disconnected" : "unknown");
+        hw.make = r.info.make;
+        hw.model = r.info.model;
+        hw.serial = r.info.serialNumber;
+        hw.physicalWidthMm = r.info.physicalWidthMM;
+        hw.physicalHeightMm = r.info.physicalHeightMM;
+        for (const auto& m : r.modes) {
+            hw.modes.push_back(ContractMode::fromTiming(toContractTiming(m)));
+        }
+        assignModeIds(hw.modes);
+        const bool driven = surfaces_.count(r.info.name) && surfaces_.at(r.info.name) && r.hasCurrentMode;
+        if (driven) {
+            hw.current = ContractMode::fromTiming(toContractTiming(r.currentMode));
+            hw.current.modeId = baseModeId(hw.current);
+            for (const auto& m : hw.modes) {
+                if (sameTiming(m.timing, hw.current.timing)) {
+                    hw.current.modeId = m.modeId;
+                    break;
+                }
+            }
+            hw.hasCurrent = true;
+            currentIdByConnector[hw.connector] = contractModeId(hw.current);
+        }
+        snap.hardware.push_back(std::move(hw));
+    }
+
+    snap.state.pacing = coupledPacing_ ? "coupled" : "per_surface";
+    int cw = 0, ch = 0;
+    if (getCanvasSize(cw, ch)) {
+        snap.state.canvasWidth = cw;
+        snap.state.canvasHeight = ch;
+    }
+    snap.state.configSource = access(kStartupDisplayConf, R_OK) == 0 ? kStartupDisplayConf : "drm_defaults";
+    for (const auto& region : outputRegions_) {
+        ContractOutputState o;
+        o.connector = region.name;
+        o.enabled = region.enabled && surfaces_.count(region.name) > 0;
+        o.x = region.canvasX;
+        o.y = region.canvasY;
+        o.width = region.canvasWidth;
+        o.height = region.canvasHeight;
+        o.blendLeft = region.blend.left;
+        o.blendRight = region.blend.right;
+        o.blendTop = region.blend.top;
+        o.blendBottom = region.blend.bottom;
+        o.blendGamma = region.blend.gamma;
+        auto it = currentIdByConnector.find(region.name);
+        if (it != currentIdByConnector.end()) {
+            o.modeId = it->second;
+        }
+        snap.state.outputs.push_back(std::move(o));
+    }
+    contractSnapshot_.set(std::move(snap));
+    if (announce) {
+        contractServer_->publish(ContractProtocol::eventStateChanged(contractServer_->nextSeq(),
+                                                                     contractServer_->pid()));
+    }
+}
+
+void DRMBackend::publishContractWarning(const std::string& kind, const std::string& detail) {
+    if (contractServer_) {
+        contractServer_->publish(ContractProtocol::eventModeWarning(contractServer_->nextSeq(),
+                                                                    contractServer_->pid(), kind, detail));
+    }
+}
+#endif  // HAVE_CONTRACT
 
 } // namespace videocomposer
 

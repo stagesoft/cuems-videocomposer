@@ -732,6 +732,24 @@ std::vector<OutputInfo> DRMOutputManager::getOutputs() const {
     return result;
 }
 
+std::vector<DRMOutputManager::ConnectorReport> DRMOutputManager::getConnectorReports() const {
+    std::vector<ConnectorReport> result;
+    for (const auto& conn : connectors_) {
+        ConnectorReport r;
+        r.info = conn.info;
+        if (conn.connector) {
+            r.connection = static_cast<int>(conn.connector->connection);
+            for (int m = 0; m < conn.connector->count_modes; ++m) {
+                r.modes.push_back(conn.connector->modes[m]);
+            }
+        }
+        r.hasCurrentMode = conn.hasCurrentMode;
+        r.currentMode = conn.currentMode;
+        result.push_back(std::move(r));
+    }
+    return result;
+}
+
 size_t DRMOutputManager::getOutputCount() const {
     size_t count = 0;
     for (const auto& conn : connectors_) {
