@@ -27,6 +27,7 @@
 #include "../OpenGLRenderer.h"
 #include "../DisplayConfigurationManager.h"
 #include "../StartupSplash.h"
+#include "../OutputSnapshot.h"
 #include "../../layer/LayerManager.h"
 #include "../../layer/VideoLayer.h"
 #include "../../osd/OSDManager.h"
@@ -60,6 +61,7 @@ constexpr const char* kStartupDisplayConf = "/run/cuems/display.conf";
 }
 
 DRMBackend::DRMBackend() {
+    OutputSnapshot::installFromEnv();
     outputManager_ = std::make_unique<DRMOutputManager>();
     configManager_ = std::make_unique<DisplayConfigurationManager>();
 }

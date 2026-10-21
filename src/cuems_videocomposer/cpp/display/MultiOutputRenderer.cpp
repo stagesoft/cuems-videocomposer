@@ -30,6 +30,7 @@
 #include "../output/OutputSinkManager.h"
 #include "../layer/LayerManager.h"
 #include "../utils/Logger.h"
+#include "OutputSnapshot.h"
 
 #include <GL/glew.h>
 #include <GL/gl.h>
@@ -260,6 +261,16 @@ void MultiOutputRenderer::blitToOutputs(const std::vector<OutputSurface*>* onlyS
             }
         }
     }
+
+    if (OutputSnapshot::enabled()) {
+        size_t enabledOutputs = 0;
+        for (const auto& output : outputs_) {
+            if (output.surface && output.region.enabled) {
+                ++enabledOutputs;
+            }
+        }
+        OutputSnapshot::endPass(enabledOutputs);
+    }
 }
 
 void MultiOutputRenderer::blitToOutput(OutputState& output) {
@@ -284,7 +295,12 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
         canvas_->getHeight(),
         output.region
     );
-    
+
+    if (OutputSnapshot::wanted(output.region.name)) {
+        OutputSnapshot::capture(output.region.name, output.region.physicalWidth,
+                                output.region.physicalHeight);
+    }
+
     // Swap buffers
     output.surface->swapBuffers();
 
