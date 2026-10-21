@@ -42,6 +42,10 @@ using namespace videocomposer;
 using namespace videocomposer::test;
 
 // Mock InputSource for testing
+// Each test file has its own MockInputSource: keep it file-local, or the
+// three definitions collide (ODR) and Debug/ASan builds destroy the wrong type.
+namespace {
+
 class MockInputSource : public InputSource {
 public:
     bool open(const std::string& source) override { return true; }
@@ -64,6 +68,8 @@ public:
     bool supportsDirectGPUTexture() const override { return false; }
     DecodeBackend getOptimalBackend() const override { return DecodeBackend::CPU_SOFTWARE; }
 };
+
+}  // namespace
 
 bool test_Integration_LayerManagerWithMultipleLayers() {
     LayerManager manager;
