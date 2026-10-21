@@ -119,7 +119,7 @@ bool lockPresent(const std::string& path) {
 }  // namespace
 
 std::string ContractProtocol::handle(const std::string& request, const ContractSnapshot& snapshot,
-                                     const Identity& identity) {
+                                     const Identity& identity, const std::string* cachedHardware) {
     json req = json::parse(request, nullptr, /*allow_exceptions=*/false);
     if (req.is_discarded() || !req.is_object()) {
         return err(nullptr, "bad_request", "request is not a JSON object");
@@ -150,6 +150,10 @@ std::string ContractProtocol::handle(const std::string& request, const ContractS
         return ok(id, json{{"caps", identity.caps}});
     }
     if (op == "get_hardware") {
+        if (cachedHardware) {
+            return "{\"v\":" + std::to_string(kVersion) + ",\"id\":" + id.dump() +
+                   ",\"ok\":true,\"result\":" + *cachedHardware + "}";
+        }
         return ok(id, hardwareDoc(snapshot));
     }
     if (op == "get_state") {

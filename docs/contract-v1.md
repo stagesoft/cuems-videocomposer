@@ -78,6 +78,13 @@ exist. Until then, re-read `get_hardware` when you need fresh connector state.
 
 ### 2.3 `get_hardware`
 
+Ask for it **when you connect, after a `state_changed` event and after a `pid` change** — not in a polling
+loop. The reply is large (every mode of every connector with its timing, tens of kB on a three-output node)
+and the hardware only changes with the configuration. On a thermally limited node, sustained heavy traffic
+competes for the same package power as the GPU: a 10 Hz `get_hardware` poll during playback coincided with a
+single ~0.3 s presentation hitch in each of two 10-minute rig windows (test2 node01, 2026-10-21), while
+`get_state` at 10 Hz did not. `get_state` is small and cheap if you need to poll something.
+
 One entry per connector of the GPU, connected or not (example values):
 
 ```json

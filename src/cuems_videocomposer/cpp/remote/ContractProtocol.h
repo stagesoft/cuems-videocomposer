@@ -47,9 +47,12 @@ public:
         std::string showLockPath = "/tmp/cuems.show.lock";
     };
 
-    /// One request in, one reply out. Never throws.
+    /// One request in, one reply out. Never throws. 'cachedHardware', when given,
+    /// is the serialised get_hardware result for this snapshot (hardwareJson()):
+    /// the server keeps it per snapshot generation so a get_hardware reply costs
+    /// a string copy instead of serialising every mode again.
     static std::string handle(const std::string& request, const ContractSnapshot& snapshot,
-                              const Identity& identity);
+                              const Identity& identity, const std::string* cachedHardware = nullptr);
 
     /// Event documents published on the Pub socket (topic prefix included).
     static std::string eventStateChanged(uint64_t seq, int64_t pid);

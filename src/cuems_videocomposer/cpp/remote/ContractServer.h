@@ -93,6 +93,11 @@ private:
     std::deque<std::string> queue_;
     bool stopping_ = false;
 
+    // get_hardware result serialised once per snapshot generation.
+    std::mutex cacheMutex_;
+    uint64_t cachedGeneration_ = ~0ull;
+    std::string cachedHardware_;
+
     void pubLoop();
     friend struct ContractWorker;
     std::string handle(const std::string& request);

@@ -165,7 +165,18 @@ ContractServer::~ContractServer() {
 }
 
 std::string ContractServer::handle(const std::string& request) {
-    return ContractProtocol::handle(request, holder_.get(), identity_);
+    uint64_t generation = 0;
+    const ContractSnapshot snapshot = holder_.get(&generation);
+    std::string hardware;
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        if (generation != cachedGeneration_) {
+            cachedHardware_ = ContractProtocol::hardwareJson(snapshot);
+            cachedGeneration_ = generation;
+        }
+        hardware = cachedHardware_;
+    }
+    return ContractProtocol::handle(request, snapshot, identity_, &hardware);
 }
 
 bool ContractServer::start() {

@@ -138,6 +138,7 @@ extern bool test_Contract_HelloIgnoresVersion();
 extern bool test_Contract_Errors();
 extern bool test_Contract_HardwareShape();
 extern bool test_Contract_StateShowLock();
+extern bool test_Contract_CachedHardwareMatches();
 extern bool test_Contract_ServerRoundTripAndBindFailure();
 extern bool test_Contract_ServerLifecycleStress();
 extern bool test_Contract_OversizedRequestDoesNotKillServer();
@@ -250,6 +251,7 @@ int main() {
     TestFramework::instance().addTest("Contract_Errors", test_Contract_Errors);
     TestFramework::instance().addTest("Contract_HardwareShape", test_Contract_HardwareShape);
     TestFramework::instance().addTest("Contract_StateShowLock", test_Contract_StateShowLock);
+    TestFramework::instance().addTest("Contract_CachedHardwareMatches", test_Contract_CachedHardwareMatches);
     TestFramework::instance().addTest("Contract_ServerRoundTripAndBindFailure", test_Contract_ServerRoundTripAndBindFailure);
     TestFramework::instance().addTest("Contract_ServerLifecycleStress", test_Contract_ServerLifecycleStress);
     TestFramework::instance().addTest("Contract_OversizedRequestDoesNotKillServer", test_Contract_OversizedRequestDoesNotKillServer);

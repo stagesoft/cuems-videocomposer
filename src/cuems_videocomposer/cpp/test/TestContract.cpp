@@ -168,6 +168,15 @@ bool test_Contract_HardwareShape() {
            b["connection"] == "disconnected" && b["current"].is_null() && b["modes"].empty();
 }
 
+bool test_Contract_CachedHardwareMatches() {
+    const auto snap = sampleSnapshot();
+    const std::string cached = ContractProtocol::hardwareJson(snap);
+    const std::string req = R"({"v":1,"id":{"k":[1,2]},"op":"get_hardware"})";
+    auto a = json::parse(ContractProtocol::handle(req, snap, identity()));
+    auto b = json::parse(ContractProtocol::handle(req, snap, identity(), &cached));
+    return a == b && b["id"] == json{{"k", {1, 2}}};
+}
+
 bool test_Contract_StateShowLock() {
     const std::string lock = "/tmp/vc-contract-test-lock-" + std::to_string(getpid());
     std::remove(lock.c_str());
