@@ -132,6 +132,13 @@ extern bool test_NdiPreview_TransportDecision();
 extern bool test_NdiPreview_JournalContractRelay();
 extern bool test_NdiPreview_ExtraIps();
 extern bool test_NdiPreview_JournalContractExtraIps();
+extern bool test_CadenceStats_AllowedHolds();
+extern bool test_CadenceStats_Pulldown25at60_Clean();
+extern bool test_CadenceStats_2997at30_InherentDoublesAreMinority();
+extern bool test_CadenceStats_IrregularPairCountedOutsideA();
+extern bool test_CadenceStats_MissedVsyncFromMscGap();
+extern bool test_CadenceStats_WrapSkipBackDiscontinuity();
+extern bool test_CadenceStats_PerOutputAndLayerRemoval();
 extern bool test_PresentationTiming_CaptureDisabled_NoOp();
 extern bool test_PresentationTiming_FifoPairing();
 extern bool test_PresentationTiming_FifoPairing_UsesKernelUst();
@@ -233,6 +240,13 @@ int main() {
     TestFramework::instance().addTest("HangGuard_TransferMovesTheSlotWithoutChangingCounts", test_HangGuard_TransferMovesTheSlotWithoutChangingCounts);
     TestFramework::instance().addTest("HangGuard_TransferFromUnreservedIsANoOp", test_HangGuard_TransferFromUnreservedIsANoOp);
 
+    TestFramework::instance().addTest("CadenceStats_AllowedHolds", test_CadenceStats_AllowedHolds);
+    TestFramework::instance().addTest("CadenceStats_Pulldown25at60_Clean", test_CadenceStats_Pulldown25at60_Clean);
+    TestFramework::instance().addTest("CadenceStats_2997at30_InherentDoublesAreMinority", test_CadenceStats_2997at30_InherentDoublesAreMinority);
+    TestFramework::instance().addTest("CadenceStats_IrregularPairCountedOutsideA", test_CadenceStats_IrregularPairCountedOutsideA);
+    TestFramework::instance().addTest("CadenceStats_MissedVsyncFromMscGap", test_CadenceStats_MissedVsyncFromMscGap);
+    TestFramework::instance().addTest("CadenceStats_WrapSkipBackDiscontinuity", test_CadenceStats_WrapSkipBackDiscontinuity);
+    TestFramework::instance().addTest("CadenceStats_PerOutputAndLayerRemoval", test_CadenceStats_PerOutputAndLayerRemoval);
     TestFramework::instance().addTest("PresentationTiming_CaptureDisabled_NoOp", test_PresentationTiming_CaptureDisabled_NoOp);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing", test_PresentationTiming_FifoPairing);
     TestFramework::instance().addTest("PresentationTiming_FifoPairing_UsesKernelUst", test_PresentationTiming_FifoPairing_UsesKernelUst);
