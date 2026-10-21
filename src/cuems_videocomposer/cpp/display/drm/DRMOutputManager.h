@@ -162,6 +162,20 @@ public:
      * Get all connected outputs (builds list from connectors)
      */
     std::vector<OutputInfo> getOutputs() const;
+
+    /**
+     * Every connector the card has (connected or not), with its raw DRM modes
+     * and the mode currently driven, for the hardware-configuration contract
+     * (remote/ContractTypes.h). Reads cached state only -- no probe.
+     */
+    struct ConnectorReport {
+        OutputInfo info;
+        int connection = 0;                    // drmModeConnection: 1 connected, 2 disconnected, 3 unknown
+        std::vector<drmModeModeInfo> modes;
+        bool hasCurrentMode = false;
+        drmModeModeInfo currentMode = {};
+    };
+    std::vector<ConnectorReport> getConnectorReports() const;
     
     /**
      * Get connected output count

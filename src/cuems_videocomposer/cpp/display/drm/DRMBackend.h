@@ -43,6 +43,9 @@
 #include "../MultiOutputRenderer.h"
 #include "DRMOutputManager.h"
 #include "DRMSurface.h"
+#ifdef HAVE_CONTRACT
+#include "../../remote/ContractServer.h"
+#endif
 #include <vector>
 #include <map>
 #include <memory>
@@ -339,6 +342,19 @@ private:
 
     // Per-surface pacing: each output presents on its own vblank.
     void renderVirtualCanvasDecoupled(LayerManager* layerManager, OSDManager* osdManager);
+
+    // Hardware-configuration contract, phase 2a: report only (docs/contract-v1.md).
+    // The snapshot is rebuilt on the render thread when contractDirty_ is set by
+    // a configuration change, copied into the holder, served by the server's
+    // own threads.
+    bool contractDirty_ = false;
+#ifdef HAVE_CONTRACT
+    ContractSnapshotHolder contractSnapshot_;
+    std::unique_ptr<ContractServer> contractServer_;
+    void startContract();
+    void publishContractSnapshot(bool announce);
+    void publishContractWarning(const std::string& kind, const std::string& detail);
+#endif
 
     /**
      * Surfaces that may present this iteration, in physical layout order.

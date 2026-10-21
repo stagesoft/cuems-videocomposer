@@ -26,6 +26,7 @@
 #include <vector>
 #include <iostream>
 #include <cassert>
+#include <cstdlib>
 
 namespace videocomposer {
 namespace test {
@@ -56,7 +57,12 @@ public:
         int passed = 0;
         int failed = 0;
 
+        // VC_TEST_FILTER=<substring> runs only the matching tests (rig debugging).
+        const char* filter = std::getenv("VC_TEST_FILTER");
         for (const auto& test : tests_) {
+            if (filter && *filter && test.name.find(filter) == std::string::npos) {
+                continue;
+            }
             std::cout << "Test: " << test.name << " ... ";
             try {
                 if (test.func()) {
