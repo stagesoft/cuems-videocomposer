@@ -328,6 +328,7 @@ public:
         int width = 0;             // 0 = follow the global resolution policy
         int height = 0;
         double refreshRate = 0.0;  // >0 = pinned, excluded from harmonization
+        bool interlaced = false;   // refresh=<field rate>i: an interlaced mode was asked for explicitly
     };
 
     /**
@@ -500,8 +501,9 @@ private:
     /**
      * Find matching mode
      */
-    drmModeModeInfo* findMode(drmModeConnector* conn, int width, int height, 
-                               double refreshRate);
+    drmModeModeInfo* findMode(drmModeConnector* conn, int width, int height,
+                               double refreshRate, bool wantInterlaced = false,
+                               const std::string& logName = std::string());
     
     /**
      * Get connector properties

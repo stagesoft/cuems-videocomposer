@@ -127,6 +127,7 @@ bool DRMBackend::openWindow() {
             ovr.width       = oc.width;
             ovr.height      = oc.height;
             ovr.refreshRate = oc.refreshRate;
+            ovr.interlaced  = oc.refreshInterlaced;
             overrides[oc.name] = ovr;
         }
         if (!overrides.empty()) {

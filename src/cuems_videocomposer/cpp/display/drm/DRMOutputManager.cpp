@@ -24,6 +24,7 @@
  */
 
 #include "DRMOutputManager.h"
+#include "../ModeSelect.h"
 #include "../../utils/Logger.h"
 
 #include <fcntl.h>
@@ -502,6 +503,7 @@ void DRMOutputManager::parseModes(DRMConnector& connector) {
         }
         
         outMode.preferred = (mode.type & DRM_MODE_TYPE_PREFERRED) != 0;
+        outMode.interlaced = (mode.flags & DRM_MODE_FLAG_INTERLACE) != 0;
         
         connector.info.modes.push_back(outMode);
     }
@@ -799,47 +801,46 @@ bool DRMOutputManager::refreshOutputs() {
     return changed;
 }
 
-drmModeModeInfo* DRMOutputManager::findMode(drmModeConnector* conn, 
-                                            int width, int height, 
-                                            double refreshRate) {
+drmModeModeInfo* DRMOutputManager::findMode(drmModeConnector* conn,
+                                            int width, int height,
+                                            double refreshRate, bool wantInterlaced,
+                                            const std::string& logName) {
     if (!conn) {
         return nullptr;
     }
-    
-    drmModeModeInfo* best = nullptr;
-    double bestRefreshDiff = 999.0;
-    
+    std::vector<ModeView> views;
+    views.reserve(conn->count_modes);
     for (int i = 0; i < conn->count_modes; ++i) {
-        drmModeModeInfo* mode = &conn->modes[i];
-        
-        if (mode->hdisplay != static_cast<uint16_t>(width) ||
-            mode->vdisplay != static_cast<uint16_t>(height)) {
-            continue;
-        }
-        
-        double modeRefresh = 0.0;
-        if (mode->htotal && mode->vtotal) {
-            modeRefresh = static_cast<double>(mode->clock * 1000) /
-                         (mode->htotal * mode->vtotal);
-        }
-        
-        if (refreshRate <= 0.0) {
-            // Prefer preferred mode, then highest refresh
-            if (!best || (mode->type & DRM_MODE_TYPE_PREFERRED) ||
-                modeRefresh > bestRefreshDiff) {
-                best = mode;
-                bestRefreshDiff = modeRefresh;
-            }
-        } else {
-            double diff = std::abs(modeRefresh - refreshRate);
-            if (diff < bestRefreshDiff) {
-                best = mode;
-                bestRefreshDiff = diff;
-            }
-        }
+        const drmModeModeInfo& m = conn->modes[i];
+        ModeView v;
+        v.width = m.hdisplay;
+        v.height = m.vdisplay;
+        v.frameHz = (m.htotal && m.vtotal) ? static_cast<double>(m.clock) * 1000.0 / (m.htotal * m.vtotal) : 0.0;
+        v.interlaced = (m.flags & DRM_MODE_FLAG_INTERLACE) != 0;
+        v.preferred = (m.type & DRM_MODE_TYPE_PREFERRED) != 0;
+        views.push_back(v);
     }
-    
-    return best;
+    const ModePick pick = pickModeForRefresh(views, width, height, refreshRate, wantInterlaced);
+    if (pick.index < 0) {
+        return nullptr;
+    }
+    const ModeView& chosen = views[pick.index];
+    const std::string who = logName.empty() ? std::string("output") : logName;
+    if (pick.kind == ModePick::Kind::NativeProgressive) {
+        LOG_ERROR << "DRMOutputManager: " << who << ": " << width << "x" << height << "@"
+                  << refreshRate << (wantInterlaced ? "i" : "")
+                  << " does not exist as a progressive mode on this monitor; using the native "
+                  << "progressive " << chosen.width << "x" << chosen.height << "@" << chosen.frameHz
+                  << "Hz instead (interlaced modes are used only when asked for, e.g. refresh=60i)";
+    } else if (pick.kind == ModePick::Kind::OnlyInterlaced) {
+        LOG_WARNING << "DRMOutputManager: " << who << ": no progressive " << width << "x" << height
+                    << " mode exists; using INTERLACED " << chosen.width << "x" << chosen.height
+                    << "i (field rate " << fieldRateHz(chosen) << "Hz)";
+    } else if (chosen.interlaced) {
+        LOG_INFO << "DRMOutputManager: " << who << ": interlaced mode as requested, field rate "
+                 << fieldRateHz(chosen) << "Hz";
+    }
+    return &conn->modes[pick.index];
 }
 
 bool DRMOutputManager::setMode(int index, int width, int height, double refreshRate) {
@@ -1021,7 +1022,7 @@ bool DRMOutputManager::applyResolutionModeToOutput(int index) {
         }
 
         const drmModeModeInfo* requested =
-            findMode(conn->connector, wantW, wantH, ovr->refreshRate);
+            findMode(conn->connector, wantW, wantH, ovr->refreshRate, ovr->interlaced, conn->info.name);
         if (!requested) {
             // Fail loudly. Silently dropping to the preferred mode is what kept the
             // original bug invisible: the operator had no way to tell that the mode
@@ -1147,6 +1148,12 @@ const drmModeModeInfo* DRMOutputManager::findBestMode(const DRMConnector& connec
             score += mode->hdisplay * mode->vdisplay / 1000;
         }
         
+        // Interlaced only when nothing progressive qualifies (R11): outweighs
+        // even the preferred bonus.
+        if (mode->flags & DRM_MODE_FLAG_INTERLACE) {
+            score -= 2000000;
+        }
+
         // Prefer higher refresh rate as tiebreaker
         if (mode->htotal && mode->vtotal) {
             double refresh = (double)mode->clock * 1000.0 / 
@@ -1368,6 +1375,9 @@ void DRMOutputManager::harmonizeRefreshRates() {
             mode->vdisplay != firstConn.currentMode.vdisplay) {
             continue;
         }
+        if (mode->flags & DRM_MODE_FLAG_INTERLACE) {
+            continue;  // never harmonize onto an interlaced mode (R11)
+        }
         double rate = (mode->htotal && mode->vtotal)
             ? (double)mode->clock * 1000.0 / ((double)mode->htotal * (double)mode->vtotal)
             : 0.0;
@@ -1386,6 +1396,9 @@ void DRMOutputManager::harmonizeRefreshRates() {
                 const drmModeModeInfo* m2 = &conn.connector->modes[k];
                 if (m2->hdisplay != conn.currentMode.hdisplay ||
                     m2->vdisplay != conn.currentMode.vdisplay) {
+                    continue;
+                }
+                if (m2->flags & DRM_MODE_FLAG_INTERLACE) {
                     continue;
                 }
                 double r2 = (m2->htotal && m2->vtotal)

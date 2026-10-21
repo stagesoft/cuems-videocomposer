@@ -75,6 +75,7 @@ struct OutputConfiguration {
     int width = 0;              // 0 = use policy default
     int height = 0;
     double refreshRate = 0.0;   // 0 = highest available
+    bool refreshInterlaced = false;  // refresh=<field rate>i asks for an interlaced mode
     
     // Canvas region
     int canvasX = 0;
