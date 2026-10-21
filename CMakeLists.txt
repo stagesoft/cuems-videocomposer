@@ -656,7 +656,6 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/display/OpenGLRenderer.cpp
     src/cuems_videocomposer/cpp/display/ShaderProgram.cpp
     src/cuems_videocomposer/cpp/display/DisplayManager.cpp
-    src/cuems_videocomposer/cpp/display/DisplayConfiguration.cpp
     src/cuems_videocomposer/cpp/display/DisplayConfigurationManager.cpp
     src/cuems_videocomposer/cpp/display/MultiOutputRenderer.cpp
     src/cuems_videocomposer/cpp/display/VirtualCanvas.cpp
