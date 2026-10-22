@@ -22,6 +22,8 @@
 #ifndef VIDEOCOMPOSER_VIDEOSHADERS_H
 #define VIDEOCOMPOSER_VIDEOSHADERS_H
 
+#include "ColorCorrectionGlsl.h"
+
 #include <string>
 
 namespace videocomposer {
@@ -72,68 +74,10 @@ void main() {
 // On modern GPUs, uniform branches are very efficient (~1-2 clock cycles per fragment)
 // because all threads in a warp/wavefront take the same path.
 //
-const std::string COLOR_CORRECTION_FUNCTIONS = R"(
-// Apply brightness: -1.0 to 1.0 (0 = no change)
-vec3 applyBrightness(vec3 color, float brightness) {
-    return color + brightness;
-}
-
-// Apply contrast: 0.0 to 2.0 (1 = no change)
-vec3 applyContrast(vec3 color, float contrast) {
-    return (color - 0.5) * contrast + 0.5;
-}
-
-// Apply saturation: 0.0 to 2.0 (1 = no change, 0 = grayscale)
-vec3 applySaturation(vec3 color, float saturation) {
-    float luminance = dot(color, vec3(0.299, 0.587, 0.114));
-    return mix(vec3(luminance), color, saturation);
-}
-
-// Apply hue rotation: -180 to 180 degrees
-vec3 applyHue(vec3 color, float hueDegrees) {
-    float hueRad = hueDegrees * 3.14159265359 / 180.0;
-    float cosH = cos(hueRad);
-    float sinH = sin(hueRad);
-    
-    // Hue rotation matrix
-    mat3 hueMatrix = mat3(
-        0.213 + cosH * 0.787 - sinH * 0.213,
-        0.213 - cosH * 0.213 + sinH * 0.143,
-        0.213 - cosH * 0.213 - sinH * 0.787,
-        
-        0.715 - cosH * 0.715 - sinH * 0.715,
-        0.715 + cosH * 0.285 + sinH * 0.140,
-        0.715 - cosH * 0.715 + sinH * 0.715,
-        
-        0.072 - cosH * 0.072 + sinH * 0.928,
-        0.072 - cosH * 0.072 - sinH * 0.283,
-        0.072 + cosH * 0.928 + sinH * 0.072
-    );
-    
-    return hueMatrix * color;
-}
-
-// Apply gamma: 0.1 to 3.0 (1 = no change)
-vec3 applyGamma(vec3 color, float gamma) {
-    return pow(max(color, vec3(0.0)), vec3(1.0 / gamma));
-}
-
-// Apply all color corrections
-vec3 applyColorCorrection(vec3 color, float brightness, float contrast, 
-                          float saturation, float hue, float gamma) {
-    vec3 result = color;
-    result = applyBrightness(result, brightness);
-    result = applyContrast(result, contrast);
-    result = applySaturation(result, saturation);
-    if (hue != 0.0) {
-        result = applyHue(result, hue);
-    }
-    if (gamma != 1.0) {
-        result = applyGamma(result, gamma);
-    }
-    return clamp(result, 0.0, 1.0);
-}
-)";
+// The text itself lives in ColorCorrectionGlsl.h (shared with the per-output
+// color blit program, so both are built from one text); this keeps the name
+// and the exact bytes the layer shaders below have always concatenated.
+const std::string COLOR_CORRECTION_FUNCTIONS = kColorCorrectionGlsl;
 
 // Fragment shader for RGBA textures (CPU frames, HAP after decompression)
 const std::string FRAGMENT_RGBA = R"(

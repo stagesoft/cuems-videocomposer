@@ -27,6 +27,7 @@
  */
 
 #include "MultiOutputRenderer.h"
+#include "OutputLutTexture.h"
 #include "../output/OutputSinkManager.h"
 #include "../layer/LayerManager.h"
 #include "../utils/Logger.h"
@@ -259,6 +260,14 @@ void MultiOutputRenderer::blitToOutputs(const std::vector<OutputSurface*>* onlyS
                 output.surface->swapBuffers();
             }
         }
+    }
+
+    // Delete the LUT textures whose last region copy went away since the last
+    // frame (OutputLutTexture's destructor only queues them). Once per frame,
+    // and only with the context current: without one the deletes would be
+    // silent no-ops, so the list is kept for the next frame instead.
+    if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
+        OutputLutTexture::drainDeferred(true);
     }
 }
 

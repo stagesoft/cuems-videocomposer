@@ -28,6 +28,9 @@
  * current framebuffer (output surface) with optional:
  * - Edge blending (soft edges for projector overlap)
  * - Geometric warping (for keystone/curved surface correction)
+ * - Per-output color: five trims and a 3D LUT before the blend ramp
+ *   (programme phase 3). Drawn with a second program (B) only on outputs
+ *   that have color; every other output keeps the original program (A).
  */
 
 #ifndef VIDEOCOMPOSER_OUTPUTBLITSHADER_H
@@ -75,6 +78,12 @@ public:
      * Check if initialized
      */
     bool isInitialized() const { return initialized_; }
+    
+    /**
+     * Check if the color program (B) compiled and linked. When false every
+     * output is drawn with program A, i.e. without color.
+     */
+    bool colorProgramAvailable() const { return colorProgramAvailable_; }
     
     /**
      * Blit a region of the canvas to the current framebuffer
@@ -131,12 +140,57 @@ private:
     GLint uWarpEnabled_ = -1;     // 0 or 1
     GLint uWarpTex_ = -1;         // warp displacement texture
     
+    // Color program (B): A's text plus trims and a 3D LUT (OutputBlitGlsl.h).
+    // Uniform locations are per program, so B has its own set for every
+    // uniform it uses; A's locations above are never used while B is bound.
+    GLuint colorProgram_ = 0;
+    GLuint colorFragmentShader_ = 0;
+    bool colorProgramAvailable_ = false;
+    
+    struct ColorLocations {
+        GLint canvasTex = -1;
+        GLint canvasSize = -1;
+        GLint sourceRect = -1;
+        GLint outputSize = -1;
+        GLint blendWidths = -1;
+        GLint blendGamma = -1;
+        GLint warpEnabled = -1;
+        GLint warpTex = -1;
+        GLint colorEnabled = -1;
+        GLint brightness = -1;
+        GLint contrast = -1;
+        GLint saturation = -1;
+        GLint hue = -1;
+        GLint gamma = -1;
+        GLint lutEnabled = -1;
+        GLint lutTex = -1;
+        GLint lutScale = -1;
+        GLint lutOffset = -1;
+    } colorLoc_;
+    
+    // Texture unit of the LUT. Never 0 or 1: a sampler3D on the unit of a
+    // sampler2D (uCanvasTex = 0, uWarpTex = 1) makes every draw fail.
+    static constexpr GLint kLutUnit = 2;
+    
     // ===== Private Methods =====
     
     /**
      * Compile and link shaders
      */
     bool compileShaders();
+    
+    /**
+     * Compile and link the color program (B). On failure logs one ERROR and
+     * leaves colorProgramAvailable_ false; never fails init().
+     */
+    void compileColorProgram();
+    
+    /**
+     * blit() with the color program bound (outputs with color only)
+     */
+    void blitColor(GLuint canvasTexture,
+                   int canvasWidth, int canvasHeight,
+                   const OutputRegion& region);
     
     /**
      * Create fullscreen quad VAO

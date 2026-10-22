@@ -26,6 +26,7 @@
 #include "DRMBackend.h"
 #include "../OpenGLRenderer.h"
 #include "../DisplayConfigurationManager.h"
+#include "../OutputLutTexture.h"
 #include "../StartupSplash.h"
 #include "../../layer/LayerManager.h"
 #include "../../layer/VideoLayer.h"
@@ -291,10 +292,27 @@ void DRMBackend::closeWindow() {
     }
 #endif
     
-    // Cleanup renderers
+    // Cleanup renderers, with the GL context current: render() releases it
+    // after every frame, and a glDelete* with no context is a silent no-op.
+    // Order matters for per-output LUTs (programme phase 3): the last
+    // shared_ptr<OutputLutTexture> drops with outputRegions_ (the owner; the
+    // renderer holds copies), so the deferred-delete list is complete only
+    // after that clear, and it is drained before the context is released.
+    // Without a context the drain only empties the list (those names die with
+    // the context and must never be deleted in a later one).
+    DRMSurface* primary = getPrimarySurface();
+    if (primary) {
+        primary->makeCurrent();
+    }
+    const bool contextCurrent = primary && eglGetCurrentContext() != EGL_NO_CONTEXT;
     multiRenderer_.reset();
     renderer_.reset();
     outputRegions_.clear();
+    OutputLutTexture::endContext();
+    OutputLutTexture::drainDeferred(contextCurrent);
+    if (primary) {
+        primary->releaseCurrent();
+    }
     
     // Cleanup surfaces
     for (auto& [name, surface] : surfaces_) {
@@ -1633,6 +1651,11 @@ void DRMBackend::buildOutputRegions() {
 }
 
 
+// NOTE (per-output color, programme phase 3): no caller today. It rebuilds every
+// region from scratch, so wiring it up as-is would silently drop each output's
+// color, LUT and draw state (OutputRegion::color/lut/colorDraw), which only
+// survive because every live rebuild copies outputRegions_ wholesale. Carry them
+// over from the old regions before calling this from anywhere.
 void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overlap) {
     outputRegions_.clear();
     
@@ -1712,6 +1735,11 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
     computeIterationOrder();
 }
 
+// NOTE (per-output color, programme phase 3): no caller today. `r = region`
+// replaces the owner's region wholesale, so a caller passing a region it built
+// itself would silently drop that output's color, LUT and draw state
+// (OutputRegion::color/lut/colorDraw). Start from a copy of the current region
+// before wiring this up.
 bool DRMBackend::configureOutputRegion(const std::string& outputName, const OutputRegion& region) {
     // Find the output
     for (auto& r : outputRegions_) {

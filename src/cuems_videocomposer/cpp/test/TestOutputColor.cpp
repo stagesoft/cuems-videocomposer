@@ -21,7 +21,8 @@
 
 /**
  * TestOutputColor.cpp - per-output color: trims, number parsing, the .cube parser
- * and its file safety (programme phase 3, plan S1).
+ * and its file safety (programme phase 3, plan S1); the blit programs' text and the
+ * region fields that carry color (S2).
  *
  * Everything here is GL-free. The properties that matter most are the ones that
  * fail silently on a rig: a LUT read with its axes transposed looks plausible, a
@@ -29,20 +30,27 @@
  */
 
 #include "display/CubeLut.h"
+#include "display/OutputBlitGlsl.h"
 #include "display/OutputColor.h"
+#include "display/OutputRegion.h"
+#include "display/VideoShaders.h"
 #include "TestFramework.h"
 
 #include <chrono>
 #include <clocale>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 using namespace videocomposer;
 
@@ -491,5 +499,142 @@ bool test_OutputColor_LutCoordHalfTexel() {
         TEST_ASSERT(near(w.coord(2, 1.1f), 1.0f - 0.5f / n, 1e-5f));
         TEST_ASSERT(near(w.coord(1, 0.5f), 0.5f));
     }
+    return true;
+}
+
+// ===== S2: the blit programs' text and the region fields that carry color =====
+
+namespace {
+
+// FNV-1a 64 of a text, to pin it without a second copy of the literal in the test
+std::uint64_t fnv1a64(std::string_view text) {
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    for (const unsigned char c : text) {
+        h ^= c;
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+// Pinned from origin/rc_1 e699229 (0.1.2-11), extracted byte for byte from the
+// R"(...)" literals of OutputBlitShader.cpp (getFragmentShaderSource) and
+// VideoShaders.h (COLOR_CORRECTION_FUNCTIONS).
+constexpr std::uint64_t kFragmentAFnv = 0x0fc4941bb432ca71ull;
+constexpr std::size_t kFragmentALength = 2489;
+constexpr std::uint64_t kColorFunctionsFnv = 0xfb73f10656df2e68ull;
+constexpr std::size_t kColorFunctionsLength = 1912;
+
+} // namespace
+
+// Program A - what every output without color draws with - is the 0.1.2-11 text,
+// not one character changed (K5/K6a identity by construction)
+bool test_OutputBlitShader_ProgramATextUnchanged() {
+    const std::string_view a(OutputBlitGlsl::fragmentA());
+    TEST_ASSERT_EQ(a.size(), kFragmentALength);
+    TEST_ASSERT(fnv1a64(a) == kFragmentAFnv);
+    return true;
+}
+
+// Program B is A plus the shared trims and the LUT stage: the trims are the very
+// text the layer shaders use, A's ramp and output survive verbatim, and every new
+// uniform is declared exactly once
+bool test_OutputBlitShader_ProgramBEmbedsSharedGlsl() {
+    const std::string b = OutputBlitGlsl::assembleFragmentB();
+    TEST_ASSERT(!b.empty());
+    TEST_ASSERT(b.find(kColorCorrectionGlsl) != std::string::npos);
+    TEST_ASSERT_EQ(OutputBlitGlsl::countOccurrences(b, kColorCorrectionGlsl), 1u);
+
+    // From the ramp to the end of main(), B is A
+    const std::string a(OutputBlitGlsl::fragmentA());
+    const std::size_t ramp = a.find(OutputBlitGlsl::kRampMarker);
+    TEST_ASSERT(ramp != std::string::npos);
+    const std::string rampToEnd = a.substr(ramp);
+    TEST_ASSERT(rampToEnd.find("fragColor = vec4(color.rgb * alpha, 1.0);") != std::string::npos);
+    TEST_ASSERT(b.size() > rampToEnd.size());
+    TEST_ASSERT(b.compare(b.size() - rampToEnd.size(), rampToEnd.size(), rampToEnd) == 0);
+
+    // The part of A before the declarations is B's beginning, A's uniforms included
+    const std::size_t decl = a.find(OutputBlitGlsl::kDeclarationAnchor);
+    TEST_ASSERT(decl != std::string::npos);
+    TEST_ASSERT(b.compare(0, decl, a, 0, decl) == 0);
+
+    for (const char* u : {"uniform int uColorEnabled;", "uniform float uBrightness;",
+                          "uniform float uContrast;", "uniform float uSaturation;",
+                          "uniform float uHue;", "uniform float uGamma;",
+                          "uniform int uLutEnabled;", "uniform sampler3D uLutTex;",
+                          "uniform vec3 uLutScale;", "uniform vec3 uLutOffset;"}) {
+        if (OutputBlitGlsl::countOccurrences(b, u) != 1) {
+            std::cerr << "  B does not declare '" << u << "' exactly once\n";
+            return false;
+        }
+    }
+
+    // The stages sit between the canvas sample and the ramp, trims before the LUT
+    const std::size_t sample = b.find(OutputBlitGlsl::kSampleAnchor);
+    const std::size_t trims = b.find("color.rgb = applyColorCorrection(");
+    const std::size_t lut = b.find("color.rgb = textureLod(uLutTex, color.rgb * uLutScale + uLutOffset, 0.0).rgb;");
+    const std::size_t bRamp = b.find(OutputBlitGlsl::kRampMarker);
+    TEST_ASSERT(sample != std::string::npos && trims != std::string::npos &&
+                lut != std::string::npos && bRamp != std::string::npos);
+    TEST_ASSERT(sample < trims && trims < lut && lut < bRamp);
+
+    // A itself is untouched by the assembly and declares none of B's uniforms
+    TEST_ASSERT(a.find("uLutTex") == std::string::npos);
+    TEST_ASSERT(a.find("uColorEnabled") == std::string::npos);
+    return true;
+}
+
+// The layer shaders still concatenate the 0.1.2-11 color functions, byte for byte
+bool test_VideoShaders_ColorFunctionsUnchanged() {
+    TEST_ASSERT_EQ(VideoShaders::COLOR_CORRECTION_FUNCTIONS.size(), kColorFunctionsLength);
+    TEST_ASSERT(fnv1a64(VideoShaders::COLOR_CORRECTION_FUNCTIONS) == kColorFunctionsFnv);
+    TEST_ASSERT(VideoShaders::COLOR_CORRECTION_FUNCTIONS == std::string(kColorCorrectionGlsl));
+    // ...and a layer shader built from it carries it verbatim
+    TEST_ASSERT(VideoShaders::FRAGMENT_RGBA.find(kColorCorrectionGlsl) != std::string::npos);
+    return true;
+}
+
+// Every rebuild copies the owner's regions wholesale (single owner, plan 2.5), so a
+// plain copy must carry the color, the LUT (shared, not duplicated) and the draw state
+bool test_OutputRegion_CopyCarriesLut() {
+    OutputRegion owner = OutputRegion::createDefault("HDMI-A-2", 1920, 1080);
+    TEST_ASSERT(!owner.hasColor());
+    TEST_ASSERT(owner.colorDraw != nullptr);
+
+    owner.color.contrast = 1.2f;
+    owner.color.lutPath = "/etc/cuems/luts/p2.cube";
+    owner.color.lutStatus = LutStatus::Ok;
+    // A non-null LUT handle without a GL texture: only pointer identity is checked
+    // here and the pointee is never dereferenced (OutputLutTexture needs a context).
+    auto anchor = std::make_shared<int>(0);
+    owner.lut = std::shared_ptr<OutputLutTexture>(anchor, reinterpret_cast<OutputLutTexture*>(anchor.get()));
+    TEST_ASSERT(owner.hasColor());
+
+    OutputRegion copy = owner;
+    TEST_ASSERT(near(copy.color.contrast, 1.2f));
+    TEST_ASSERT(copy.color.lutPath == owner.color.lutPath);
+    TEST_ASSERT(copy.color.lutStatus == LutStatus::Ok);
+    TEST_ASSERT(copy.lut == owner.lut);
+    TEST_ASSERT(copy.colorDraw == owner.colorDraw);
+    TEST_ASSERT(copy.hasColor());
+
+    // A flag set through the renderer's copy is visible through the owner's
+    copy.colorDraw->checked = true;
+    copy.colorDraw->failed = true;
+    TEST_ASSERT(owner.colorDraw->checked && owner.colorDraw->failed);
+
+    // Same through assignment and a vector copy (the renderer's configureOutputs path)
+    std::vector<OutputRegion> regions{owner};
+    std::vector<OutputRegion> rendererCopy;
+    rendererCopy = regions;
+    TEST_ASSERT(rendererCopy[0].lut == owner.lut);
+    TEST_ASSERT(rendererCopy[0].colorDraw == owner.colorDraw);
+
+    // LUT only (no trims) still counts as color; neither counts as none
+    OutputRegion lutOnly = OutputRegion::createDefault("HDMI-A-1", 1920, 1080);
+    lutOnly.lut = owner.lut;
+    TEST_ASSERT(lutOnly.hasColor());
+    lutOnly.lut.reset();
+    TEST_ASSERT(!lutOnly.hasColor());
     return true;
 }

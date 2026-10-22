@@ -661,6 +661,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/display/MultiOutputRenderer.cpp
     src/cuems_videocomposer/cpp/display/VirtualCanvas.cpp
     src/cuems_videocomposer/cpp/display/OutputBlitShader.cpp
+    src/cuems_videocomposer/cpp/display/OutputLutTexture.cpp
     src/cuems_videocomposer/cpp/display/CubeLut.cpp
     src/cuems_videocomposer/cpp/display/HeadlessDisplay.cpp
     # Wayland backend (conditional compilation via #ifdef HAVE_WAYLAND)
@@ -944,6 +945,38 @@ target_compile_definitions(cuems-videocomposer PRIVATE CUEMS_DEB_VERSION="${CUEM
 # main() points NDI_CONFIG_DIR here unless the variable is already set.
 set(CUEMS_NDI_CONFIG_DIR "${CMAKE_INSTALL_PREFIX}/share/cuems-videocomposer/ndi")
 target_compile_definitions(cuems-videocomposer PRIVATE CUEMS_NDI_CONFIG_DIR="${CUEMS_NDI_CONFIG_DIR}")
+
+# Build-time validation of the output blit GLSL (per-output color, programme
+# phase 3). dump_blit_glsl is a GL-free host tool that writes the exact text the
+# compositor compiles (display/OutputBlitGlsl.h: program A, program B assembled
+# from it, and their vertex shader); glslangValidator then checks all three as
+# part of ALL. Absent tool: a WARNING and no check, unless VC_REQUIRE_GLSLANG is
+# ON (debian/rules and CI set it), which makes it a configure error.
+option(VC_REQUIRE_GLSLANG "Fail configure if glslangValidator is missing" OFF)
+add_executable(dump_blit_glsl tools/dump_blit_glsl.cpp)
+target_include_directories(dump_blit_glsl PRIVATE src/cuems_videocomposer/cpp)
+find_program(GLSLANG_VALIDATOR glslangValidator)
+if(GLSLANG_VALIDATOR)
+    set(BLIT_GLSL_DIR "${CMAKE_BINARY_DIR}/blit_glsl")
+    add_custom_target(validate_blit_glsl ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${BLIT_GLSL_DIR}"
+        COMMAND $<TARGET_FILE:dump_blit_glsl> "${BLIT_GLSL_DIR}"
+        COMMAND ${GLSLANG_VALIDATOR} -S vert "${BLIT_GLSL_DIR}/blit.vert"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/A.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/B.frag"
+        DEPENDS dump_blit_glsl
+        COMMENT "Validating the output blit GLSL (programs A and B) with glslangValidator"
+        VERBATIM
+    )
+    message(STATUS "glslangValidator found: ${GLSLANG_VALIDATOR} - output blit GLSL validated at build time")
+elseif(VC_REQUIRE_GLSLANG)
+    message(FATAL_ERROR "glslangValidator not found and VC_REQUIRE_GLSLANG is ON "
+                        "(install glslang-tools): the output blit GLSL must be validated at build time")
+else()
+    message(WARNING "glslangValidator not found - the output blit GLSL (programs A and B) "
+                    "is NOT validated at build time. Install glslang-tools, or configure "
+                    "with -DVC_REQUIRE_GLSLANG=ON to make this an error.")
+endif()
 
 # Test executable (optional)
 option(BUILD_TESTS "Build test suite" ON)
