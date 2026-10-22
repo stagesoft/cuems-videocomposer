@@ -661,6 +661,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/display/MultiOutputRenderer.cpp
     src/cuems_videocomposer/cpp/display/VirtualCanvas.cpp
     src/cuems_videocomposer/cpp/display/OutputBlitShader.cpp
+    src/cuems_videocomposer/cpp/display/CubeLut.cpp
     src/cuems_videocomposer/cpp/display/HeadlessDisplay.cpp
     # Wayland backend (conditional compilation via #ifdef HAVE_WAYLAND)
     src/cuems_videocomposer/cpp/display/WaylandDisplay.cpp
@@ -963,6 +964,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestRecoveryPolicy.cpp
         src/cuems_videocomposer/cpp/test/TestHangGuard.cpp
         src/cuems_videocomposer/cpp/test/TestNdiPreview.cpp
+        src/cuems_videocomposer/cpp/test/TestOutputColor.cpp
     )
     
     # C++ implementation files needed by tests
@@ -996,6 +998,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/guard/HangGuard.cpp
         src/cuems_videocomposer/cpp/guard/SaturationSignals.cpp
         src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
+        src/cuems_videocomposer/cpp/display/CubeLut.cpp
     )
 
     # AsyncVideoLoader opens ndi:// sources when the SDK is there
