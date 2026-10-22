@@ -998,6 +998,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestHangGuard.cpp
         src/cuems_videocomposer/cpp/test/TestNdiPreview.cpp
         src/cuems_videocomposer/cpp/test/TestOutputColor.cpp
+        src/cuems_videocomposer/cpp/test/TestDisplayConfigColor.cpp
     )
     
     # C++ implementation files needed by tests
@@ -1032,6 +1033,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/guard/SaturationSignals.cpp
         src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
         src/cuems_videocomposer/cpp/display/CubeLut.cpp
+        src/cuems_videocomposer/cpp/display/DisplayConfigurationManager.cpp
     )
 
     # AsyncVideoLoader opens ndi:// sources when the SDK is there

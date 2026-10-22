@@ -420,6 +420,17 @@ private:
     // Initialize Virtual Canvas mode
     bool initVirtualCanvas();
     
+    // Per-output color from display.conf (programme phase 3): copy each configured
+    // output's color into outputRegions_ (the one owner), load and upload its LUT,
+    // log one paste-ready line per output. Called from initVirtualCanvas() once
+    // outputRegions_ is final, under every canvas_layout; needs the context current.
+    void applyOutputColorFromConfig();
+    
+    // One ERROR per output with color in display.conf, when no per-output color
+    // can run (`why`: DRM in legacy mode, or openWindow() failing so the app falls
+    // back to headless). Never a silent no-op.
+    void logConfiguredColorUnsupported(const char* why) const;
+    
     // Render using Virtual Canvas
     void renderVirtualCanvas(LayerManager* layerManager, OSDManager* osdManager);
     

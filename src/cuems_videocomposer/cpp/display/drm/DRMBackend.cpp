@@ -26,6 +26,7 @@
 #include "DRMBackend.h"
 #include "../OpenGLRenderer.h"
 #include "../DisplayConfigurationManager.h"
+#include "../OutputColorConfig.h"
 #include "../OutputLutTexture.h"
 #include "../StartupSplash.h"
 #include "../../layer/LayerManager.h"
@@ -58,6 +59,11 @@ namespace {
 // Single source of truth for the runtime display-config path
 // (consumed by openWindow() and initVirtualCanvas()).
 constexpr const char* kStartupDisplayConf = "/run/cuems/display.conf";
+
+// openWindow() failed: the app falls back to HeadlessDisplay, which never reads
+// display.conf and has no per-output color.
+constexpr const char* kNoBackendForColor =
+    "the DRM backend failed to open (the headless fallback has no per-output color)";
 }
 
 DRMBackend::DRMBackend() {
@@ -77,16 +83,14 @@ bool DRMBackend::openWindow() {
     
     LOG_INFO << "DRMBackend: Opening DRM display";
     
-    // Initialize DRM output manager
-    if (!outputManager_->init(devicePath_)) {
-        LOG_ERROR << "DRMBackend: Failed to initialize DRM output manager";
-        return false;
-    }
-    
     // Load the startup display config once, here, so its resolution_policy can inform
     // the global modeset below and its per-output/region data is reused by
     // initVirtualCanvas() without a second parse. Global-mode precedence:
     //   CLI --resolution  >  display.conf resolution_policy  >  prior (app config / default)
+    // Parsed before the DRM device is opened (it touches no device) so that every
+    // failure return below can still say which outputs had color configured: when
+    // openWindow() fails the app falls back to headless and this backend - the only
+    // reader of display.conf - is destroyed (per-output color, plan 2.6 r13).
     if (configManager_) {
         ResolutionPolicy priorPolicy = configManager_->getResolutionPolicy();
         if (configManager_->loadFromFile(kStartupDisplayConf)) {
@@ -100,6 +104,13 @@ bool DRMBackend::openWindow() {
         }
     }
 
+    // Initialize DRM output manager
+    if (!outputManager_->init(devicePath_)) {
+        LOG_ERROR << "DRMBackend: Failed to initialize DRM output manager";
+        logConfiguredColorUnsupported(kNoBackendForColor);
+        return false;
+    }
+    
     // Apply resolution mode before creating surfaces
     // This modifies the output dimensions in outputManager_
     if (configManager_) {
@@ -144,6 +155,7 @@ bool DRMBackend::openWindow() {
     if (outputs.empty()) {
         LOG_ERROR << "DRMBackend: No connected outputs found";
         outputManager_->cleanup();
+        logConfiguredColorUnsupported(kNoBackendForColor);
         return false;
     }
     
@@ -200,6 +212,7 @@ bool DRMBackend::openWindow() {
     if (surfaces_.empty()) {
         LOG_ERROR << "DRMBackend: No surfaces could be created";
         outputManager_->cleanup();
+        logConfiguredColorUnsupported(kNoBackendForColor);
         return false;
     }
     
@@ -258,6 +271,8 @@ bool DRMBackend::openWindow() {
         
         if (!useVirtualCanvas_) {
             // Legacy mode: single OpenGLRenderer
+            logConfiguredColorUnsupported(
+                "this display backend has no per-output color (DRM legacy mode, no virtual canvas)");
             renderer_ = std::make_unique<OpenGLRenderer>();
             if (!renderer_->init()) {
                 LOG_ERROR << "DRMBackend: Failed to initialize OpenGL renderer";
@@ -1489,6 +1504,11 @@ bool DRMBackend::initVirtualCanvas() {
         }
     }
 
+    // outputRegions_ is final: per-output color goes onto it now, under every
+    // canvas_layout (blend= above only reaches a region under custom), so the
+    // configureOutputs() below hands the renderer regions that already carry it.
+    applyOutputColorFromConfig();
+
     // Configure MultiOutputRenderer with surfaces and regions (matching order)
     std::vector<OutputSurface*> surfacePtrs;
     for (const auto& region : outputRegions_) {
@@ -1506,6 +1526,101 @@ bool DRMBackend::initVirtualCanvas() {
     computeIterationOrder();
 
     return true;
+}
+
+void DRMBackend::applyOutputColorFromConfig() {
+    if (!configManager_) {
+        return;
+    }
+    if (configManager_->applyColorToRegions(outputRegions_) == 0) {
+        return;   // no color configured on any connected output
+    }
+
+    // A connector with color in display.conf but no region (declared, not
+    // connected) gets nothing here, as for every other per-output key.
+    const bool programAvailable = multiRenderer_ && multiRenderer_->colorProgramAvailable();
+    const bool contextCurrent = eglGetCurrentContext() != EGL_NO_CONTEXT;
+
+    for (auto& region : outputRegions_) {
+        OutputColor& color = region.color;
+        if (!color.trimsActive() && !color.lutConfigured()) {
+            continue;
+        }
+
+        std::string lutNote;    // "(...)" after color_lut= on the INFO line
+        std::string lutError;   // reason for the NOT APPLIED line
+        std::size_t clamped = 0;
+        if (color.lutConfigured()) {
+            if (!programAvailable) {
+                lutNote = "not loaded";
+            } else if (!contextCurrent) {
+                color.lutStatus = LutStatus::Invalid;
+                lutNote = lutStatusName(color.lutStatus);
+                lutError = "no GL context current to upload it";
+            } else {
+                CubeLut cube;
+                const CubeLoadResult loaded = loadCubeLutFile(color.lutPath, cube);
+                if (!loaded.ok) {
+                    color.lutStatus = loaded.notFound ? LutStatus::Missing : LutStatus::Invalid;
+                    lutNote = lutStatusName(color.lutStatus);
+                    lutError = color.lutPath + ": " + loaded.error;
+                } else {
+                    std::string uploadError;
+                    auto texture = OutputLutTexture::create(cube, uploadError);
+                    if (!texture) {
+                        color.lutStatus = LutStatus::Invalid;
+                        lutNote = lutStatusName(color.lutStatus);
+                        lutError = color.lutPath + ": " + uploadError;
+                    } else {
+                        region.lut = std::move(texture);
+                        color.lutStatus = LutStatus::Ok;
+                        clamped = cube.clampedValues;
+                        std::ostringstream note;
+                        note << "ok, " << cube.size << "^3, parsed in "
+                             << std::lround(loaded.parseMs) << " ms";
+                        lutNote = note.str();
+                    }
+                }
+            }
+        }
+
+        // Paste-ready: the keys off their default, as display.conf takes them
+        std::ostringstream line;
+        line << "OutputColor: " << region.name << " " << colorConfigLine(color);
+        if (!lutNote.empty()) {
+            line << " (" << lutNote << ")";
+        }
+        LOG_INFO << line.str();
+
+        if (!programAvailable) {
+            LOG_ERROR << "OutputColor: " << region.name
+                      << " color configured but the color program is unavailable"
+                      << " — running without color";
+            continue;
+        }
+        if (!lutError.empty()) {
+            LOG_ERROR << "OutputColor: " << region.name << " color_lut=" << color.lutValue
+                      << " NOT APPLIED: " << lutError << " — output runs with trims only";
+        }
+        if (clamped > 0) {
+            LOG_WARNING << "OutputColor: " << region.name << " color_lut=" << color.lutValue
+                        << ": " << clamped << " data value(s) outside [0, 1] clamped"
+                        << " (an HDR-authored LUT? the outputs are SDR)";
+        }
+    }
+}
+
+void DRMBackend::logConfiguredColorUnsupported(const char* why) const {
+    if (!configManager_) {
+        return;
+    }
+    for (const auto& outConfig : configManager_->getConfiguration().outputs) {
+        if (!outConfig.hasColor() || !outConfig.enabled) {
+            continue;   // enabled=false: the output stays dark anyway
+        }
+        LOG_ERROR << "OutputColor: " << outConfig.name << " color configured but " << why
+                  << " — running without color";
+    }
 }
 
 std::vector<std::string> DRMBackend::getSortedOutputNames() const {

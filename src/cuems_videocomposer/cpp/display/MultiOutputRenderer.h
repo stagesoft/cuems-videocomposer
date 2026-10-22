@@ -254,6 +254,14 @@ public:
      */
     const OutputInfo* getOutputInfo(int index) const;
     
+    /**
+     * Whether the per-output color blit program linked (programme phase 3). When
+     * false every output is drawn without color, whatever its region carries.
+     */
+    bool colorProgramAvailable() const {
+        return blitShader_ && blitShader_->colorProgramAvailable();
+    }
+    
 private:
     /**
      * Per-output rendering state

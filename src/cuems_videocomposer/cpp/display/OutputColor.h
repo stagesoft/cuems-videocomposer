@@ -135,6 +135,7 @@ struct OutputColor {
     float gamma = 1.0f;       // 0.1 to 3.0 (1 = no change; > 1 brightens, pow(x, 1/g))
 
     std::string lutPath;      ///< resolved path of the configured LUT, empty when none
+    std::string lutValue;     ///< the LUT as the operator wrote it (display.conf), for paste-ready lines
     LutStatus lutStatus = LutStatus::None;
 
     /** Same rule as LayerProperties::ColorAdjustment::isActive(): any trim off its default. */
