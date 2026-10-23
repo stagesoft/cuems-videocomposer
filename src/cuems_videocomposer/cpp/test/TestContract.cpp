@@ -31,8 +31,13 @@
 #include <nng/protocol/pubsub0/sub.h>
 #include <nng/protocol/reqrep0/req.h>
 
+#include <cerrno>
 #include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -117,6 +122,47 @@ bool requestOnce(const std::string& url, const std::string& body, std::string& r
     }
     nng_close(req);
     return ok;
+}
+
+// Connects to an ipc:// REP socket without nng, does the SP handshake as a REQ
+// peer and announces a message of `bytes` (IPC frame: type 0x01 + 64-bit
+// big-endian length). Returns true when the server drops the connection
+// (EOF/reset) instead of reading the payload, i.e. NNG_OPT_RECVMAXSZ applied.
+bool sendOversizedRaw(const std::string& url, uint64_t bytes) {
+    const std::string prefix = "ipc://";
+    if (url.compare(0, prefix.size(), prefix) != 0) return false;
+    const std::string path = url.substr(prefix.size());
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    if (path.size() >= sizeof(addr.sun_path)) return false;
+    std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return false;
+    timeval tv{1, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    bool dropped = false;
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+        const unsigned char hello[8] = {0x00, 'S', 'P', 0x00, 0x00, 0x30, 0x00, 0x00};  // REQ0 = 0x0030
+        unsigned char peer[8];
+        unsigned char frame[9] = {0x01};
+        for (int i = 0; i < 8; ++i) frame[1 + i] = static_cast<unsigned char>(bytes >> (56 - 8 * i));
+        if (::send(fd, hello, sizeof(hello), MSG_NOSIGNAL) == sizeof(hello) &&
+            ::recv(fd, peer, sizeof(peer), MSG_WAITALL) == sizeof(peer) &&
+            ::send(fd, frame, sizeof(frame), MSG_NOSIGNAL) == sizeof(frame)) {
+            // The server should close as soon as it reads the length; a few KB of
+            // payload is enough to show it never reads the rest.
+            const std::string chunk(4096, '{');
+            ::send(fd, chunk.data(), chunk.size(), MSG_NOSIGNAL);
+            char c;
+            const ssize_t n = ::recv(fd, &c, 1, 0);
+            dropped = n == 0 || (n < 0 && (errno == ECONNRESET || errno == EPIPE));
+        }
+    }
+    ::close(fd);
+    if (!dropped) std::cerr << "[server did not drop the oversized request] ";
+    return dropped;
 }
 
 }  // namespace
@@ -336,16 +382,12 @@ bool test_Contract_OversizedRequestDoesNotKillServer() {
     cfg.pubUrl = tmpUrl("bigpub");
     ContractServer s(holder, identity(), cfg);
     if (!s.start()) return false;
-    // The abusive client runs detached: with nng 1.5.2 its own nng_close() can
-    // block while the oversized message is still in flight. That is the
-    // client's problem; what matters is that the server keeps serving others.
-    const std::string url = cfg.repUrl;
-    std::thread([url] {
-        std::string ignored;
-        const std::string huge(10 * 1024 * 1024, '{');
-        requestOnce(url, huge, ignored, 500);  // dropped by RECVMAXSZ: no reply expected
-    }).detach();
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // The abusive client speaks raw SP-over-IPC instead of using an nng socket:
+    // an nng req socket in this process whose 10 MB send never completes blocks
+    // nng's process-wide pipe reaper, and with it every later nng_close() here
+    // (a ~1-in-5 hang on .111). In the VC the abuser is another process, so only
+    // the server side matters: it must drop the connection and keep serving.
+    if (!sendOversizedRaw(cfg.repUrl, 10 * 1024 * 1024)) return false;
     std::string reply;
     const bool ok = requestOnce(cfg.repUrl, R"({"v":1,"id":"after","op":"hello"})", reply);
     return ok && json::parse(reply)["id"] == "after";
