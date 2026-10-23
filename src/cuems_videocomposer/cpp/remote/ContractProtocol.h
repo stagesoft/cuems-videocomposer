@@ -23,6 +23,7 @@
 #define VIDEOCOMPOSER_CONTRACTPROTOCOL_H
 
 #include "ContractTypes.h"
+#include "../display/ShowLock.h"
 
 #include <cstdint>
 #include <string>
@@ -44,8 +45,14 @@ public:
         std::string hostname;
         int64_t pid = 0;
         std::vector<std::string> caps;
-        std::string showLockPath = "/tmp/cuems.show.lock";
+        std::string showLockPath = kShowLockPath;   // the gate's file (display/ShowLock.h)
     };
+
+    /// Capability tokens for get_caps. "output_color" (per-output color in
+    /// get_state, programme phase 3) only when the virtual canvas is up and the
+    /// color program linked: a client must not be told a correction can show
+    /// where none can.
+    static std::vector<std::string> caps(bool outputColor);
 
     /// One request in, one reply out. Never throws. 'cachedHardware', when given,
     /// is the serialised get_hardware result for this snapshot (hardwareJson()):

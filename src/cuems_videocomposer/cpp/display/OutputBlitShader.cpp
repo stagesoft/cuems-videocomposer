@@ -261,6 +261,12 @@ void OutputBlitShader::compileColorProgram() {
     
     const std::string source = OutputBlitGlsl::assembleFragmentB();
     std::string reason;
+#ifdef VC_TEST_FORCE_COLOR_PROGRAM_FAIL
+    // Test builds only (-DVC_TEST_FORCE_COLOR_PROGRAM_FAIL=ON, never in the deb):
+    // B "fails to link" so the rig can check the no-B path end to end -- every
+    // output on A, applied=false and no output_color token on the contract.
+    reason = "forced off by the VC_TEST_FORCE_COLOR_PROGRAM_FAIL test build";
+#else
     if (source.empty()) {
         reason = "its text could not be assembled from program A (anchor not found exactly once)";
     } else {
@@ -283,6 +289,7 @@ void OutputBlitShader::compileColorProgram() {
             }
         }
     }
+#endif
     
     if (!reason.empty()) {
         LOG_ERROR << "OutputBlitShader: color program unavailable (" << reason

@@ -68,12 +68,27 @@ struct ContractOutputHardware {
     std::vector<ContractMode> modes;
 };
 
+/// Per-output color as the backend holds it (programme phase 3, plan 2.7): plain
+/// copies of OutputColor's fields, so no GL object and no shared_ptr crosses into
+/// the contract threads. Identity values when nothing is configured.
+struct ContractOutputColor {
+    float brightness = 0.0f;
+    float contrast = 1.0f;
+    float saturation = 1.0f;
+    float hue = 0.0f;
+    float gamma = 1.0f;
+    std::string lut;                  // resolved path; empty = none configured (JSON null)
+    std::string lutStatus = "none";   // "none" | "ok" | "missing" | "invalid"
+    bool applied = false;             // color program linked and this output's color draw not failed
+};
+
 struct ContractOutputState {
     std::string connector;
     bool enabled = false;
     int x = 0, y = 0, width = 0, height = 0;   // canvas region
     float blendLeft = 0, blendRight = 0, blendTop = 0, blendBottom = 0, blendGamma = 2.2f;
     std::string modeId;               // current mode id, empty when not driven
+    ContractOutputColor color;
 };
 
 struct ContractState {

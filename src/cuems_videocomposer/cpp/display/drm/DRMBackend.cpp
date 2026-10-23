@@ -363,6 +363,9 @@ void DRMBackend::render(LayerManager* layerManager, OSDManager* osdManager) {
         return;
     }
 #ifdef HAVE_CONTRACT
+    if (!contractDirty_ && contractServer_ && contractColorDrawFailures_ != countColorDrawFailures()) {
+        contractDirty_ = true;   // a first color draw failed since the last snapshot: applied -> false
+    }
     if (contractDirty_) {
         contractDirty_ = false;
         publishContractSnapshot(true);
@@ -1699,9 +1702,10 @@ OutputColorStatus DRMBackend::findColorRegion(const std::string& outputName, Out
 }
 
 void DRMBackend::pushOutputColor(const OutputRegion& region) {
-    // S5 (feat/output-color-contract): mark the contract snapshot dirty here
-    // (contractDirty_ = true): every hot color change passes through this push.
     multiRenderer_->setOutputColor(region.name, region.color, region.lut, region.colorDraw);
+    // Every hot color change (trims, LUT, lut none, reset) passes through this
+    // push: the contract re-reads state on the next frame.
+    contractDirty_ = true;
 }
 
 OutputColorStatus DRMBackend::configureOutputColor(const std::string& outputName,
@@ -2413,7 +2417,11 @@ void DRMBackend::startContract() {
         id.hostname = host;
     }
     id.pid = static_cast<int64_t>(getpid());
-    id.caps = {"report_v1", "mode_timing", "interlace_flag"};
+    // output_color only when the virtual canvas is up and program B linked
+    // (plan 2.7 r9). Both are settled by now (initVirtualCanvas ran inside
+    // openWindow) and do not change until closeWindow stops this server.
+    id.caps = ContractProtocol::caps(useVirtualCanvas_ && multiRenderer_ &&
+                                     multiRenderer_->colorProgramAvailable());
     contractServer_ = std::make_unique<ContractServer>(contractSnapshot_, id);
     publishContractSnapshot(false);
     if (!contractServer_->start()) {
@@ -2463,6 +2471,12 @@ void DRMBackend::publishContractSnapshot(bool announce) {
         snap.state.canvasHeight = ch;
     }
     snap.state.configSource = access(kStartupDisplayConf, R_OK) == 0 ? kStartupDisplayConf : "drm_defaults";
+    // Per-output color: the same report as output/list's output_color lines, so
+    // `applied` has one definition (program linked, this output's draw not
+    // failed). Empty in legacy mode: identity values, applied=false.
+    std::vector<OutputColorReport> colors;
+    getOutputColors(colors);
+    contractColorDrawFailures_ = countColorDrawFailures();
     for (const auto& region : outputRegions_) {
         ContractOutputState o;
         o.connector = region.name;
@@ -2480,6 +2494,20 @@ void DRMBackend::publishContractSnapshot(bool announce) {
         if (it != currentIdByConnector.end()) {
             o.modeId = it->second;
         }
+        for (const auto& report : colors) {
+            if (report.name != region.name) {
+                continue;
+            }
+            o.color.brightness = report.color.brightness;
+            o.color.contrast = report.color.contrast;
+            o.color.saturation = report.color.saturation;
+            o.color.hue = report.color.hue;
+            o.color.gamma = report.color.gamma;
+            o.color.lut = report.color.lutPath;
+            o.color.lutStatus = lutStatusName(report.color.lutStatus);
+            o.color.applied = report.applied;
+            break;
+        }
         snap.state.outputs.push_back(std::move(o));
     }
     contractSnapshot_.set(std::move(snap));
@@ -2487,6 +2515,19 @@ void DRMBackend::publishContractSnapshot(bool announce) {
         contractServer_->publish(ContractProtocol::eventStateChanged(contractServer_->nextSeq(),
                                                                      contractServer_->pid()));
     }
+}
+
+std::size_t DRMBackend::countColorDrawFailures() const {
+    // The flag is set on the renderer's copy during a draw and shared with the
+    // owner (ColorDrawState); it only goes false -> true until a color change
+    // replaces it, and that change marks the contract dirty anyway.
+    std::size_t failures = 0;
+    for (const auto& region : outputRegions_) {
+        if (region.colorDraw && region.colorDraw->failed) {
+            ++failures;
+        }
+    }
+    return failures;
 }
 
 void DRMBackend::publishContractWarning(const std::string& kind, const std::string& detail) {

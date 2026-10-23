@@ -1016,6 +1016,15 @@ else()
                     "with -DVC_REQUIRE_GLSLANG=ON to make this an error.")
 endif()
 
+# Test builds only, never in the deb: program B reports a link failure, so a rig
+# can check the no-color path end to end (every output on A, applied=false in
+# get_state, no output_color token in get_caps).
+option(VC_TEST_FORCE_COLOR_PROGRAM_FAIL "TEST ONLY: force the per-output color program to fail" OFF)
+if(VC_TEST_FORCE_COLOR_PROGRAM_FAIL)
+    target_compile_definitions(cuems-videocomposer PRIVATE VC_TEST_FORCE_COLOR_PROGRAM_FAIL=1)
+    message(WARNING "VC_TEST_FORCE_COLOR_PROGRAM_FAIL=ON - per-output color is disabled; test build only")
+endif()
+
 # Test executable (optional)
 option(BUILD_TESTS "Build test suite" ON)
 if(BUILD_TESTS)

@@ -370,6 +370,11 @@ private:
     void startContract();
     void publishContractSnapshot(bool announce);
     void publishContractWarning(const std::string& kind, const std::string& detail);
+    // Outputs whose first color draw failed, as of the last snapshot: a failure
+    // happens during a draw, not in a config call, so render() compares this
+    // count to republish `applied=false` (programme phase 3, plan 2.7 r9).
+    std::size_t contractColorDrawFailures_ = 0;
+    std::size_t countColorDrawFailures() const;
 #endif
 
     /**

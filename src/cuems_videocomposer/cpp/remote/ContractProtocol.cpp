@@ -23,6 +23,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <set>
 #include <system_error>
@@ -35,6 +37,27 @@ namespace {
 
 double round2(double v) {
     return static_cast<double>(static_cast<long long>(v * 100.0 + (v >= 0 ? 0.5 : -0.5))) / 100.0;
+}
+
+// A float as the decimal people wrote (1.08f -> 1.08, not 1.0800000429153442):
+// seven significant digits are all a float carries.
+double floatValue(float v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.7g", static_cast<double>(v));
+    return std::strtod(buf, nullptr);
+}
+
+json colorJson(const ContractOutputColor& c) {
+    return json{
+        {"brightness", floatValue(c.brightness)},
+        {"contrast", floatValue(c.contrast)},
+        {"saturation", floatValue(c.saturation)},
+        {"hue", floatValue(c.hue)},
+        {"gamma", floatValue(c.gamma)},
+        {"lut", c.lut.empty() ? json(nullptr) : json(c.lut)},
+        {"lut_status", c.lutStatus},
+        {"applied", c.applied},
+    };
 }
 
 json modeJson(const ContractMode& m) {
@@ -119,6 +142,7 @@ json stateDoc(const ContractSnapshot& s, bool showLoaded) {
             {"blend", json{{"left", o.blendLeft}, {"right", o.blendRight}, {"top", o.blendTop},
                            {"bottom", o.blendBottom}, {"gamma", o.blendGamma}}},
             {"current", o.modeId.empty() ? json(nullptr) : json(o.modeId)},
+            {"color", colorJson(o.color)},
         });
     }
     return json{
@@ -196,6 +220,14 @@ std::string ContractProtocol::handle(const std::string& request, const ContractS
         return ok(id, stateDoc(snapshot, lockPresent(identity.showLockPath)));
     }
     return err(id, "unsupported_op", "unknown op '" + op + "'");
+}
+
+std::vector<std::string> ContractProtocol::caps(bool outputColor) {
+    std::vector<std::string> list = {"report_v1", "mode_timing", "interlace_flag"};
+    if (outputColor) {
+        list.push_back("output_color");
+    }
+    return list;
 }
 
 std::string ContractProtocol::hardwareJson(const ContractSnapshot& snapshot) {
