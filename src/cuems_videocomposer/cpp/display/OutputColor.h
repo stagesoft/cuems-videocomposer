@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -226,6 +227,48 @@ struct OutputColor {
         g = std::clamp(g, 0.0f, 1.0f);
         b = std::clamp(b, 0.0f, 1.0f);
     }
+};
+
+/**
+ * Outcome of a per-output color call on a display backend (display/color, plan 2.6).
+ * The handler turns each into its own journal line, so a failure is never logged as
+ * "Unknown output" unless it is one. The show lock is checked in the handler, before
+ * any backend call, so it is not a backend status.
+ */
+enum class OutputColorStatus {
+    Applied,             ///< done (for a read: the data is valid)
+    UnknownOutput,       ///< no output region with that connector name
+    Unsupported,         ///< no virtual canvas (legacy X11/Wayland, headless, DRM legacy mode)
+    BadValue,            ///< a trim not finite or out of range: nothing changed
+    LutFailed,           ///< the LUT could not be loaded or uploaded: the previous LUT is kept
+    ProgramUnavailable   ///< stored on the output, but the color program did not link: no color on screen
+};
+
+inline const char* outputColorStatusName(OutputColorStatus s) {
+    switch (s) {
+        case OutputColorStatus::Applied:            return "applied";
+        case OutputColorStatus::UnknownOutput:      return "unknown_output";
+        case OutputColorStatus::Unsupported:        return "unsupported";
+        case OutputColorStatus::BadValue:           return "bad_value";
+        case OutputColorStatus::LutFailed:          return "lut_failed";
+        case OutputColorStatus::ProgramUnavailable: return "program_unavailable";
+    }
+    return "unsupported";
+}
+
+/** One output's color as the backend holds it (display/color dump, output/list). */
+struct OutputColorReport {
+    std::string name;       ///< connector
+    OutputColor color;      ///< trims + configured LUT and its status
+    bool applied = false;   ///< color program linked and this output's color draw has not failed
+};
+
+/** What a hot LUT change did, for its journal lines. */
+struct OutputLutLoadInfo {
+    std::string error;               ///< reason when the status is LutFailed
+    int size = 0;                    ///< LUT_3D_SIZE when loaded
+    double parseMs = 0.0;            ///< read + parse time
+    std::size_t clampedValues = 0;   ///< data values outside [0, 1] that were clamped
 };
 
 /**

@@ -156,6 +156,22 @@ public:
     bool setOutputMode(const std::string& outputName, int width, int height, double refresh = 0.0) override;
     
     /**
+     * Per-output color, applied hot (override; programme phase 3). Each writes
+     * outputRegions_ first (the one owner, which configureOutputBlend/Region and
+     * setOutputMode copy wholesale into the renderer) and then pushes the same
+     * values to the renderer without a reconfigure. Unsupported in legacy mode.
+     */
+    OutputColorStatus configureOutputColor(const std::string& outputName,
+                                           const OutputColor& trims) override;
+    OutputColorStatus configureOutputLut(const std::string& outputName,
+                                         const std::string& resolvedPath,
+                                         const std::string& displayValue,
+                                         OutputLutLoadInfo& info) override;
+    OutputColorStatus clearOutputLut(const std::string& outputName) override;
+    OutputColorStatus resetOutputColor(const std::string& outputName) override;
+    OutputColorStatus getOutputColors(std::vector<OutputColorReport>& out) const override;
+    
+    /**
      * Enable/disable frame capture (override)
      */
     void setCaptureEnabled(bool enabled, int width = 0, int height = 0) override;
@@ -430,6 +446,15 @@ private:
     // can run (`why`: DRM in legacy mode, or openWindow() failing so the app falls
     // back to headless). Never a silent no-op.
     void logConfiguredColorUnsupported(const char* why) const;
+    
+    // Hot per-output color (display/color): the region in outputRegions_ (the owner)
+    // the call acts on, or the status to return (Unsupported without the virtual
+    // canvas, UnknownOutput for a name with no region).
+    OutputColorStatus findColorRegion(const std::string& outputName, OutputRegion*& region);
+    
+    // Push the owner's color, LUT and draw state of `region` to both renderer copies
+    // (MultiOutputRenderer::setOutputColor, no reconfigure).
+    void pushOutputColor(const OutputRegion& region);
     
     // Render using Virtual Canvas
     void renderVirtualCanvas(LayerManager* layerManager, OSDManager* osdManager);

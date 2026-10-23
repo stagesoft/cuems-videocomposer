@@ -262,6 +262,17 @@ public:
         return blitShader_ && blitShader_->colorProgramAvailable();
     }
     
+    /**
+     * Put an output's color on both renderer copies of its region (outputs_[i].region
+     * and outputRegions_), without a reconfigure: no FBO or canvas reallocation, so a
+     * slider at 10 Hz is cheap. The caller (DRMBackend) has already written the same
+     * values on its own regions, the owner that every rebuild copies.
+     * @return false when no region has that name
+     */
+    bool setOutputColor(const std::string& name, const OutputColor& color,
+                        const std::shared_ptr<OutputLutTexture>& lut,
+                        const std::shared_ptr<ColorDrawState>& colorDraw);
+    
 private:
     /**
      * Per-output rendering state

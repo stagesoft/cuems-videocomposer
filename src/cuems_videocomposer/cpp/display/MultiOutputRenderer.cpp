@@ -365,5 +365,31 @@ int MultiOutputRenderer::findOutputByName(const std::string& name) const {
     return -1;
 }
 
+bool MultiOutputRenderer::setOutputColor(const std::string& name, const OutputColor& color,
+                                         const std::shared_ptr<OutputLutTexture>& lut,
+                                         const std::shared_ptr<ColorDrawState>& colorDraw) {
+    // Both copies, matched by region name (the owner's name), so the blit pass and
+    // whatever reads outputRegions_ agree. A replaced LUT drops its last reference
+    // here; its texture is deleted by the drain at the end of the next blit pass.
+    bool found = false;
+    for (auto& output : outputs_) {
+        if (output.region.name == name) {
+            output.region.color = color;
+            output.region.lut = lut;
+            output.region.colorDraw = colorDraw;
+            found = true;
+        }
+    }
+    for (auto& region : outputRegions_) {
+        if (region.name == name) {
+            region.color = color;
+            region.lut = lut;
+            region.colorDraw = colorDraw;
+            found = true;
+        }
+    }
+    return found;
+}
+
 } // namespace videocomposer
 

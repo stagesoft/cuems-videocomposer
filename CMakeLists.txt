@@ -673,6 +673,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/output/OutputSinkManager.cpp
     src/cuems_videocomposer/cpp/remote/OSCRemoteControl.cpp
     src/cuems_videocomposer/cpp/remote/RemoteCommandRouter.cpp
+    src/cuems_videocomposer/cpp/remote/OutputColorCommands.cpp
     src/cuems_videocomposer/cpp/osd/OSDManager.cpp
     src/cuems_videocomposer/cpp/osd/OSDRenderer.cpp
     src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
@@ -999,6 +1000,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestNdiPreview.cpp
         src/cuems_videocomposer/cpp/test/TestOutputColor.cpp
         src/cuems_videocomposer/cpp/test/TestDisplayConfigColor.cpp
+        src/cuems_videocomposer/cpp/test/TestOutputColorCommands.cpp
     )
     
     # C++ implementation files needed by tests
@@ -1034,6 +1036,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
         src/cuems_videocomposer/cpp/display/CubeLut.cpp
         src/cuems_videocomposer/cpp/display/DisplayConfigurationManager.cpp
+        src/cuems_videocomposer/cpp/remote/OutputColorCommands.cpp
     )
 
     # AsyncVideoLoader opens ndi:// sources when the SDK is there
