@@ -128,7 +128,7 @@ bool test_DayAlign_FrameMsConversionAndSign() {
         {600000L, DAY + 605000L, 1},            // VC born after the engine's crossing
         {DAY + 600000L, 605000L, -1},           // VC alive across midnight, engine reset
         {600000L, 2 * DAY + 605000L, 2},
-        {10L, DAY - 10L, 1},                    // wrap race, fresh consumer (plan §3.1)
+        {10L, DAY - 40L, 1},                    // wrap race, fresh consumer (plan §3.1); engine times are whole 40 ms frames
     };
     for (const Case& c : cases) {
         int64_t frames = 0;
