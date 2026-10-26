@@ -120,9 +120,6 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
         Logger::getInstance().setLevel(Logger::VERBOSE);
     }
     LOG_INFO << journal::starting(CUEMS_DEB_VERSION);
-#ifdef HAVE_MTCRECEIVER
-    LOG_INFO << dayalign::banner();  // engine offsets are day-aligned (sync/DayAlign.h)
-#endif
     {
         const NdiTransportState& t = ndiTransportState();
 #ifdef HAVE_NDI_SDK
@@ -167,6 +164,8 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
 
     // Initialize global MIDI sync source (shared across all layers)
     initializeGlobalSyncSource();
+    // Engine offsets are day-aligned on the mtcreceiver head (sync/DayAlign.h)
+    LOG_INFO << dayalign::banner(dayalign::mtcReceiverDrivers().load() > 0);
 
     // Create initial layer if movie file provided
     std::string movieFile = config_->getMovieFile();

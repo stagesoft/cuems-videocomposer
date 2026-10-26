@@ -69,6 +69,7 @@ extern bool test_DayAlign_LatchPendingLatestWinsAndClear();
 extern bool test_DayAlign_UnresolvedWarningOncePerValue();
 extern bool test_DayAlign_ImplausiblePosition();
 extern bool test_DayAlign_LogLines();
+extern bool test_DayAlign_Int64ExtremesNoOverflow();
 #if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
 extern bool test_DayAlign_RealResolverWaitsForAuthoritativeHead();
 extern bool test_DayAlign_LayerAfterRestartShowsTheRightFrame();
@@ -76,6 +77,10 @@ extern bool test_DayAlign_LayerAheadOfEngineShowsTheRightFrame();
 extern bool test_DayAlign_LayerAlignedIsUnchanged();
 extern bool test_DayAlign_LaterWriterReplacesPending();
 extern bool test_DayAlign_NoReceiverDriverAppliesAsReceived();
+extern bool test_DayAlign_ResolvedOnReceiptWhenAuthoritative();
+extern bool test_DayAlign_PendingLayerStillPollsOncePerUpdate();
+extern bool test_DayAlign_LoopLayerAtNonZeroK();
+extern bool test_DayAlign_LayerInt64Extremes();
 #endif
 
 extern bool test_SMPTEUtils_Overflow24h();
@@ -210,6 +215,7 @@ int main() {
     TestFramework::instance().addTest("DayAlign_UnresolvedWarningOncePerValue", test_DayAlign_UnresolvedWarningOncePerValue);
     TestFramework::instance().addTest("DayAlign_ImplausiblePosition", test_DayAlign_ImplausiblePosition);
     TestFramework::instance().addTest("DayAlign_LogLines", test_DayAlign_LogLines);
+    TestFramework::instance().addTest("DayAlign_Int64ExtremesNoOverflow", test_DayAlign_Int64ExtremesNoOverflow);
 #if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
     TestFramework::instance().addTest("DayAlign_RealResolverWaitsForAuthoritativeHead", test_DayAlign_RealResolverWaitsForAuthoritativeHead);
     TestFramework::instance().addTest("DayAlign_LayerAfterRestartShowsTheRightFrame", test_DayAlign_LayerAfterRestartShowsTheRightFrame);
@@ -217,6 +223,10 @@ int main() {
     TestFramework::instance().addTest("DayAlign_LayerAlignedIsUnchanged", test_DayAlign_LayerAlignedIsUnchanged);
     TestFramework::instance().addTest("DayAlign_LaterWriterReplacesPending", test_DayAlign_LaterWriterReplacesPending);
     TestFramework::instance().addTest("DayAlign_NoReceiverDriverAppliesAsReceived", test_DayAlign_NoReceiverDriverAppliesAsReceived);
+    TestFramework::instance().addTest("DayAlign_ResolvedOnReceiptWhenAuthoritative", test_DayAlign_ResolvedOnReceiptWhenAuthoritative);
+    TestFramework::instance().addTest("DayAlign_PendingLayerStillPollsOncePerUpdate", test_DayAlign_PendingLayerStillPollsOncePerUpdate);
+    TestFramework::instance().addTest("DayAlign_LoopLayerAtNonZeroK", test_DayAlign_LoopLayerAtNonZeroK);
+    TestFramework::instance().addTest("DayAlign_LayerInt64Extremes", test_DayAlign_LayerInt64Extremes);
 #endif
     TestFramework::instance().addTest("SMPTEUtils_Overflow24h", test_SMPTEUtils_Overflow24h);
     TestFramework::instance().addTest("LayerPathId_IntegerIds", test_LayerPathId_IntegerIds);

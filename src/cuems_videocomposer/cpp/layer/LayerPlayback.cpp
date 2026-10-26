@@ -152,14 +152,17 @@ int64_t steadyNowMs() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// The engine time into this process's MTC day. Without an open mtcreceiver
-// driver nothing will ever make its head authoritative: apply as received.
-bool engineToLocalDay(long engineMs, long& localMs, long& k) {
+// Without an open mtcreceiver driver (none in the build, or MIDI fell back to
+// another driver) nothing will ever make its head authoritative.
+bool mtcReceiverActive() {
 #ifdef HAVE_MTCRECEIVER
-    if (dayalign::mtcReceiverDrivers().load() > 0) {
-        return MtcReceiver::toLocalDay(engineMs, localMs, k);
-    }
+    return dayalign::mtcReceiverDrivers().load() > 0;
+#else
+    return false;
 #endif
+}
+
+bool asReceived(long engineMs, long& localMs, long& k) {
     localMs = engineMs;
     k = 0;
     return true;
@@ -169,35 +172,48 @@ bool engineToLocalDay(long engineMs, long& localMs, long& k) {
 
 void LayerPlayback::setEngineTimeOffset(int64_t rawFrames, const std::string& tag) {
     engineOffset_.latch(rawFrames, steadyNowMs(), tag);
+    // Resolved on receipt when the head is already authoritative (the normal
+    // case): the offset then takes effect, and getTimeOffset() reports it,
+    // exactly as before. Only a head that is not authoritative leaves it pending.
+    resolveEngineOffset();
 }
 
 void LayerPlayback::resolveEngineOffset() {
     if (!engineOffset_.pending()) {
         return;
     }
-    const dayalign::EngineOffsetLatch::Outcome o = engineOffset_.tryResolve(engineToLocalDay);
-    if (o.status == dayalign::EngineOffsetLatch::Status::Resolved) {
-        // 25 fps MTC frames, day-aligned; the fps conversion below still applies.
-        timeOffset_ = o.frames;
-#ifdef HAVE_MTCRECEIVER
-        if (dayalign::mtcReceiverDrivers().load() > 0) {
-            std::string line;
-            bool warning = false;
-            if (dayalign::processLog().onResolved(o.k, o.engineMs, MtcReceiver::mtcHead.load(), line, warning)) {
-                if (warning) {
-                    LOG_WARNING << line;
-                } else {
-                    LOG_INFO << line;
-                }
-            }
-            if (dayalign::processLog().onFrameRate(MtcReceiver::curFrameRate.load(), line)) {
-                LOG_WARNING << line;
-            }
+    if (!mtcReceiverActive()) {
+        // Fail open, as before this change, but say so once per process.
+        const int64_t raw = engineOffset_.raw();
+        timeOffset_ = engineOffset_.tryResolve(asReceived).frames;
+        std::string line;
+        if (dayalign::processLog().onAsReceived(raw, line)) {
+            LOG_WARNING << line;
         }
-#endif
         return;
     }
 #ifdef HAVE_MTCRECEIVER
+    const dayalign::EngineOffsetLatch::Outcome o = engineOffset_.tryResolve(MtcReceiver::toLocalDay);
+    if (o.status == dayalign::EngineOffsetLatch::Status::Resolved) {
+        // 25 fps MTC frames, day-aligned; the fps conversion in
+        // updateFromSyncSource() still applies.
+        timeOffset_ = o.frames;
+        std::string line;
+        bool warning = false;
+        // mtcHead is re-read here, after toLocalDay(): the head printed in the
+        // k line can differ from the one k was computed with by a few ms.
+        if (dayalign::processLog().onResolved(o.k, o.engineMs, MtcReceiver::mtcHead.load(), line, warning)) {
+            if (warning) {
+                LOG_WARNING << line;
+            } else {
+                LOG_INFO << line;
+            }
+        }
+        if (dayalign::processLog().onFrameRate(MtcReceiver::curFrameRate.load(), line)) {
+            LOG_WARNING << line;
+        }
+        return;
+    }
     int64_t ageMs = 0;
     if (engineOffset_.unresolvedWarningDue(steadyNowMs(), MtcReceiver::isTimecodeRunning.load(), ageMs)) {
         LOG_WARNING << "MTC day-align: engine offset " << engineOffset_.raw() << " (engine "
@@ -218,9 +234,8 @@ void LayerPlayback::updateFromSyncSource() {
     // authoritative and is then converted into this process's MTC day.
     resolveEngineOffset();
     
-    // Check if MTC following is disabled for this layer, or its engine offset
-    // is not placed yet (fail closed: "not started yet", as with no follow)
-    if (!mtcFollow_ || engineOffset_.pending()) {
+    // Check if MTC following is disabled for this layer
+    if (!mtcFollow_) {
         // Layer ignores sync source - manual control only
         return;
     }
@@ -241,6 +256,15 @@ void LayerPlayback::updateFromSyncSource() {
     } else {
         // Driver or non-shared layer: advance the cadence smoother
         syncFrame = syncSource_->pollFrame(&rolling);
+    }
+
+    // Engine offset not placed yet (MTC head not authoritative): fail closed,
+    // the layer loads no frame, as before its cue starts. The poll above still
+    // runs exactly as when following: a driver's pollFrame() advances the
+    // cadence smoother its shared secondaries read, once per vsync. Skipping
+    // the frame-0 fallback further down is intentional too (fail closed).
+    if (engineOffset_.pending()) {
+        return;
     }
     
     // Debug: log frame and rolling state periodically

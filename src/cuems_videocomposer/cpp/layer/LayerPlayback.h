@@ -106,6 +106,7 @@ public:
     // does not follow MTC. `tag` names the layer in the log lines.
     void setEngineTimeOffset(int64_t rawFrames, const std::string& tag);
     bool hasPendingEngineOffset() const { return engineOffset_.pending(); }
+    const dayalign::EngineOffsetLatch& engineOffsetState() const { return engineOffset_; }
     
     void setTimeScale(double scale) { timeScale_ = scale; }
     double getTimeScale() const { return timeScale_; }

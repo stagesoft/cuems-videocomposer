@@ -94,12 +94,14 @@ public:
     void disconnect() override {}
     bool isConnected() const override { return true; }
     int64_t pollFrame(uint8_t* rolling) override {
+        ++polls_;
         if (rolling) *rolling = 1;
         return frame_;
     }
     int64_t getCurrentFrame() const override { return frame_; }
     const char* getName() const override { return "DayAlignSync"; }
     int64_t frame_ = 0;
+    int polls_ = 0;     // pollFrame() calls: a driver's poll advances the cadence smoother
 };
 
 std::unique_ptr<VideoLayer> makeLayer(DayAlignSync*& sync) {
@@ -139,7 +141,7 @@ bool test_DayAlign_FrameMsConversionAndSign() {
         TEST_ASSERT_EQ(frames, -static_cast<int64_t>(localStart / 40));
         TEST_ASSERT_EQ(frames, offsetFor(c.engineStart) + static_cast<int64_t>(k) * da::FRAMES_PER_DAY);
     }
-    // Wrap race: the start lands 10 ms before the local day 0, i.e. offset +0.
+    // Wrap race: the start lands 40 ms before the local day 0, i.e. offset +1.
     int64_t frames = 0;
     long k = 0;
     TEST_ASSERT_TRUE(da::resolve(offsetFor(DAY - 40L), FakeHead{10L, true}, frames, k));
@@ -279,6 +281,39 @@ bool test_DayAlign_LogLines() {
                                      " (2160000 per day)"));
     TEST_ASSERT_FALSE(log.onFrameRate(30, line));
     TEST_ASSERT_EQ(std::string(da::banner()), std::string("MTC day-align: on (12 h rule, ext)"));
+    TEST_ASSERT_EQ(std::string(da::banner(false)), std::string("MTC day-align: off (no mtcreceiver driver)"));
+
+    TEST_ASSERT_TRUE(log.onAsReceived(-15000, line));
+    TEST_ASSERT_EQ(line, std::string("MTC day-align: off (no mtcreceiver driver): engine offset -15000"
+                                     " applied as received, no 24h day alignment in this process"));
+    TEST_ASSERT_FALSE(log.onAsReceived(-15025, line));                         // once per process
+    return true;
+}
+
+// Garbage on the wire (any OSC client): INT64_MIN/MAX go through the latch as
+// received, k = 0, and raw * 40 is never computed (signed overflow is UB).
+bool test_DayAlign_Int64ExtremesNoOverflow() {
+    const int64_t extremes[] = {INT64_MIN, INT64_MAX, INT64_MIN + 1, -da::MAX_ALIGN_FRAMES - 1,
+                                da::MAX_ALIGN_FRAMES + 1};
+    for (int64_t raw : extremes) {
+        TEST_ASSERT_FALSE(da::inAlignRange(raw));
+        da::EngineOffsetLatch latch;
+        latch.latch(raw, 0, "L");
+        const auto o = latch.tryResolve(FakeHead{600000L, true});
+        TEST_ASSERT_TRUE(o.status == da::EngineOffsetLatch::Status::Resolved);
+        TEST_ASSERT_EQ(o.k, 0);
+        TEST_ASSERT_EQ(o.frames, raw);
+        TEST_ASSERT_EQ(o.engineMs, 0);
+        // Out of range needs no head: applied as received even before one is
+        // authoritative, and the resolver is never asked.
+        da::EngineOffsetLatch noHead;
+        noHead.latch(raw, 0, "L");
+        const auto n = noHead.tryResolve(FakeHead{0L, false});
+        TEST_ASSERT_TRUE(n.status == da::EngineOffsetLatch::Status::Resolved);
+        TEST_ASSERT_EQ(n.frames, raw);
+    }
+    TEST_ASSERT_TRUE(da::inAlignRange(da::MAX_ALIGN_FRAMES));
+    TEST_ASSERT_TRUE(da::inAlignRange(-da::MAX_ALIGN_FRAMES));
     return true;
 }
 
@@ -413,6 +448,106 @@ bool test_DayAlign_NoReceiverDriverAppliesAsReceived() {
     TEST_ASSERT_FALSE(layer->hasPendingEngineOffset());
     TEST_ASSERT_EQ(layer->getTimeOffset(), -15000);
     TEST_ASSERT_EQ(layer->getCurrentFrame(), 100);
+    return true;
+}
+
+// Eager: with the head already authoritative (the normal case) the offset
+// takes effect on receipt, as before; getTimeOffset() reports it at once.
+bool test_DayAlign_ResolvedOnReceiptWhenAuthoritative() {
+    ReceiverScope scope;
+    DayAlignSync* sync = nullptr;
+    auto layer = makeLayer(sync);
+    MtcReceiver::mtcHead.store(600000);
+    MtcReceiver::setHeadAuthoritativeForTesting(true);
+
+    layer->setEngineTimeOffset(-15000);                          // k = 0
+    TEST_ASSERT_FALSE(layer->hasPendingEngineOffset());
+    TEST_ASSERT_EQ(layer->getTimeOffset(), -15000);
+
+    layer->setEngineTimeOffset(offsetFor(DAY + 605000L));        // k = 1
+    TEST_ASSERT_FALSE(layer->hasPendingEngineOffset());
+    TEST_ASSERT_EQ(layer->getTimeOffset(), offsetFor(605000L));
+    return true;
+}
+
+// One poll per update, pending or not. A pending driver layer must still call
+// pollFrame() (its cadence smoother feeds the shared secondaries); it shows
+// nothing. Not following MTC still polls nothing, as before.
+bool test_DayAlign_PendingLayerStillPollsOncePerUpdate() {
+    ReceiverScope scope;
+    DayAlignSync* sync = nullptr;
+    auto layer = makeLayer(sync);
+    MtcReceiver::mtcHead.store(600000);
+    sync->frame_ = 600000 / 40 + 100;
+
+    layer->setEngineTimeOffset(offsetFor(DAY + 600000L));
+    TEST_ASSERT_TRUE(layer->hasPendingEngineOffset());
+    for (int i = 0; i < 3; ++i) layer->update();
+    TEST_ASSERT_EQ(sync->polls_, 3);
+    TEST_ASSERT_EQ(layer->getCurrentFrame(), -1);                // fail closed, no frame-0 fallback
+
+    MtcReceiver::setHeadAuthoritativeForTesting(true);
+    layer->update();
+    TEST_ASSERT_EQ(sync->polls_, 4);
+    TEST_ASSERT_EQ(layer->getCurrentFrame(), 100);
+
+    layer->setMtcFollow(false);
+    layer->update();
+    TEST_ASSERT_EQ(sync->polls_, 4);
+    return true;
+}
+
+// A loop (wraparound) layer at k = 1: the engine re-sends the offset each pass;
+// the media position wraps modulo the length and the position check re-arms
+// with every new value.
+bool test_DayAlign_LoopLayerAtNonZeroK() {
+    ReceiverScope scope;
+    DayAlignSync* sync = nullptr;
+    auto layer = makeLayer(sync);
+    layer->setWraparound(true);
+    MtcReceiver::mtcHead.store(600000);
+    MtcReceiver::setHeadAuthoritativeForTesting(true);
+
+    // Pass 1, cue start at the engine's 24:10:00 (local 00:10:00); 2037 frames
+    // later the 1000-frame media is at frame 37.
+    layer->setEngineTimeOffset(offsetFor(DAY + 600000L));
+    TEST_ASSERT_TRUE(layer->playback().engineOffsetState().positionCheckDue());
+    sync->frame_ = 15000 + 2037;
+    layer->update();
+    TEST_ASSERT_EQ(layer->getCurrentFrame(), 37);
+    TEST_ASSERT_FALSE(layer->playback().engineOffsetState().positionCheckDue());
+
+    // Re-anchor 2000 frames (80 s) later: same day shift, check re-armed.
+    layer->setEngineTimeOffset(offsetFor(DAY + 600000L + 2000L * 40L));
+    TEST_ASSERT_EQ(layer->getTimeOffset(), -17000);
+    TEST_ASSERT_TRUE(layer->playback().engineOffsetState().positionCheckDue());
+    sync->frame_ = 17000 + 1036;
+    layer->update();
+    TEST_ASSERT_EQ(layer->getCurrentFrame(), 36);                // 1036 % 1000
+    TEST_ASSERT_FALSE(layer->playback().engineOffsetState().positionCheckDue());
+    return true;
+}
+
+// INT64_MIN/MAX through the router's path into a following layer: applied as
+// received (k = 0) and clamped by the existing code, with no new arithmetic.
+// (Non-zero MTC plus INT64_MAX overflows the pre-existing frame sum; the sync
+// frame is 0 here so the test only exercises the day-align path.)
+bool test_DayAlign_LayerInt64Extremes() {
+    ReceiverScope scope;
+    DayAlignSync* sync = nullptr;
+    auto layer = makeLayer(sync);
+    MtcReceiver::mtcHead.store(600000);
+    MtcReceiver::setHeadAuthoritativeForTesting(true);
+    sync->frame_ = 0;
+
+    layer->setEngineTimeOffset(std::atoll("9223372036854775807"));
+    TEST_ASSERT_EQ(layer->getTimeOffset(), INT64_MAX);
+    layer->update();
+    TEST_ASSERT_EQ(layer->getCurrentFrame(), 999);
+    layer->setEngineTimeOffset(std::atoll("-9223372036854775808"));
+    TEST_ASSERT_EQ(layer->getTimeOffset(), INT64_MIN);
+    layer->update();
+    TEST_ASSERT_EQ(layer->getCurrentFrame(), 0);
     return true;
 }
 #endif

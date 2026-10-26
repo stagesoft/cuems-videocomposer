@@ -62,6 +62,11 @@ static_assert(FRAMES_PER_DAY == 2160000, "a day of 25 fps MTC frames");
 static_assert(FRAMES_PER_DAY * MS_PER_MTC_FRAME == DAY_MS, "whole frames per day");
 
 // The engine time an offset refers to: the cue start, ref ms = -offset * 40.
+// Only for |offsetFrames| <= MAX_ALIGN_FRAMES (inAlignRange): beyond that the
+// product can overflow (signed overflow is UB) and the value is no engine time.
+inline bool inAlignRange(int64_t offsetFrames) {
+    return offsetFrames <= MAX_ALIGN_FRAMES && offsetFrames >= -MAX_ALIGN_FRAMES;
+}
 inline int64_t engineRefMs(int64_t offsetFrames) { return -offsetFrames * MS_PER_MTC_FRAME; }
 
 // The offset in this process's day for day shift k. The start moves by
@@ -78,7 +83,7 @@ inline int64_t localOffsetFrames(int64_t rawFrames, long k) {
 // caller keeps it pending and tries again on its next update.
 template <typename ToLocalDay>
 bool resolve(int64_t rawFrames, ToLocalDay&& toLocalDay, int64_t& localFrames, long& k) {
-    if (rawFrames > MAX_ALIGN_FRAMES || rawFrames < -MAX_ALIGN_FRAMES) {
+    if (!inAlignRange(rawFrames)) {
         localFrames = rawFrames;
         k = 0;
         return true;
@@ -112,7 +117,12 @@ inline std::string realignLine(long k, long engineMs, long headMs, unsigned long
            + std::to_string(conversions) + " conversions";
 }
 
-inline const char* banner() { return "MTC day-align: on (12 h rule, ext)"; }
+// Start-up banner. Off when no mtcreceiver driver is open at start: offsets
+// are then applied as received (see mtcReceiverDrivers()).
+inline const char* banner(bool receiverActive = true) {
+    return receiverActive ? "MTC day-align: on (12 h rule, ext)"
+                          : "MTC day-align: off (no mtcreceiver driver)";
+}
 
 // Process-wide log decisions (main loop only; the videocomposer polls OSC on
 // its main loop, so every offset is received, resolved and logged there).
@@ -143,12 +153,23 @@ public:
         return true;
     }
 
+    // An engine offset applied as received because no mtcreceiver driver is
+    // open: one line per process, so the fail-open path is never silent.
+    bool onAsReceived(int64_t rawFrames, std::string& line) {
+        if (asReceivedLogged_) return false;
+        asReceivedLogged_ = true;
+        line = "MTC day-align: off (no mtcreceiver driver): engine offset " + std::to_string(rawFrames)
+               + " applied as received, no 24h day alignment in this process";
+        return true;
+    }
+
     unsigned long conversions() const { return conversions_; }
 
 private:
     std::vector<long> loggedK_;
     unsigned long conversions_ = 0;     // resolutions with k != 0
     bool fpsWarned_ = false;
+    bool asReceivedLogged_ = false;
 };
 
 inline RealignLog& processLog() {
@@ -202,7 +223,8 @@ public:
     Outcome tryResolve(ToLocalDay&& toLocalDay) {
         Outcome o;
         if (!pending_) return o;
-        o.engineMs = static_cast<long>(engineRefMs(raw_));
+        // Out of range: no engine time, and raw * 40 could overflow (UB).
+        o.engineMs = inAlignRange(raw_) ? static_cast<long>(engineRefMs(raw_)) : 0;
         if (!resolve(raw_, toLocalDay, o.frames, o.k)) {
             o.status = Status::Pending;
             return o;
@@ -233,6 +255,7 @@ public:
         return due;
     }
 
+    bool positionCheckDue() const { return checkPosition_; }
     long lastK() const { return lastK_; }
     long lastEngineMs() const { return lastEngineMs_; }
 
