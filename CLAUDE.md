@@ -83,11 +83,181 @@ Precedence (after the DRMBackend patch on `main`/`rc_1`): **`--resolution` CLI f
 resolution_policy=native
 canvas_layout=custom
 [output:HDMI-A-1]
-  canvas_region=0,0,1920,1080
-  resolution=1920x1080     # per-output exception (pin a 4K panel to 1080p)
+canvas_region=0,0,1920,1080
+resolution=1920x1080
 ```
 
+Here `resolution=1920x1080` is the per-output exception: it pins a 4K panel to 1080p while the others run native.
+
+**`display.conf` syntax as the VC parser reads it** (`DisplayConfigurationManager::loadFromFile`): the key is everything before the first `=`, **untrimmed**, and the value is everything after it. So:
+- **keys start at column 0.** An indented or spaced key (`  canvas_region=…`, `canvas_region = …`) is a different, unknown key, and unknown keys are ignored silently. The engine reads the same file with `configparser`, which strips keys, so it honours a line the VC ignores and the two then disagree on the canvas;
+- **no inline comments.** `#` starts a comment only in column 0. `resolution_policy=native  # x` is an unknown policy, and `color_gamma=1.05 # warm` is an unparsable value;
+- `[output:<connector>]` headers start at column 0, and global keys (`resolution_policy`, `canvas_layout`, `canvas_size`) go before the first section: every key after a header belongs to that output.
+
+An earlier version of this example had indented keys and an inline comment. The VC ignored both of those keys.
+
 The patch lives in `cpp/display/drm/DRMBackend.cpp` (`openWindow`/`initializeVirtualCanvas`): load display.conf before the global modeset (unless `-r` was explicit); the per-output override block applies unconditionally. **Deploy gotcha:** `cuems-generate-display-conf` does NOT emit `resolution_policy=`, so a fresh node with no operator override falls back to the 1080p default.
+
+## Per-output color (phase 3)
+
+Per-output trims and a 3D LUT, applied in the output blit pass on the DRM virtual canvas. The use is matching projectors and calibrating a device. Branch `feat/output-color`, not in a released deb yet. The contract part (`get_state.outputs[].color`, the `output_color` cap) is on `feat/output-color-contract`; see `docs/contract-v1.md` there. Plan `cuems-RELATIONS/Plans/2026-10-22-vc-output-colour-phase3.md`; ClickUp 1amfwm7eyq5. Code: `display/OutputColor.h`, `OutputColorConfig.h`, `CubeLut.*`, `OutputLutTexture.*`, `OutputBlitGlsl.h`, `ShowLock.h`, `remote/OutputColorCommands.*`, `DRMBackend::applyOutputColorFromConfig`.
+
+### `display.conf` keys
+
+There are six optional keys per `[output:<connector>]`, in any subset. Keys start at column 0 and there are no inline comments (see "Resolution control" above). Example:
+
+```
+[output:HDMI-A-2]
+canvas_region=3840,0,3840,2160
+color_brightness=0.02
+color_contrast=1.08
+color_hue=-3
+color_gamma=1.05
+color_lut=p2-christie.cube
+```
+
+| Key | Range | Identity | Meaning |
+|---|---|---|---|
+| `color_brightness` | −1 … 1 | 0 | added to R, G and B |
+| `color_contrast` | 0 … 2 | 1 | scaled around 0.5 |
+| `color_saturation` | 0 … 2 | 1 | 0 = grey (Rec.601 luma) |
+| `color_hue` | degrees | 0 | **folded** into −180 … 180 (540 → 180), never clamped |
+| `color_gamma` | 0.1 … 3 | 1 | `pow(x, 1/g)`: **g > 1 brightens** the mid-tones. A projector's "gamma 2.4" uses the opposite sign convention |
+| `color_lut` | path | none | 3D `.cube`, see below |
+
+- These are the same ranges and the same maths as the per-layer color trims. The order is brightness → contrast → saturation → hue → gamma, and `OutputColor::apply()` is the CPU reference.
+- Values: surrounding whitespace and the `\r` of a CRLF file are stripped, one leading `+` is allowed, and numbers are read with `std::from_chars`, so the locale plays no part and `1,08` is refused.
+- **Out of range → clamped, with a WARNING**: `OutputColor: HDMI-A-2 color_contrast=2.5 in /run/cuems/display.conf: out of range (0 to 2) — using 2`.
+- **Unparsable or non-finite (`abc`, `nan`, `inf`, empty) → ERROR**, and the field keeps its default: `OutputColor: HDMI-A-2 color_gamma=1.05 # warm in /run/cuems/display.conf: not a finite number — ignored, color_gamma stays 1`. In both cases the rest of the file still loads. A typo never takes the canvas down.
+- Color is applied once at start, after the output regions are final, under **every** `canvas_layout`. `blend=`, by contrast, only reaches a region under `custom`. Each output with color logs one INFO line in `display.conf` syntax: `OutputColor: HDMI-A-2 color_contrast=1.08 color_gamma=1.05 color_lut=p2-christie.cube (ok, 33^3, parsed in 12 ms)`.
+- **Connector mismatch**: a section with color keys whose output is not connected gets nothing and says so (WARNING): `OutputColor: [output:HDMI-A-3] has color_* keys but no such output is connected — not applied (connected: HDMI-A-1)`. This bit on the first try on .111, where a monitor had moved from HDMI-A-3 to HDMI-A-1. `enabled=false` sections are skipped silently.
+- The VC reads **`/run/cuems/display.conf`**, the file `cuems-generate-display-conf` writes at every VC start. The log lines name that path, not `/etc`.
+
+### LUT files
+
+- **Format**: `.cube`, **3D only**, `LUT_3D_SIZE` 2–65 (33 is the recommended size).
+  - Optional header lines: `TITLE`, `DOMAIN_MIN r g b` / `DOMAIN_MAX r g b`, and `LUT_3D_INPUT_RANGE lo hi`. `LUT_3D_INPUT_RANGE` is Resolve's way of writing a uniform domain; if it contradicts `DOMAIN_*` the file is refused as an ambiguous domain.
+  - Also accepted: a UTF-8 BOM, CRLF, tabs, `#` comment lines and scientific notation.
+  - The data is exactly N³ lines of three numbers, red varying fastest.
+- **Refused**, with nothing applied and a reason that names the line:
+  - `LUT_1D_SIZE`, and any other keyword. For example `LUT_IN_VIDEO_RANGE` is refused, because a LUT must never be applied with a domain we do not implement;
+  - `DOMAIN_MAX ≤ DOMAIN_MIN`;
+  - a line with the wrong number of values, or a non-numeric or non-finite value;
+  - too few or too many data lines, or data before `LUT_3D_SIZE`.
+- Data values outside [0, 1] (HDR-authored LUTs) are clamped and counted, with one WARNING per file: `… data value(s) outside [0, 1] clamped (an HDR-authored LUT? the outputs are SDR)`.
+- **File safety**: the file is opened `O_NONBLOCK|O_CLOEXEC|O_NOCTTY`, then `fstat` is run on the descriptor.
+  - It must be a regular file. A FIFO, device or socket is refused before a byte is read.
+  - The size cap is 16 MiB; a 65³ file is about 6–10 MB.
+  - The table is uploaded as an `RGBA16F` 3D texture on texture unit 2, sampled on texel centres.
+- **Paths in `display.conf`** (`color_lut=`):
+  - a relative path resolves under **`/etc/cuems/luts/`**, so `p2.cube` and `site/p2.cube` both work;
+  - any `..` component is refused;
+  - an absolute path is used as written.
+- **Paths over OSC**: **bare names only**. No `/`, no `..` anywhere, and the name must end in `.cube`; it resolves to `/etc/cuems/luts/<name>`. The OSC port is unauthenticated UDP, so it never takes a path. A LUT in a subdirectory can therefore only be set from `display.conf`.
+- Files are mode 0644 and readable by `cuems`. The VC never writes there. They are site data: keep them with the site's `display.conf` in cuems-fleet.
+- **Failure**: an ERROR, and the output runs with its trims only: `OutputColor: HDMI-A-2 color_lut=p2.cube NOT APPLIED: /etc/cuems/luts/p2.cube: cannot open: No such file or directory — output runs with trims only`. `lut_status` is then `missing` or `invalid`.
+- Parse time: a 65³ file takes 80 ms on an N97, on the render thread, once per load.
+
+### Creating the override: copy first, then add keys
+
+A file with **only** color keys is wrong:
+- with no `canvas_region`, the engine's `read_display_conf()` raises `DisplayConfNotFoundError` and the node engine's project load fails;
+- the VC loses `canvas_layout=custom`.
+
+The VC warns about that shape: `OutputColor: [output:X] in … has color_* keys but no canvas_region — a color-only override breaks the engine's canvas and the custom layout. Copy /run/cuems/display.conf to /etc/cuems/display.conf while the videocomposer is running, then add the color_* keys to that copy`. The procedure:
+
+1. **While the VC is running**, run `cp /run/cuems/display.conf /etc/cuems/display.conf`. `/run/cuems` is the VC unit's `RuntimeDirectory=cuems`, and systemd removes it when the service stops, so a stopped VC leaves nothing to copy.
+2. Add the `color_*` lines under the right `[output:…]` sections.
+3. With **no project loaded**, restart the VC (`systemctl restart cuems-videocomposer`).
+4. Grep the journal for `OutputColor:`.
+5. Reload the project. The engine does not notice a VC restart (869f8jn34).
+
+**The freeze cost.** Once `/etc/cuems/display.conf` exists, `cuems-generate-display-conf` copies it verbatim and **no longer reads `default_mappings.xml`**. Any output added or remapped later (in the XML or with `cuems-display-setup --update-mappings`) is ignored until the override is edited or removed. Record the override in cuems-fleet.
+
+### Where it sits: trims → LUT → blend ramp
+
+- The blit pass computes canvas color → the five trims → the LUT → the edge-blend ramp. The ramp code (`smoothstep` + `pow(alpha, gamma)`) is unchanged.
+- The trims come before the LUT: the LUT is the device characterisation, and the trims are the on-site adjustment on top of it.
+- The ramp multiplies the **corrected** color, so an overlap of outputs A and B shows `T_A(c)·w_A + T_B(c)·w_B`.
+- **Offsets double in the overlap.** Anything a transform adds to black (`color_brightness > 0`, or a LUT that lifts black) is multiplied by both ramps and summed, so black in the overlap is lifted twice. This is inherent to edge blending. There is no black-level compensation of the non-overlap zone yet.
+- **The canvas is 8-bit** (`VirtualCanvas` is `GL_RGBA8`). Layer trims run on the decoded texture, and output trims run on the already-quantised canvas. The same numbers give the same picture **up to 8-bit rounding**, but a strong contrast or gamma on an output amplifies banding that the same trim on a layer would not. Use output color for matching devices, and layer color for grading.
+
+### Two blit programs and the one-shot draw check
+
+- **Program A** is the original blit. Its text is byte-identical to `rc_1`, pinned by `OutputBlitShader_ProgramATextUnchanged`. It draws every output **without** color, so an output with no color runs exactly the code it ran before.
+- **Program B** is A plus the layer's color GLSL (`ColorCorrectionGlsl.h`, shared with `VideoShaders.h`) and a `sampler3D` LUT. When no LUT is loaded, a 1×1×1 placeholder texture is bound. B is used for an output with active trims or a loaded LUT.
+- If B fails to compile or link, init logs an ERROR: `OutputBlitShader: color program unavailable (<reason>) — every output runs without color`. Each configured output then logs `OutputColor: <conn> color configured but the color program is unavailable — running without color`. The outputs run on A and the canvas layout is kept. On success: `OutputBlitShader: Color program compiled and linked`.
+- **One-shot draw check.** The first B draw on each output after each color change is bracketed by `glGetError()`. A program can link and still fail every draw: two sampler types on one texture unit, for example, would give a black output. On an error the line is `OutputColor: <conn> color program draw failed (GL 0x0502) — this output runs without color`, and that output goes back to A until its next color change. It reports `applied=no`.
+- Build check: `tools/dump_blit_glsl` writes the A/B text, and `glslangValidator` validates it as part of `ALL` when it is installed. If it is not installed you get a CMake WARNING; `-DVC_REQUIRE_GLSLANG=ON` makes that fatal.
+- B's first real compile was on i915, on .111 on 2026-10-22. Mesa on i915 prints an informational `FINISHME … CCS for 3D textures` line, which is harmless.
+
+### OSC: `/videocomposer/display/color`
+
+```
+/videocomposer/display/color <connector> brightness|contrast|saturation|hue|gamma <value>
+/videocomposer/display/color <connector> lut <name.cube>
+/videocomposer/display/color <connector> lut none
+/videocomposer/display/color <connector> reset
+/videocomposer/display/color <connector> dump
+/videocomposer/display/color dump
+```
+
+`lut none` clears only the LUT and keeps the trims. `reset` sets the five trims to identity and clears the LUT. Both `dump` forms are read-only; the one without a connector covers every output.
+
+e.g. `oscsend localhost 7000 /videocomposer/display/color ssf HDMI-A-1 brightness 0.25`
+
+- Values follow the `display.conf` rules.
+  - Out of range: WARNING, applied clamped: `display/color: HDMI-A-1 contrast=5 out of range (0 to 2) — using 2`.
+  - Non-finite: WARNING, nothing changed: `display/color: HDMI-A-1 gamma 'abc' is not a finite number — nothing changed`.
+  - Unknown connector: WARNING `display/color: Unknown output 'HDMI-A-3' (outputs: HDMI-A-1)`.
+  - Backend without the virtual canvas (legacy X11/Wayland, headless, DRM legacy mode): ERROR `display/color: per-output color is not supported by this display backend`.
+- **OSC changes are volatile.** The VC runs as `cuems` under `ProtectSystem=full` and cannot write `/etc/cuems`. Every change therefore logs the output's **paste-ready** line: `OutputColor: HDMI-A-1 color_brightness=0.25 (applied live — volatile: paste into /etc/cuems/display.conf to keep it)`. Persisting means pasting those keys into the override, at column 0. After a `reset` the line says `identity, no color_* keys (… remove this output's color_* keys …)`.
+- `lut`:
+  - on success: `OutputColor: HDMI-A-1 color_lut=p2.cube loaded (ok, 33^3, parsed in 12 ms)`, then the paste-ready line;
+  - **a failed change keeps the previous LUT** (ERROR): `OutputColor: HDMI-A-1 color_lut=p3.cube NOT APPLIED: /etc/cuems/luts/p3.cube: <reason> — previous LUT p2.cube kept`;
+  - a name with a path (WARNING): `display/color: HDMI-A-1 lut '../x.cube' REFUSED: LUT name must be a bare file name ending in .cube (no '/', no '..'), under /etc/cuems/luts — nothing changed`.
+- `dump` logs one line per output: `OutputColor: HDMI-A-1 color_lut=smoke-red.cube (dump: lut_status=ok applied=yes)`. It repeats the `NOT APPLIED` ERROR for a LUT that is `missing`/`invalid`, and the `color configured but not on screen` ERROR when `applied=no`.
+- Applied hot, on the render thread between frames, with no FBO reallocation, so sliding a value at 10 Hz is cheap. A LUT change parses on the render thread (up to 80 ms once, for 65³). That is acceptable only because the show lock (below) already restricts it to "no project loaded".
+- **Per-output color survives `/videocomposer/reset`.** `resetAll()` clears the layers and the master properties (master color included) but never touches the output regions. So per-output color survives a project load/unload/STOP, and master color does not.
+- It also survives `display/blend`, `display/region` and `display/mode`. `DRMBackend::outputRegions_` is the single owner of color, and every renderer rebuild copies it wholesale. This was checked on .111: a color set over OSC, then a `display/blend`, kept its color.
+- `display/save` writes `~/.config/cuems-videocomposer/display.conf` (XDG), which nothing reads. It carries the color loaded at start, not OSC changes. `display/load` re-applies only the resolution policy, never color, regions or blend.
+- Wire strings (connector, parameter, LUT name) are sanitised before logging: printable ASCII only, anything else becomes `?`.
+- There is no reply on the wire; the journal is the answer. The engine's ossia tree does not mirror `display/color`.
+
+### Show lock: display commands refused while a project is loaded
+
+Until the VC has an edit mode, these handlers refuse while **`/tmp/cuems.show.lock`** exists. The check is in the handler (`display/ShowLock.h`), before any backend call, so a refusal is never logged as `Unknown output`. The gated commands:
+- `display/color` (every form except `dump`);
+- `display/blend`, `display/region`, `display/mode`;
+- `display/resolution_mode` (its no-argument help form still answers);
+- `display/load`.
+
+Anything at that path counts, including a dangling symlink. A stat error other than "does not exist" also refuses. Nothing changes on screen. The refusal is a WARNING:
+
+```
+display/blend REFUSED: /tmp/cuems.show.lock exists — a project is loaded, or the lock was left by an engine older than cuems-engine 0.1.0rc6-6 or by a crashed engine; unload the project (engine ≥ rc6-6) or stop the engines, then retry; color is also applied from display.conf at the next start
+```
+
+- **Not gated**: `display/color … dump`, `output/list`, `display/list`, `display/modes`, `display/save`, and `display/assign` (a log-only no-op).
+- **Behaviour change**: `display/blend`, `region`, `mode`, `resolution_mode` and `load` were not gated before this branch.
+- **Prerequisite: cuems-engine ≥ 0.1.0rc6-6 on every box of the cluster.** On ≤ rc6-5 an unload does not remove the lock; only stopping the engines does. Every gated command is then refused from the first load until the engines stop.
+- On a controller the lock is the union of both engines: either engine writes it on load, and both remove it on unload.
+- A crashed engine leaves a stale lock, which reads as loaded.
+- An OSC command sent while the VC is still starting is buffered and applied when the main loop starts.
+
+### `output/list` and the journal
+
+- `output/list` adds one line per output, **after** the `region` lines (which are unchanged, because the power-bridge NDI preview parses them): `output_color HDMI-A-1 color_lut=smoke-red.cube lut_status=ok applied=yes`.
+  - `lut_status` is `none|ok|missing|invalid`.
+  - `applied=no` means the color program is unavailable or this output's first draw failed.
+  - The line never starts with `region`; `OutputList_ColorLineNeverMatchesRegionRegex` pins that.
+  - It is informational, not a journal contract.
+- Grep: `journalctl -u cuems-videocomposer | grep -E 'OutputColor|OutputBlitShader|REFUSED'`.
+  - At start, per configured output: `OutputColor: <conn> <keys> (ok, N^3, parsed in M ms)`.
+  - The ERRORs and WARNINGs quoted above.
+  - DRM in legacy mode: `OutputColor: <conn> color configured but this display backend has no per-output color (DRM legacy mode, no virtual canvas) — running without color`.
+  - DRM failed to open (headless fallback): `… color configured but the DRM backend failed to open (the headless fallback has no per-output color) — running without color`.
+- An older VC ignores the color keys silently (unknown keys). On such a VC there are no `OutputColor:` lines.
 
 ## Branch layout (after 2026-07-02 cleanup)
 
