@@ -43,6 +43,7 @@
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
 #include "sync/MtcReceiverMIDIDriver.h"  // MtcReceiver::resetWrapOffset() in resetAll()
+#include "sync/DayAlign.h"
 #include "layer/LayerManager.h"
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
@@ -119,6 +120,9 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
         Logger::getInstance().setLevel(Logger::VERBOSE);
     }
     LOG_INFO << journal::starting(CUEMS_DEB_VERSION);
+#ifdef HAVE_MTCRECEIVER
+    LOG_INFO << dayalign::banner();  // engine offsets are day-aligned (sync/DayAlign.h)
+#endif
     {
         const NdiTransportState& t = ndiTransportState();
 #ifdef HAVE_NDI_SDK

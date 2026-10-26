@@ -27,6 +27,9 @@
 #include "../sync/FramerateConverterSyncSource.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/VideoFileInput.h"
+#ifdef HAVE_MTCRECEIVER
+#include "../../mtcreceiver/mtcreceiver.h"  // toLocalDay (day alignment)
+#endif
 #include <algorithm>
 #include <cmath>
 #include <chrono>
@@ -142,14 +145,82 @@ void LayerPlayback::update() {
     }
 }
 
+namespace {
+
+int64_t steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// The engine time into this process's MTC day. Without an open mtcreceiver
+// driver nothing will ever make its head authoritative: apply as received.
+bool engineToLocalDay(long engineMs, long& localMs, long& k) {
+#ifdef HAVE_MTCRECEIVER
+    if (dayalign::mtcReceiverDrivers().load() > 0) {
+        return MtcReceiver::toLocalDay(engineMs, localMs, k);
+    }
+#endif
+    localMs = engineMs;
+    k = 0;
+    return true;
+}
+
+} // namespace
+
+void LayerPlayback::setEngineTimeOffset(int64_t rawFrames, const std::string& tag) {
+    engineOffset_.latch(rawFrames, steadyNowMs(), tag);
+}
+
+void LayerPlayback::resolveEngineOffset() {
+    if (!engineOffset_.pending()) {
+        return;
+    }
+    const dayalign::EngineOffsetLatch::Outcome o = engineOffset_.tryResolve(engineToLocalDay);
+    if (o.status == dayalign::EngineOffsetLatch::Status::Resolved) {
+        // 25 fps MTC frames, day-aligned; the fps conversion below still applies.
+        timeOffset_ = o.frames;
+#ifdef HAVE_MTCRECEIVER
+        if (dayalign::mtcReceiverDrivers().load() > 0) {
+            std::string line;
+            bool warning = false;
+            if (dayalign::processLog().onResolved(o.k, o.engineMs, MtcReceiver::mtcHead.load(), line, warning)) {
+                if (warning) {
+                    LOG_WARNING << line;
+                } else {
+                    LOG_INFO << line;
+                }
+            }
+            if (dayalign::processLog().onFrameRate(MtcReceiver::curFrameRate.load(), line)) {
+                LOG_WARNING << line;
+            }
+        }
+#endif
+        return;
+    }
+#ifdef HAVE_MTCRECEIVER
+    int64_t ageMs = 0;
+    if (engineOffset_.unresolvedWarningDue(steadyNowMs(), MtcReceiver::isTimecodeRunning.load(), ageMs)) {
+        LOG_WARNING << "MTC day-align: engine offset " << engineOffset_.raw() << " (engine "
+                    << o.engineMs << " ms) for layer " << engineOffset_.tag() << " unresolved for "
+                    << ageMs << " ms with MTC running (MTC head not authoritative yet); the layer"
+                       " does not follow MTC until it is";
+    }
+#endif
+}
+
 void LayerPlayback::updateFromSyncSource() {
     if (!syncSource_ || !syncSource_->isConnected()) {
         // No sync source - manual playback or paused
         return;
     }
+
+    // An engine offset is never used raw: it waits for the MTC head to be
+    // authoritative and is then converted into this process's MTC day.
+    resolveEngineOffset();
     
-    // Check if MTC following is disabled for this layer
-    if (!mtcFollow_) {
+    // Check if MTC following is disabled for this layer, or its engine offset
+    // is not placed yet (fail closed: "not started yet", as with no follow)
+    if (!mtcFollow_ || engineOffset_.pending()) {
         // Layer ignores sync source - manual control only
         return;
     }
@@ -266,6 +337,19 @@ void LayerPlayback::updateFromSyncSource() {
             }
         }
         int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + convertedOffset;
+
+        // The first position after an engine offset was placed: more than an
+        // hour off the media means a wrong MTC day or an engine time far from now.
+        if (engineOffset_.takePositionCheck() && inputSource_) {
+            FrameInfo info = inputSource_->getFrameInfo();
+            if (dayalign::implausiblePosition(adjustedFrame, info.totalFrames, info.framerate)) {
+                LOG_WARNING << "MTC day-align: implausible position " << adjustedFrame << " (media "
+                            << info.totalFrames << " frames) for layer " << engineOffset_.tag()
+                            << " right after an engine offset (engine " << engineOffset_.lastEngineMs()
+                            << " ms, k=" << engineOffset_.lastK()
+                            << ") -- wrong MTC day, or an engine time far from now";
+            }
+        }
         
         // Clamp frame to valid range (no automatic wrapping - use loop instead)
         if (inputSource_) {
@@ -581,7 +665,7 @@ void LayerPlayback::reverse() {
         // So: newOffset = currentFrame - (syncFrame * -timeScale)
         // But we don't have syncFrame here, so we use a simpler approach:
         // Set offset to currentFrame and negate timescale
-        timeOffset_ = currentFrame_;
+        setTimeOffset(currentFrame_);
         timeScale_ = -timeScale_;
     } else {
         // Just negate timescale if no current frame

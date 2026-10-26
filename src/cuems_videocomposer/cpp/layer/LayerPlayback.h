@@ -24,10 +24,12 @@
 
 #include "../input/InputSource.h"
 #include "../sync/SyncSource.h"
+#include "../sync/DayAlign.h"
 #include "../video/FrameBuffer.h"
 #include "../video/GPUTextureFrameBuffer.h"
 #include <memory>
 #include <cstdint>
+#include <string>
 
 namespace videocomposer {
 
@@ -94,8 +96,16 @@ public:
     FrameInfo getFrameInfo() const;
     
     // Time-scaling (applied to sync source frames)
-    void setTimeOffset(int64_t offset) { timeOffset_ = offset; }
+    // Any writer here replaces a pending engine offset (latest wins).
+    void setTimeOffset(int64_t offset) { timeOffset_ = offset; engineOffset_.clear(); }
     int64_t getTimeOffset() const { return timeOffset_; }
+
+    // The engine's integer /offset (25 fps MTC frames in the ENGINE's MTC
+    // day). Held until the MTC head is authoritative, then converted into
+    // this process's day (DayAlign.h) and applied once; until then the layer
+    // does not follow MTC. `tag` names the layer in the log lines.
+    void setEngineTimeOffset(int64_t rawFrames, const std::string& tag);
+    bool hasPendingEngineOffset() const { return engineOffset_.pending(); }
     
     void setTimeScale(double scale) { timeScale_ = scale; }
     double getTimeScale() const { return timeScale_; }
@@ -130,6 +140,7 @@ private:
     int64_t lastSyncFrame_;
     int64_t liveFrames_ = 0;  // Frames delivered by a live source (no timeline)
     int64_t timeOffset_;  // Time offset applied to sync frames
+    dayalign::EngineOffsetLatch engineOffset_;  // engine /offset not yet day-aligned
     double timeScale_;    // Time multiplier (default: 1.0)
     bool wraparound_;     // Enable wrap-around/loop (seeks to 0 when playback ends)
     bool mtcFollow_;      // Enable/disable MTC following. Default FALSE: a layer
@@ -154,6 +165,7 @@ private:
     
     // Internal methods
     void updateFromSyncSource();
+    void resolveEngineOffset();  // day-align a pending engine offset (main loop)
 
     /**
      * True when this layer's input decodes on the GPU, so a failed load means

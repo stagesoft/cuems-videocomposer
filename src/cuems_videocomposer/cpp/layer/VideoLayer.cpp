@@ -263,6 +263,14 @@ int64_t VideoLayer::getTimeOffset() const {
     return playback_.getTimeOffset();
 }
 
+void VideoLayer::setEngineTimeOffset(int64_t rawFrames) {
+    playback_.setEngineTimeOffset(rawFrames, cueId_.empty() ? std::to_string(layerId_) : cueId_);
+}
+
+bool VideoLayer::hasPendingEngineOffset() const {
+    return playback_.hasPendingEngineOffset();
+}
+
 void VideoLayer::setTimeScale(double scale) {
     playback_.setTimeScale(scale);
 }

@@ -61,6 +61,23 @@ extern bool test_Integration_MIDISyncSource_RateWindowImmuneToPollCadence();
 
 extern bool test_MTCDecoder();
 
+// Day alignment of engine layer offsets (1amfwm7fbqy, 24h MTC wrap)
+extern bool test_DayAlign_FrameMsConversionAndSign();
+extern bool test_DayAlign_KZeroIsByteIdentical();
+extern bool test_DayAlign_TwelveHourTies();
+extern bool test_DayAlign_LatchPendingLatestWinsAndClear();
+extern bool test_DayAlign_UnresolvedWarningOncePerValue();
+extern bool test_DayAlign_ImplausiblePosition();
+extern bool test_DayAlign_LogLines();
+#if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
+extern bool test_DayAlign_RealResolverWaitsForAuthoritativeHead();
+extern bool test_DayAlign_LayerAfterRestartShowsTheRightFrame();
+extern bool test_DayAlign_LayerAheadOfEngineShowsTheRightFrame();
+extern bool test_DayAlign_LayerAlignedIsUnchanged();
+extern bool test_DayAlign_LaterWriterReplacesPending();
+extern bool test_DayAlign_NoReceiverDriverAppliesAsReceived();
+#endif
+
 extern bool test_SMPTEUtils_Overflow24h();
 extern bool test_LayerPathId_IntegerIds();
 extern bool test_LayerPathId_UuidsAreNotIntegerIds();
@@ -185,6 +202,22 @@ int main() {
 #endif
 
     TestFramework::instance().addTest("MTCDecoder", test_MTCDecoder);
+
+    TestFramework::instance().addTest("DayAlign_FrameMsConversionAndSign", test_DayAlign_FrameMsConversionAndSign);
+    TestFramework::instance().addTest("DayAlign_KZeroIsByteIdentical", test_DayAlign_KZeroIsByteIdentical);
+    TestFramework::instance().addTest("DayAlign_TwelveHourTies", test_DayAlign_TwelveHourTies);
+    TestFramework::instance().addTest("DayAlign_LatchPendingLatestWinsAndClear", test_DayAlign_LatchPendingLatestWinsAndClear);
+    TestFramework::instance().addTest("DayAlign_UnresolvedWarningOncePerValue", test_DayAlign_UnresolvedWarningOncePerValue);
+    TestFramework::instance().addTest("DayAlign_ImplausiblePosition", test_DayAlign_ImplausiblePosition);
+    TestFramework::instance().addTest("DayAlign_LogLines", test_DayAlign_LogLines);
+#if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
+    TestFramework::instance().addTest("DayAlign_RealResolverWaitsForAuthoritativeHead", test_DayAlign_RealResolverWaitsForAuthoritativeHead);
+    TestFramework::instance().addTest("DayAlign_LayerAfterRestartShowsTheRightFrame", test_DayAlign_LayerAfterRestartShowsTheRightFrame);
+    TestFramework::instance().addTest("DayAlign_LayerAheadOfEngineShowsTheRightFrame", test_DayAlign_LayerAheadOfEngineShowsTheRightFrame);
+    TestFramework::instance().addTest("DayAlign_LayerAlignedIsUnchanged", test_DayAlign_LayerAlignedIsUnchanged);
+    TestFramework::instance().addTest("DayAlign_LaterWriterReplacesPending", test_DayAlign_LaterWriterReplacesPending);
+    TestFramework::instance().addTest("DayAlign_NoReceiverDriverAppliesAsReceived", test_DayAlign_NoReceiverDriverAppliesAsReceived);
+#endif
     TestFramework::instance().addTest("SMPTEUtils_Overflow24h", test_SMPTEUtils_Overflow24h);
     TestFramework::instance().addTest("LayerPathId_IntegerIds", test_LayerPathId_IntegerIds);
     TestFramework::instance().addTest("LayerPathId_UuidsAreNotIntegerIds", test_LayerPathId_UuidsAreNotIntegerIds);
