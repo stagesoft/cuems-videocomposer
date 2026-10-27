@@ -61,6 +61,7 @@ public:
     void setUniform(const std::string& name, float x, float y);
     void setUniform(const std::string& name, float x, float y, float z);
     void setUniform(const std::string& name, float x, float y, float z, float w);
+    void setUniformMatrix3fv(const std::string& name, const float* matrix);  ///< column-major
     void setUniformMatrix4fv(const std::string& name, const float* matrix);
     
     // Get uniform location (cached)

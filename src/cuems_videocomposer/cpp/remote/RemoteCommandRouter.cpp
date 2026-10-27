@@ -28,6 +28,8 @@
 #include "../osd/OSDManager.h"
 #include "../display/OpenGLRenderer.h"
 #include "../display/DisplayBackend.h"
+#include "../display/ShowLock.h"
+#include "OutputColorCommands.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
 #include "../layer/OutputFit.h"
 #include "../input/NdiExtraIps.h"
@@ -324,6 +326,9 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     });
     registerAppCommand("display/blend", [this](const std::vector<std::string>& args) {
         return handleDisplayBlend(args);
+    });
+    registerAppCommand("display/color", [this](const std::vector<std::string>& args) {
+        return handleDisplayColorCommand(app_->getDisplayBackend(), args);
     });
     registerAppCommand("display/save", [this](const std::vector<std::string>& args) {
         return handleDisplaySave(args);
@@ -1856,6 +1861,9 @@ bool RemoteCommandRouter::handleDisplayMode(const std::vector<std::string>& args
         LOG_WARNING << "display/mode requires: <name> <width> <height> [refresh]";
         return false;
     }
+    if (refuseUnderShowLock("display/mode")) {
+        return false;
+    }
     
     auto* backend = app_->getDisplayBackend();
     if (!backend) {
@@ -1930,6 +1938,9 @@ bool RemoteCommandRouter::handleDisplayResolutionMode(const std::vector<std::str
         LOG_INFO << "Usage: /videocomposer/display/resolution_mode <mode>";
         return true;
     }
+    if (refuseUnderShowLock("display/resolution_mode")) {
+        return false;
+    }
     
     auto* backend = app_->getDisplayBackend();
     if (!backend) {
@@ -1952,6 +1963,9 @@ bool RemoteCommandRouter::handleDisplayResolutionMode(const std::vector<std::str
 
 bool RemoteCommandRouter::handleDisplayRegion(const std::vector<std::string>& args) {
     // Expected: /videocomposer/display/region <outputName> <canvasX> <canvasY> [width] [height]
+    if (refuseUnderShowLock("display/region")) {
+        return false;
+    }
     if (args.size() < 3) {
         LOG_WARNING << "display/region requires: <outputName> <canvasX> <canvasY> [width] [height]";
         return false;
@@ -2006,6 +2020,9 @@ bool RemoteCommandRouter::handleDisplayAssign(const std::vector<std::string>& ar
 
 bool RemoteCommandRouter::handleDisplayBlend(const std::vector<std::string>& args) {
     // Expected: /videocomposer/display/blend <outputName> <left> <right> <top> <bottom> [gamma]
+    if (refuseUnderShowLock("display/blend")) {
+        return false;
+    }
     if (args.size() < 5) {
         LOG_WARNING << "display/blend requires: <outputName> <left> <right> <top> <bottom> [gamma]";
         return false;
@@ -2057,6 +2074,9 @@ bool RemoteCommandRouter::handleDisplaySave(const std::vector<std::string>& args
 
 bool RemoteCommandRouter::handleDisplayLoad(const std::vector<std::string>& args) {
     // Expected: /videocomposer/display/load [path]
+    if (refuseUnderShowLock("display/load")) {
+        return false;
+    }
     auto* backend = app_->getDisplayBackend();
     if (!backend) {
         LOG_WARNING << "display/load: No display backend available";
@@ -2173,6 +2193,10 @@ bool RemoteCommandRouter::handleOutputList(const std::vector<std::string>& args)
     for (const auto& region : backend->getCanvasRegions()) {
         LOG_INFO << journal::region(region.name, region.canvasX, region.canvasY,
                                     region.canvasWidth, region.canvasHeight);
+    }
+    // Per-output color, one output_color line each, after the region lines
+    for (const auto& line : outputColorListLines(*backend)) {
+        LOG_INFO << line;
     }
 
     // Capture status

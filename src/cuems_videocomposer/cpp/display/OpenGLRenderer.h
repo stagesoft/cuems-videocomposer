@@ -27,6 +27,7 @@
 #include "../layer/VideoLayer.h"
 #include "ShaderProgram.h"
 #include "MasterProperties.h"
+#include "ColorMatrix.h"
 #include <vector>
 #include <map>
 #include <cstdint>
@@ -190,6 +191,7 @@ private:
                                     const LayerProperties::ColorAdjustment& colorAdjust);
     void setMasterColorCorrectionUniforms(ShaderProgram* shader,
                                           const MasterProperties::ColorAdjustment& colorAdjust);
+    void setColorMatrixUniforms(ShaderProgram* shader, const ColorMatrix& cm);
 };
 
 } // namespace videocomposer

@@ -661,6 +661,8 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/display/MultiOutputRenderer.cpp
     src/cuems_videocomposer/cpp/display/VirtualCanvas.cpp
     src/cuems_videocomposer/cpp/display/OutputBlitShader.cpp
+    src/cuems_videocomposer/cpp/display/OutputLutTexture.cpp
+    src/cuems_videocomposer/cpp/display/CubeLut.cpp
     src/cuems_videocomposer/cpp/display/HeadlessDisplay.cpp
     # Wayland backend (conditional compilation via #ifdef HAVE_WAYLAND)
     src/cuems_videocomposer/cpp/display/WaylandDisplay.cpp
@@ -671,6 +673,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/output/OutputSinkManager.cpp
     src/cuems_videocomposer/cpp/remote/OSCRemoteControl.cpp
     src/cuems_videocomposer/cpp/remote/RemoteCommandRouter.cpp
+    src/cuems_videocomposer/cpp/remote/OutputColorCommands.cpp
     src/cuems_videocomposer/cpp/osd/OSDManager.cpp
     src/cuems_videocomposer/cpp/osd/OSDRenderer.cpp
     src/cuems_videocomposer/cpp/utils/SMPTEUtils.cpp
@@ -944,6 +947,46 @@ target_compile_definitions(cuems-videocomposer PRIVATE CUEMS_DEB_VERSION="${CUEM
 set(CUEMS_NDI_CONFIG_DIR "${CMAKE_INSTALL_PREFIX}/share/cuems-videocomposer/ndi")
 target_compile_definitions(cuems-videocomposer PRIVATE CUEMS_NDI_CONFIG_DIR="${CUEMS_NDI_CONFIG_DIR}")
 
+# Build-time validation of the output blit GLSL (per-output color, programme
+# phase 3). dump_blit_glsl is a GL-free host tool that writes the exact text the
+# compositor compiles (display/OutputBlitGlsl.h: program A, program B assembled
+# from it, and their vertex shader; since rev 4 also the layer and master shaders
+# of display/VideoShaders.h, which share B's color text); glslangValidator then
+# checks them all as part of ALL. Absent tool: a WARNING and no check, unless VC_REQUIRE_GLSLANG is
+# ON (debian/rules and CI set it), which makes it a configure error.
+option(VC_REQUIRE_GLSLANG "Fail configure if glslangValidator is missing" OFF)
+add_executable(dump_blit_glsl tools/dump_blit_glsl.cpp)
+target_include_directories(dump_blit_glsl PRIVATE src/cuems_videocomposer/cpp)
+find_program(GLSLANG_VALIDATOR glslangValidator)
+if(GLSLANG_VALIDATOR)
+    set(BLIT_GLSL_DIR "${CMAKE_BINARY_DIR}/blit_glsl")
+    add_custom_target(validate_blit_glsl ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${BLIT_GLSL_DIR}"
+        COMMAND $<TARGET_FILE:dump_blit_glsl> "${BLIT_GLSL_DIR}"
+        COMMAND ${GLSLANG_VALIDATOR} -S vert "${BLIT_GLSL_DIR}/blit.vert"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/A.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/B.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S vert "${BLIT_GLSL_DIR}/layer.vert"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/layer_rgba.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/layer_rgba_hq.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/layer_nv12.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/layer_yuv420p.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S vert "${BLIT_GLSL_DIR}/master.vert"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/master.frag"
+        DEPENDS dump_blit_glsl
+        COMMENT "Validating the output blit GLSL (programs A and B) and the layer and master shaders with glslangValidator"
+        VERBATIM
+    )
+    message(STATUS "glslangValidator found: ${GLSLANG_VALIDATOR} - output blit GLSL validated at build time")
+elseif(VC_REQUIRE_GLSLANG)
+    message(FATAL_ERROR "glslangValidator not found and VC_REQUIRE_GLSLANG is ON "
+                        "(install glslang-tools): the output blit GLSL must be validated at build time")
+else()
+    message(WARNING "glslangValidator not found - the output blit GLSL (programs A and B) "
+                    "is NOT validated at build time. Install glslang-tools, or configure "
+                    "with -DVC_REQUIRE_GLSLANG=ON to make this an error.")
+endif()
+
 # Test executable (optional)
 option(BUILD_TESTS "Build test suite" ON)
 if(BUILD_TESTS)
@@ -963,6 +1006,9 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestRecoveryPolicy.cpp
         src/cuems_videocomposer/cpp/test/TestHangGuard.cpp
         src/cuems_videocomposer/cpp/test/TestNdiPreview.cpp
+        src/cuems_videocomposer/cpp/test/TestOutputColor.cpp
+        src/cuems_videocomposer/cpp/test/TestDisplayConfigColor.cpp
+        src/cuems_videocomposer/cpp/test/TestOutputColorCommands.cpp
         src/cuems_videocomposer/cpp/test/TestDayAlign.cpp
     )
     
@@ -997,6 +1043,9 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/guard/HangGuard.cpp
         src/cuems_videocomposer/cpp/guard/SaturationSignals.cpp
         src/cuems_videocomposer/cpp/guard/SaturationMonitor.cpp
+        src/cuems_videocomposer/cpp/display/CubeLut.cpp
+        src/cuems_videocomposer/cpp/display/DisplayConfigurationManager.cpp
+        src/cuems_videocomposer/cpp/remote/OutputColorCommands.cpp
     )
 
     # AsyncVideoLoader opens ndi:// sources when the SDK is there
