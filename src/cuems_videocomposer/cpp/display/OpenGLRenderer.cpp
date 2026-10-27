@@ -826,11 +826,22 @@ void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layer
 
     // Check if master transforms are active
     bool useMasterFBO = masterProperties_.isActive();
+
+    // The target the caller bound: the window (0) on X11/Wayland, the virtual
+    // canvas FBO on DRM. The master pass must end there, not on 0: on DRM, 0 is
+    // the EGL back buffer that the per-output blit overwrites, so master color
+    // and transforms used to vanish (1amfwm7fp88).
+    GLint targetFBO = 0;
     
     if (useMasterFBO) {
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &targetFBO);
+
         // Initialize or resize FBO if needed
         if (!masterFBOInitialized_ || masterFBOWidth_ != viewportWidth_ || masterFBOHeight_ != viewportHeight_) {
-            if (!initMasterFBO(viewportWidth_, viewportHeight_)) {
+            const bool ok = initMasterFBO(viewportWidth_, viewportHeight_);
+            // initMasterFBO() leaves 0 bound, success or not
+            glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(targetFBO));
+            if (!ok) {
                 LOG_ERROR << "Failed to initialize master FBO, falling back to direct rendering";
                 useMasterFBO = false;
             }
@@ -856,11 +867,11 @@ void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layer
     }
     
     if (useMasterFBO && masterFBOInitialized_) {
-        // Unbind FBO, render to screen with master transforms
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        // Back to the caller's target, render the FBO there with master transforms
+        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(targetFBO));
         glViewport(0, 0, viewportWidth_, viewportHeight_);
         
-        // Clear screen
+        // Clear the target
         glClear(GL_COLOR_BUFFER_BIT);
         
         // Render FBO texture with master transforms
