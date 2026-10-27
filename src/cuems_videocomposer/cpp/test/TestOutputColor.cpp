@@ -29,6 +29,7 @@
  * hue that loops hangs the render thread, and a FIFO on the LUT path blocks it.
  */
 
+#include "display/ColorMatrix.h"
 #include "display/CubeLut.h"
 #include "display/OutputBlitGlsl.h"
 #include "display/OutputColor.h"
@@ -36,6 +37,7 @@
 #include "display/VideoShaders.h"
 #include "TestFramework.h"
 
+#include <algorithm>
 #include <chrono>
 #include <clocale>
 #include <cmath>
@@ -45,6 +47,7 @@
 #include <fcntl.h>
 #include <limits>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -516,13 +519,16 @@ std::uint64_t fnv1a64(std::string_view text) {
     return h;
 }
 
-// Pinned from origin/rc_1 e699229 (0.1.2-11), extracted byte for byte from the
-// R"(...)" literals of OutputBlitShader.cpp (getFragmentShaderSource) and
-// VideoShaders.h (COLOR_CORRECTION_FUNCTIONS).
+// Program A: pinned from origin/rc_1 e699229 (0.1.2-11), extracted byte for byte
+// from the R"(...)" literal of OutputBlitShader.cpp (getFragmentShaderSource).
 constexpr std::uint64_t kFragmentAFnv = 0x0fc4941bb432ca71ull;
 constexpr std::size_t kFragmentALength = 2489;
-constexpr std::uint64_t kColorFunctionsFnv = 0xfb73f10656df2e68ull;
-constexpr std::size_t kColorFunctionsLength = 1912;
+// The shared color text. Re-pinned DELIBERATELY in rev 4 of programme phase 3 (the
+// trims as a CPU-composed matrix, applyColorMatrix): the 0.1.2-11 text was FNV
+// 0xfb73f10656df2e68, 1912 bytes. A change here changes every layer, the master and
+// program B at once, so it must be as deliberate as this one.
+constexpr std::uint64_t kColorFunctionsFnv = 0xc6f6a3976618105bull;
+constexpr std::size_t kColorFunctionsLength = 315;
 
 } // namespace
 
@@ -558,9 +564,8 @@ bool test_OutputBlitShader_ProgramBEmbedsSharedGlsl() {
     TEST_ASSERT(decl != std::string::npos);
     TEST_ASSERT(b.compare(0, decl, a, 0, decl) == 0);
 
-    for (const char* u : {"uniform int uColorEnabled;", "uniform float uBrightness;",
-                          "uniform float uContrast;", "uniform float uSaturation;",
-                          "uniform float uHue;", "uniform float uGamma;",
+    for (const char* u : {"uniform int uColorEnabled;", "uniform mat3 uColorMatrix;",
+                          "uniform vec3 uColorOffset;", "uniform float uInvGamma;",
                           "uniform int uLutEnabled;", "uniform sampler3D uLutTex;",
                           "uniform vec3 uLutScale;", "uniform vec3 uLutOffset;"}) {
         if (OutputBlitGlsl::countOccurrences(b, u) != 1) {
@@ -571,7 +576,7 @@ bool test_OutputBlitShader_ProgramBEmbedsSharedGlsl() {
 
     // The stages sit between the canvas sample and the ramp, trims before the LUT
     const std::size_t sample = b.find(OutputBlitGlsl::kSampleAnchor);
-    const std::size_t trims = b.find("color.rgb = applyColorCorrection(");
+    const std::size_t trims = b.find("color.rgb = applyColorMatrix(color.rgb, uColorMatrix, uColorOffset, uInvGamma);");
     const std::size_t lut = b.find("color.rgb = textureLod(uLutTex, color.rgb * uLutScale + uLutOffset, 0.0).rgb;");
     const std::size_t bRamp = b.find(OutputBlitGlsl::kRampMarker);
     TEST_ASSERT(sample != std::string::npos && trims != std::string::npos &&
@@ -584,13 +589,198 @@ bool test_OutputBlitShader_ProgramBEmbedsSharedGlsl() {
     return true;
 }
 
-// The layer shaders still concatenate the 0.1.2-11 color functions, byte for byte
-bool test_VideoShaders_ColorFunctionsUnchanged() {
+// The layer shaders concatenate the pinned shared color text (rev 4), byte for byte
+bool test_VideoShaders_ColorFunctionsPinned() {
     TEST_ASSERT_EQ(VideoShaders::COLOR_CORRECTION_FUNCTIONS.size(), kColorFunctionsLength);
     TEST_ASSERT(fnv1a64(VideoShaders::COLOR_CORRECTION_FUNCTIONS) == kColorFunctionsFnv);
     TEST_ASSERT(VideoShaders::COLOR_CORRECTION_FUNCTIONS == std::string(kColorCorrectionGlsl));
     // ...and a layer shader built from it carries it verbatim
     TEST_ASSERT(VideoShaders::FRAGMENT_RGBA.find(kColorCorrectionGlsl) != std::string::npos);
+    return true;
+}
+
+// ===== Rev 4: the trims as a CPU-composed matrix (ColorMatrix.h) =====
+
+namespace {
+
+struct TrimSet { const char* name; float b, c, s, h, g; };
+
+int to8(float x) { return static_cast<int>(std::lround(std::clamp(x, 0.0f, 1.0f) * 255.0f)); }
+
+} // namespace
+
+// The matrix path equals the plain-arithmetic reference: the linear part within 1e-5,
+// and the 8-bit output within one level (a strong gamma amplifies float reordering
+// near black, so that is the honest bound there)
+bool test_ColorMatrix_MatchesReference() {
+    const TrimSet sets[] = {
+        {"identity", 0.0f, 1.0f, 1.0f, 0.0f, 1.0f},
+        {"K1", 0.02f, 1.08f, 1.05f, -3.0f, 1.05f},
+        {"R2", 0.1f, 1.2f, 1.3f, 25.0f, 1.1f},
+        {"brightness -1", -1.0f, 1.0f, 1.0f, 0.0f, 1.0f},
+        {"brightness +1", 1.0f, 1.0f, 1.0f, 0.0f, 1.0f},
+        {"contrast 0", 0.0f, 0.0f, 1.0f, 0.0f, 1.0f},
+        {"contrast 2", 0.0f, 2.0f, 1.0f, 0.0f, 1.0f},
+        {"saturation 0", 0.0f, 1.0f, 0.0f, 0.0f, 1.0f},
+        {"saturation 2", 0.0f, 1.0f, 2.0f, 0.0f, 1.0f},
+        {"hue -180", 0.0f, 1.0f, 1.0f, -180.0f, 1.0f},
+        {"hue 180", 0.0f, 1.0f, 1.0f, 180.0f, 1.0f},
+        {"hue 90", 0.0f, 1.0f, 1.0f, 90.0f, 1.0f},
+        {"gamma 0.1", 0.0f, 1.0f, 1.0f, 0.0f, 0.1f},
+        {"gamma 3", 0.0f, 1.0f, 1.0f, 0.0f, 3.0f},
+        {"strong gamma A", -0.2f, 1.2f, 1.3f, 40.0f, 2.2f},
+        {"strong gamma B", 0.1f, 0.8f, 0.5f, -120.0f, 3.0f},
+    };
+    std::mt19937 rng(20261027);
+    std::uniform_real_distribution<float> u(0.0f, 1.0f);
+    for (const TrimSet& t : sets) {
+        OutputColor ref;
+        ref.brightness = t.b; ref.contrast = t.c; ref.saturation = t.s; ref.hue = t.h; ref.gamma = t.g;
+        const ColorMatrix cm = composeColorMatrix(ref);
+        float maxLinear = 0.0f;
+        int maxLevels = 0;
+        for (int i = 0; i < 100000; ++i) {
+            const float r0 = u(rng), g0 = u(rng), b0 = u(rng);
+            // linear part: the reference chain vs M * c + off
+            float lr = r0, lg = g0, lb = b0;
+            ref.applyLinear(lr, lg, lb);
+            const float lin[3] = {lr, lg, lb};
+            for (int k = 0; k < 3; ++k) {
+                const float viaM = cm.m[0 * 3 + k] * r0 + cm.m[1 * 3 + k] * g0 + cm.m[2 * 3 + k] * b0 + cm.off[k];
+                maxLinear = std::max(maxLinear, std::fabs(viaM - lin[k]));
+            }
+            // full output, 8-bit
+            float er = r0, eg = g0, eb = b0;
+            ref.apply(er, eg, eb);
+            float mr = r0, mg = g0, mb = b0;
+            applyColorMatrixCpu(cm, mr, mg, mb);
+            maxLevels = std::max({maxLevels, std::abs(to8(mr) - to8(er)), std::abs(to8(mg) - to8(eg)),
+                                  std::abs(to8(mb) - to8(eb))});
+        }
+        std::cout << "  " << t.name << ": linear max " << maxLinear << ", 8-bit max " << maxLevels << " level(s)\n";
+        if (maxLinear > 1e-5f || maxLevels > 1) {
+            std::cerr << "  " << t.name << " out of bounds\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+// Expectations computed by hand, not through applyLinearTrims, so a bug in the line the
+// reference and the matrix share cannot hide
+bool test_ColorMatrix_KnownValues() {
+    auto run = [](float b, float c, float s, float h, float g, float r, float gg, float bb, float out[3]) {
+        const ColorMatrix cm = composeColorMatrix(b, c, s, h, g);
+        applyColorMatrixCpu(cm, r, gg, bb);
+        out[0] = r; out[1] = gg; out[2] = bb;
+    };
+    float o[3];
+    run(0.0f, 1.2f, 1.0f, 0.0f, 1.0f, 0.25f, 0.25f, 0.25f, o);   // (0.25 - 0.5) * 1.2 + 0.5
+    TEST_ASSERT(near(o[0], 0.2f) && near(o[1], 0.2f) && near(o[2], 0.2f));
+    run(0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, o);      // grayscale = Rec.601 luma
+    TEST_ASSERT(near(o[0], 0.299f) && near(o[1], 0.299f) && near(o[2], 0.299f));
+    run(0.0f, 1.0f, 1.0f, 180.0f, 1.0f, 1.0f, 0.0f, 0.0f, o);    // first column of the hue mat3, cos -1, sin 0
+    TEST_ASSERT(near(o[0], 0.0f) && near(o[1], 0.426f, 1e-5f) && near(o[2], 0.426f, 1e-5f));
+    run(0.1f, 2.0f, 1.0f, 0.0f, 1.0f, 0.5f, 0.5f, 0.5f, o);      // (0.5 + 0.1 - 0.5) * 2 + 0.5
+    TEST_ASSERT(near(o[0], 0.7f) && near(o[1], 0.7f) && near(o[2], 0.7f));
+    run(0.0f, 1.0f, 1.0f, 0.0f, 2.0f, 0.25f, 0.25f, 0.25f, o);   // pow(0.25, 1/2)
+    TEST_ASSERT(near(o[0], 0.5f) && near(o[1], 0.5f) && near(o[2], 0.5f));
+    return true;
+}
+
+// The defaults compose to the identity (within 1e-7: no bit-exactness claim, so an FMA
+// contraction cannot fail it) and to an inverse gamma of exactly 1, so the shader skips pow
+bool test_ColorMatrix_IdentityIsIdentity() {
+    const ColorMatrix cm = composeColorMatrix(OutputColor{});
+    for (int j = 0; j < 3; ++j) {
+        for (int i = 0; i < 3; ++i) {
+            TEST_ASSERT(near(cm.m[j * 3 + i], i == j ? 1.0f : 0.0f, 1e-7f));
+        }
+        TEST_ASSERT(near(cm.off[j], 0.0f, 1e-7f));
+    }
+    TEST_ASSERT(cm.invGamma == 1.0f);
+    return true;
+}
+
+// Hue 0 is skipped, as the shader skipped it: brightness and contrast alone give no
+// cross-talk between channels
+bool test_ColorMatrix_HueZeroSkipsRotation() {
+    const ColorMatrix cm = composeColorMatrix(0.1f, 1.2f, 1.0f, 0.0f, 1.0f);
+    for (int j = 0; j < 3; ++j) {
+        for (int i = 0; i < 3; ++i) {
+            if (i != j) {
+                TEST_ASSERT(cm.m[j * 3 + i] == 0.0f);
+            }
+        }
+        TEST_ASSERT(near(cm.m[j * 3 + j], 1.2f, 1e-6f));
+        TEST_ASSERT(near(cm.off[j], (0.1f - 0.5f) * 1.2f + 0.5f, 1e-6f));
+    }
+    return true;
+}
+
+// Column-major, as glUniformMatrix3fv(..., GL_FALSE) expects. With saturation 0 every
+// output channel is the luma, so column j holds luma weight j three times; a transposed
+// layout would hold (0.299, 0.587, 0.114) in each column instead
+bool test_ColorMatrix_ColumnMajor() {
+    const ColorMatrix cm = composeColorMatrix(0.0f, 1.0f, 0.0f, 0.0f, 1.0f);
+    const float w[3] = {0.299f, 0.587f, 0.114f};
+    for (int j = 0; j < 3; ++j) {
+        for (int i = 0; i < 3; ++i) {
+            TEST_ASSERT(near(cm.m[j * 3 + i], w[j], 1e-6f));
+        }
+    }
+    return true;
+}
+
+// GLSL's mat3 * vec3 is the column-major product the C++ side composes; c * m would
+// transpose it silently
+bool test_ColorGlsl_MultiplyOrder() {
+    const std::string text(kColorCorrectionGlsl);
+    TEST_ASSERT(text.find("vec3 result = m * c + off;") != std::string::npos);
+    TEST_ASSERT(text.find("c * m") == std::string::npos);
+    TEST_ASSERT(text.find("if (invGamma != 1.0)") != std::string::npos);
+    return true;
+}
+
+// Every shader that uses the trims declares each uniform the C++ side looks up, by the
+// shared name constant, exactly once (a lookup that misses is a silent -1)
+bool test_ColorGlsl_UniformNamesDeclared() {
+    const std::string decls[] = {
+        std::string("uniform mat3 ") + kUniformColorMatrix + ";",
+        std::string("uniform vec3 ") + kUniformColorOffset + ";",
+        std::string("uniform float ") + kUniformInvGamma + ";",
+    };
+    const std::string b = OutputBlitGlsl::assembleFragmentB();
+    const std::string* shaders[] = {&b, &VideoShaders::FRAGMENT_RGBA, &VideoShaders::FRAGMENT_RGBA_HQ,
+                                    &VideoShaders::FRAGMENT_NV12, &VideoShaders::FRAGMENT_YUV420P,
+                                    &VideoShaders::MASTER_FRAGMENT_SHADER};
+    for (const std::string* s : shaders) {
+        for (const std::string& d : decls) {
+            if (OutputBlitGlsl::countOccurrences(*s, d) != 1) {
+                std::cerr << "  a shader does not declare '" << d << "' exactly once\n";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// The four layer fragments and the master use the matrix and nothing of the old path
+bool test_VideoShaders_ColorFragmentsUseMatrix() {
+    const std::string* fragments[] = {&VideoShaders::FRAGMENT_RGBA, &VideoShaders::FRAGMENT_RGBA_HQ,
+                                      &VideoShaders::FRAGMENT_NV12, &VideoShaders::FRAGMENT_YUV420P,
+                                      &VideoShaders::MASTER_FRAGMENT_SHADER};
+    for (const std::string* f : fragments) {
+        TEST_ASSERT_EQ(OutputBlitGlsl::countOccurrences(*f, kColorCorrectionGlsl), 1u);
+        TEST_ASSERT(f->find("rgb = applyColorMatrix(rgb, uColorMatrix, uColorOffset, uInvGamma);") != std::string::npos);
+        TEST_ASSERT(f->find("uniform bool uColorCorrectionEnabled;") != std::string::npos);
+        for (const char* gone : {"uBrightness", "uContrast", "uSaturation", "uHue", "uGamma", "applyColorCorrection"}) {
+            if (f->find(gone) != std::string::npos) {
+                std::cerr << "  a fragment still contains '" << gone << "'\n";
+                return false;
+            }
+        }
+    }
     return true;
 }
 

@@ -61,7 +61,7 @@ inline const char* lutStatusName(LutStatus s) {
     return "none";
 }
 
-/** The five trims, in the order applyColorCorrection() applies them. */
+/** The five trims, in the order the shaders apply them (ColorCorrectionGlsl.h). */
 enum class ColorTrim { Brightness, Contrast, Saturation, Hue, Gamma };
 
 struct ColorTrimSpec {
@@ -128,6 +128,43 @@ inline float foldHue(float hue) {
     return static_cast<float>(h);
 }
 
+/**
+ * The four affine trims in the order the 0.1.2-11 shaders applied them: brightness,
+ * contrast, saturation, then hue (skipped when hue is 0, as the shader skipped it). No
+ * clamp happens between them, so their composition is exactly M * c + off; ColorMatrix.h
+ * derives M and off from this function. The hue rotation is the GLSL mat3 (column-major)
+ * written out per channel, so a row/column mix-up cannot hide in a matrix literal here.
+ */
+inline void applyLinearTrims(float brightness, float contrast, float saturation, float hue,
+                             float& r, float& g, float& b) {
+    r += brightness; g += brightness; b += brightness;
+
+    r = (r - 0.5f) * contrast + 0.5f;
+    g = (g - 0.5f) * contrast + 0.5f;
+    b = (b - 0.5f) * contrast + 0.5f;
+
+    const float luma = r * 0.299f + g * 0.587f + b * 0.114f;
+    r = luma + (r - luma) * saturation;
+    g = luma + (g - luma) * saturation;
+    b = luma + (b - luma) * saturation;
+
+    if (hue != 0.0f) {
+        const float rad = hue * 3.14159265359f / 180.0f;
+        const float c = std::cos(rad);
+        const float s = std::sin(rad);
+        const float nr = (0.213f + c * 0.787f - s * 0.213f) * r
+                       + (0.715f - c * 0.715f - s * 0.715f) * g
+                       + (0.072f - c * 0.072f + s * 0.928f) * b;
+        const float ng = (0.213f - c * 0.213f + s * 0.143f) * r
+                       + (0.715f + c * 0.285f + s * 0.140f) * g
+                       + (0.072f - c * 0.072f - s * 0.283f) * b;
+        const float nb = (0.213f - c * 0.213f - s * 0.787f) * r
+                       + (0.715f - c * 0.715f + s * 0.715f) * g
+                       + (0.072f + c * 0.928f + s * 0.072f) * b;
+        r = nr; g = ng; b = nb;
+    }
+}
+
 struct OutputColor {
     float brightness = 0.0f;  // -1.0 to 1.0 (0 = no change)
     float contrast = 1.0f;    // 0.0 to 2.0 (1 = no change)
@@ -184,37 +221,13 @@ struct OutputColor {
     }
 
     /**
-     * CPU reference of the shader's applyColorCorrection() (display/VideoShaders.h), used by the
-     * tests and the rig-row comparator. The hue rotation is the GLSL mat3 (column-major) written
-     * out per channel, so a row/column mix-up cannot hide in a matrix literal here.
+     * CPU reference of the trims as the shaders apply them (ColorCorrectionGlsl.h), used
+     * by the tests and the rig-row comparator: the linear chain (applyLinearTrims), then
+     * gamma, then the clamp. Written as plain arithmetic, not as the matrix the shaders
+     * get (ColorMatrix.h), so the tests compare two independent forms.
      */
     void apply(float& r, float& g, float& b) const {
-        r += brightness; g += brightness; b += brightness;
-
-        r = (r - 0.5f) * contrast + 0.5f;
-        g = (g - 0.5f) * contrast + 0.5f;
-        b = (b - 0.5f) * contrast + 0.5f;
-
-        const float luma = r * 0.299f + g * 0.587f + b * 0.114f;
-        r = luma + (r - luma) * saturation;
-        g = luma + (g - luma) * saturation;
-        b = luma + (b - luma) * saturation;
-
-        if (hue != 0.0f) {
-            const float rad = hue * 3.14159265359f / 180.0f;
-            const float c = std::cos(rad);
-            const float s = std::sin(rad);
-            const float nr = (0.213f + c * 0.787f - s * 0.213f) * r
-                           + (0.715f - c * 0.715f - s * 0.715f) * g
-                           + (0.072f - c * 0.072f + s * 0.928f) * b;
-            const float ng = (0.213f - c * 0.213f + s * 0.143f) * r
-                           + (0.715f + c * 0.285f + s * 0.140f) * g
-                           + (0.072f - c * 0.072f - s * 0.283f) * b;
-            const float nb = (0.213f - c * 0.213f - s * 0.787f) * r
-                           + (0.715f - c * 0.715f + s * 0.715f) * g
-                           + (0.072f + c * 0.928f + s * 0.072f) * b;
-            r = nr; g = ng; b = nb;
-        }
+        applyLinear(r, g, b);
 
         if (gamma != 1.0f) {
             const float e = 1.0f / gamma;
@@ -226,6 +239,11 @@ struct OutputColor {
         r = std::clamp(r, 0.0f, 1.0f);
         g = std::clamp(g, 0.0f, 1.0f);
         b = std::clamp(b, 0.0f, 1.0f);
+    }
+
+    /** The affine part of apply(): brightness, contrast, saturation, hue (no gamma, no clamp). */
+    void applyLinear(float& r, float& g, float& b) const {
+        applyLinearTrims(brightness, contrast, saturation, hue, r, g, b);
     }
 };
 

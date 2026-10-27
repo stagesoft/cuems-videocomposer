@@ -20,17 +20,22 @@
  */
 
 /**
- * dump_blit_glsl - writes the output blit programs' GLSL to a directory, so the
+ * dump_blit_glsl - writes the output blit programs' GLSL, and the layer and master
+ * shaders that share its color text (programme phase 3 rev 4), to a directory, so the
  * build can run glslangValidator on exactly the text the compositor compiles
  * (CMake target validate_blit_glsl). GL-free host tool, never installed.
  *
- *   dump_blit_glsl <dir>   ->  <dir>/blit.vert, <dir>/A.frag, <dir>/B.frag
+ *   dump_blit_glsl <dir>   ->  <dir>/blit.vert, <dir>/A.frag, <dir>/B.frag,
+ *                              <dir>/layer.vert, <dir>/layer_rgba.frag, <dir>/layer_rgba_hq.frag,
+ *                              <dir>/layer_nv12.frag, <dir>/layer_yuv420p.frag,
+ *                              <dir>/master.vert, <dir>/master.frag
  *
  * Exits non-zero when B cannot be assembled from A (an anchor not found exactly
  * once), which is the same condition that makes the compositor run without color.
  */
 
 #include "display/OutputBlitGlsl.h"
+#include "display/VideoShaders.h"
 
 #include <fstream>
 #include <iostream>
@@ -72,7 +77,14 @@ int main(int argc, char** argv) {
 
     if (!writeFile(dir + "/blit.vert", OutputBlitGlsl::kVertex) ||
         !writeFile(dir + "/A.frag", OutputBlitGlsl::fragmentA()) ||
-        !writeFile(dir + "/B.frag", b)) {
+        !writeFile(dir + "/B.frag", b) ||
+        !writeFile(dir + "/layer.vert", VideoShaders::VERTEX_SHADER) ||
+        !writeFile(dir + "/layer_rgba.frag", VideoShaders::FRAGMENT_RGBA) ||
+        !writeFile(dir + "/layer_rgba_hq.frag", VideoShaders::FRAGMENT_RGBA_HQ) ||
+        !writeFile(dir + "/layer_nv12.frag", VideoShaders::FRAGMENT_NV12) ||
+        !writeFile(dir + "/layer_yuv420p.frag", VideoShaders::FRAGMENT_YUV420P) ||
+        !writeFile(dir + "/master.vert", VideoShaders::MASTER_VERTEX_SHADER) ||
+        !writeFile(dir + "/master.frag", VideoShaders::MASTER_FRAGMENT_SHADER)) {
         return 1;
     }
     return 0;

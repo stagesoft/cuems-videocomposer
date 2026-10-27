@@ -25,6 +25,7 @@
 
 #include "OutputBlitShader.h"
 #include "OutputBlitGlsl.h"
+#include "ColorMatrix.h"
 #include "OutputLutTexture.h"
 #include "../utils/Logger.h"
 
@@ -33,6 +34,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 
 namespace videocomposer {
 
@@ -315,15 +317,43 @@ void OutputBlitShader::compileColorProgram() {
     colorLoc_.warpEnabled = glGetUniformLocation(colorProgram_, "uWarpEnabled");
     colorLoc_.warpTex = glGetUniformLocation(colorProgram_, "uWarpTex");
     colorLoc_.colorEnabled = glGetUniformLocation(colorProgram_, "uColorEnabled");
-    colorLoc_.brightness = glGetUniformLocation(colorProgram_, "uBrightness");
-    colorLoc_.contrast = glGetUniformLocation(colorProgram_, "uContrast");
-    colorLoc_.saturation = glGetUniformLocation(colorProgram_, "uSaturation");
-    colorLoc_.hue = glGetUniformLocation(colorProgram_, "uHue");
-    colorLoc_.gamma = glGetUniformLocation(colorProgram_, "uGamma");
+    colorLoc_.colorMatrix = glGetUniformLocation(colorProgram_, kUniformColorMatrix);
+    colorLoc_.colorOffset = glGetUniformLocation(colorProgram_, kUniformColorOffset);
+    colorLoc_.invGamma = glGetUniformLocation(colorProgram_, kUniformInvGamma);
     colorLoc_.lutEnabled = glGetUniformLocation(colorProgram_, "uLutEnabled");
     colorLoc_.lutTex = glGetUniformLocation(colorProgram_, "uLutTex");
     colorLoc_.lutScale = glGetUniformLocation(colorProgram_, "uLutScale");
     colorLoc_.lutOffset = glGetUniformLocation(colorProgram_, "uLutOffset");
+    
+    // Every uniform B uses must be live: a location of -1 makes glUniform* a silent
+    // no-op, so a misnamed uColorMatrix would leave the matrix at zero and the output
+    // black with no GL error for the draw check to see. Such a B is not used.
+    const std::pair<const char*, GLint> required[] = {
+        {"uCanvasTex", colorLoc_.canvasTex},     {"uCanvasSize", colorLoc_.canvasSize},
+        {"uSourceRect", colorLoc_.sourceRect},   {"uOutputSize", colorLoc_.outputSize},
+        {"uBlendWidths", colorLoc_.blendWidths}, {"uBlendGamma", colorLoc_.blendGamma},
+        {"uWarpEnabled", colorLoc_.warpEnabled}, {"uWarpTex", colorLoc_.warpTex},
+        {"uColorEnabled", colorLoc_.colorEnabled},
+        {kUniformColorMatrix, colorLoc_.colorMatrix}, {kUniformColorOffset, colorLoc_.colorOffset},
+        {kUniformInvGamma, colorLoc_.invGamma},
+        {"uLutEnabled", colorLoc_.lutEnabled},   {"uLutTex", colorLoc_.lutTex},
+        {"uLutScale", colorLoc_.lutScale},       {"uLutOffset", colorLoc_.lutOffset},
+    };
+    std::string missing;
+    for (const auto& [name, location] : required) {
+        if (location < 0) {
+            missing += missing.empty() ? name : std::string(", ") + name;
+        }
+    }
+    if (!missing.empty()) {
+        LOG_ERROR << "OutputBlitShader: color program unavailable (uniform not found: " << missing
+                  << ") — every output runs without color";
+        glDeleteProgram(colorProgram_);
+        colorProgram_ = 0;
+        glDeleteShader(colorFragmentShader_);
+        colorFragmentShader_ = 0;
+        return;
+    }
     
     colorProgramAvailable_ = true;
     LOG_INFO << "OutputBlitShader: Color program compiled and linked";
@@ -377,12 +407,15 @@ void OutputBlitShader::blitColor(GLuint canvasTexture,
     
     // Trims (the shader skips them entirely when off)
     const OutputColor& color = region.color;
-    glUniform1i(colorLoc_.colorEnabled, color.trimsActive() ? 1 : 0);
-    glUniform1f(colorLoc_.brightness, color.brightness);
-    glUniform1f(colorLoc_.contrast, color.contrast);
-    glUniform1f(colorLoc_.saturation, color.saturation);
-    glUniform1f(colorLoc_.hue, color.hue);
-    glUniform1f(colorLoc_.gamma, color.gamma);
+    const bool trims = color.trimsActive();
+    glUniform1i(colorLoc_.colorEnabled, trims ? 1 : 0);
+    if (trims) {
+        // Composed per draw, as for the layers: a handful of flops, no cache to invalidate
+        const ColorMatrix cm = composeColorMatrix(color);
+        glUniformMatrix3fv(colorLoc_.colorMatrix, 1, GL_FALSE, cm.m);
+        glUniform3f(colorLoc_.colorOffset, cm.off[0], cm.off[1], cm.off[2]);
+        glUniform1f(colorLoc_.invGamma, cm.invGamma);
+    }
     
     // LUT: size and domain come from the texture object itself
     if (lut) {
