@@ -75,9 +75,11 @@ void main() {
 // because all threads in a warp/wavefront take the same path.
 //
 // The text itself lives in ColorCorrectionGlsl.h (shared with the per-output
-// color blit program, so both are built from one text); this keeps the name
-// and the exact bytes the layer shaders below have always concatenated.
+// color blit program, so all are built from one text). Since rev 4 of programme
+// phase 3 the trims arrive as a CPU-composed matrix (ColorMatrix.h), set by
+// OpenGLRenderer::setColorCorrectionUniforms.
 const std::string COLOR_CORRECTION_FUNCTIONS = kColorCorrectionGlsl;
+const std::string COLOR_MATRIX_UNIFORMS = kColorMatrixUniformsGlsl;
 
 // Fragment shader for RGBA textures (CPU frames, HAP after decompression)
 const std::string FRAGMENT_RGBA = R"(
@@ -88,13 +90,7 @@ in vec2 vTexCoord;
 uniform sampler2D uTexture;
 uniform float uOpacity;
 
-// Color correction uniforms
-uniform float uBrightness;   // -1.0 to 1.0 (0 = no change)
-uniform float uContrast;     // 0.0 to 2.0 (1 = no change)
-uniform float uSaturation;   // 0.0 to 2.0 (1 = no change)
-uniform float uHue;          // -180 to 180 degrees
-uniform float uGamma;        // 0.1 to 3.0 (1 = no change)
-uniform bool uColorCorrectionEnabled;
+)" + COLOR_MATRIX_UNIFORMS + R"(uniform bool uColorCorrectionEnabled;
 
 )" + COLOR_CORRECTION_FUNCTIONS + R"(
 
@@ -105,8 +101,7 @@ void main() {
     vec3 rgb = color.rgb;
     
     if (uColorCorrectionEnabled) {
-        rgb = applyColorCorrection(rgb, uBrightness, uContrast, 
-                                   uSaturation, uHue, uGamma);
+        rgb = applyColorMatrix(rgb, uColorMatrix, uColorOffset, uInvGamma);
     }
     
     FragColor = vec4(rgb, color.a * uOpacity);
@@ -123,13 +118,7 @@ uniform sampler2D uTexture;
 uniform float uOpacity;
 uniform float uAnisotropy;  // 1.0 = normal, 2.0-16.0 = enhanced filtering
 
-// Color correction uniforms
-uniform float uBrightness;
-uniform float uContrast;
-uniform float uSaturation;
-uniform float uHue;
-uniform float uGamma;
-uniform bool uColorCorrectionEnabled;
+)" + COLOR_MATRIX_UNIFORMS + R"(uniform bool uColorCorrectionEnabled;
 
 )" + COLOR_CORRECTION_FUNCTIONS + R"(
 
@@ -143,8 +132,7 @@ void main() {
     
     vec3 rgb = color.rgb;
     if (uColorCorrectionEnabled) {
-        rgb = applyColorCorrection(rgb, uBrightness, uContrast, 
-                                   uSaturation, uHue, uGamma);
+        rgb = applyColorMatrix(rgb, uColorMatrix, uColorOffset, uInvGamma);
     }
     
     FragColor = vec4(rgb, color.a * uOpacity);
@@ -163,13 +151,7 @@ uniform sampler2D uTexY;   // Luma plane (R8)
 uniform sampler2D uTexUV;  // Chroma plane (RG8)
 uniform float uOpacity;
 
-// Color correction uniforms
-uniform float uBrightness;
-uniform float uContrast;
-uniform float uSaturation;
-uniform float uHue;
-uniform float uGamma;
-uniform bool uColorCorrectionEnabled;
+)" + COLOR_MATRIX_UNIFORMS + R"(uniform bool uColorCorrectionEnabled;
 
 )" + COLOR_CORRECTION_FUNCTIONS + R"(
 
@@ -198,8 +180,7 @@ void main() {
     
     // Apply color correction
     if (uColorCorrectionEnabled) {
-        rgb = applyColorCorrection(rgb, uBrightness, uContrast, 
-                                   uSaturation, uHue, uGamma);
+        rgb = applyColorMatrix(rgb, uColorMatrix, uColorOffset, uInvGamma);
     }
     
     FragColor = vec4(rgb, uOpacity);
@@ -218,13 +199,7 @@ uniform sampler2D uTexU;  // U chroma plane (R8)
 uniform sampler2D uTexV;  // V chroma plane (R8)
 uniform float uOpacity;
 
-// Color correction uniforms
-uniform float uBrightness;
-uniform float uContrast;
-uniform float uSaturation;
-uniform float uHue;
-uniform float uGamma;
-uniform bool uColorCorrectionEnabled;
+)" + COLOR_MATRIX_UNIFORMS + R"(uniform bool uColorCorrectionEnabled;
 
 )" + COLOR_CORRECTION_FUNCTIONS + R"(
 
@@ -253,8 +228,7 @@ void main() {
     
     // Apply color correction
     if (uColorCorrectionEnabled) {
-        rgb = applyColorCorrection(rgb, uBrightness, uContrast, 
-                                   uSaturation, uHue, uGamma);
+        rgb = applyColorMatrix(rgb, uColorMatrix, uColorOffset, uInvGamma);
     }
     
     FragColor = vec4(rgb, uOpacity);
@@ -286,13 +260,7 @@ in vec2 vTexCoord;
 uniform sampler2D uTexture;
 uniform float uOpacity;
 
-// Color correction uniforms
-uniform float uBrightness;
-uniform float uContrast;
-uniform float uSaturation;
-uniform float uHue;
-uniform float uGamma;
-uniform bool uColorCorrectionEnabled;
+)" + COLOR_MATRIX_UNIFORMS + R"(uniform bool uColorCorrectionEnabled;
 
 )" + COLOR_CORRECTION_FUNCTIONS + R"(
 
@@ -303,8 +271,7 @@ void main() {
     vec3 rgb = color.rgb;
     
     if (uColorCorrectionEnabled) {
-        rgb = applyColorCorrection(rgb, uBrightness, uContrast, 
-                                   uSaturation, uHue, uGamma);
+        rgb = applyColorMatrix(rgb, uColorMatrix, uColorOffset, uInvGamma);
     }
     
     FragColor = vec4(rgb, color.a * uOpacity);

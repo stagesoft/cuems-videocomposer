@@ -950,8 +950,9 @@ target_compile_definitions(cuems-videocomposer PRIVATE CUEMS_NDI_CONFIG_DIR="${C
 # Build-time validation of the output blit GLSL (per-output color, programme
 # phase 3). dump_blit_glsl is a GL-free host tool that writes the exact text the
 # compositor compiles (display/OutputBlitGlsl.h: program A, program B assembled
-# from it, and their vertex shader); glslangValidator then checks all three as
-# part of ALL. Absent tool: a WARNING and no check, unless VC_REQUIRE_GLSLANG is
+# from it, and their vertex shader; since rev 4 also the layer and master shaders
+# of display/VideoShaders.h, which share B's color text); glslangValidator then
+# checks them all as part of ALL. Absent tool: a WARNING and no check, unless VC_REQUIRE_GLSLANG is
 # ON (debian/rules and CI set it), which makes it a configure error.
 option(VC_REQUIRE_GLSLANG "Fail configure if glslangValidator is missing" OFF)
 add_executable(dump_blit_glsl tools/dump_blit_glsl.cpp)
@@ -965,8 +966,15 @@ if(GLSLANG_VALIDATOR)
         COMMAND ${GLSLANG_VALIDATOR} -S vert "${BLIT_GLSL_DIR}/blit.vert"
         COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/A.frag"
         COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/B.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S vert "${BLIT_GLSL_DIR}/layer.vert"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/layer_rgba.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/layer_rgba_hq.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/layer_nv12.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/layer_yuv420p.frag"
+        COMMAND ${GLSLANG_VALIDATOR} -S vert "${BLIT_GLSL_DIR}/master.vert"
+        COMMAND ${GLSLANG_VALIDATOR} -S frag "${BLIT_GLSL_DIR}/master.frag"
         DEPENDS dump_blit_glsl
-        COMMENT "Validating the output blit GLSL (programs A and B) with glslangValidator"
+        COMMENT "Validating the output blit GLSL (programs A and B) and the layer and master shaders with glslangValidator"
         VERBATIM
     )
     message(STATUS "glslangValidator found: ${GLSLANG_VALIDATOR} - output blit GLSL validated at build time")

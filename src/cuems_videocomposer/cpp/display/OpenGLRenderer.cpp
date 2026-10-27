@@ -26,6 +26,7 @@
 #include "../input/HAPVideoInput.h"
 #include "../input/InputSource.h"
 #include "VideoShaders.h"
+#include "ColorMatrix.h"
 #include "HapShaders.h"
 #include <GL/glew.h>  // Must be included before GL/gl.h
 extern "C" {
@@ -1794,9 +1795,18 @@ void OpenGLRenderer::renderMasterQuadWithTransforms() {
 //   - Shader branch skips all color math (~0.02% GPU overhead)
 //
 // When enabled:
-//   - 6 uniforms are set (enabled + 5 color values)
-//   - Full color correction applied in shader
+//   - 4 uniforms are set (enabled + the CPU-composed matrix, offset and 1/gamma)
+//   - The shader applies M * rgb + off, then gamma and the clamp
 //
+// The trims reach the shaders as a CPU-composed matrix (ColorMatrix.h, programme
+// phase 3 rev 4): about 60 flops per colored layer per draw, instead of the hue
+// matrix and five function calls per pixel.
+void OpenGLRenderer::setColorMatrixUniforms(ShaderProgram* shader, const ColorMatrix& cm) {
+    shader->setUniformMatrix3fv(kUniformColorMatrix, cm.m);
+    shader->setUniform(kUniformColorOffset, cm.off[0], cm.off[1], cm.off[2]);
+    shader->setUniform(kUniformInvGamma, cm.invGamma);
+}
+
 void OpenGLRenderer::setColorCorrectionUniforms(ShaderProgram* shader, 
                                                 const LayerProperties::ColorAdjustment& colorAdjust) {
     if (!shader) return;
@@ -1805,11 +1815,9 @@ void OpenGLRenderer::setColorCorrectionUniforms(ShaderProgram* shader,
     shader->setUniform("uColorCorrectionEnabled", enabled ? 1 : 0);
     
     if (enabled) {
-        shader->setUniform("uBrightness", colorAdjust.brightness);
-        shader->setUniform("uContrast", colorAdjust.contrast);
-        shader->setUniform("uSaturation", colorAdjust.saturation);
-        shader->setUniform("uHue", colorAdjust.hue);
-        shader->setUniform("uGamma", colorAdjust.gamma);
+        setColorMatrixUniforms(shader, composeColorMatrix(colorAdjust.brightness, colorAdjust.contrast,
+                                                          colorAdjust.saturation, colorAdjust.hue,
+                                                          colorAdjust.gamma));
     }
 }
 
@@ -1821,11 +1829,9 @@ void OpenGLRenderer::setMasterColorCorrectionUniforms(ShaderProgram* shader,
     shader->setUniform("uColorCorrectionEnabled", enabled ? 1 : 0);
     
     if (enabled) {
-        shader->setUniform("uBrightness", colorAdjust.brightness);
-        shader->setUniform("uContrast", colorAdjust.contrast);
-        shader->setUniform("uSaturation", colorAdjust.saturation);
-        shader->setUniform("uHue", colorAdjust.hue);
-        shader->setUniform("uGamma", colorAdjust.gamma);
+        setColorMatrixUniforms(shader, composeColorMatrix(colorAdjust.brightness, colorAdjust.contrast,
+                                                          colorAdjust.saturation, colorAdjust.hue,
+                                                          colorAdjust.gamma));
     }
 }
 

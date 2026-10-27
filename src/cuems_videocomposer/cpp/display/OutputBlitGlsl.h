@@ -150,12 +150,7 @@ inline constexpr char kRampMarker[] = "    // Calculate edge blending alpha";
 
 /** B's uniforms, inserted in front of kDeclarationAnchor together with the shared trims. */
 inline constexpr char kColorDeclarations[] = R"(// Per-output color (programme phase 3): trims, then a 3D LUT, before the ramp
-uniform int uColorEnabled;       // 0 = trims off, 1 = on
-uniform float uBrightness;       // -1.0 to 1.0 (0 = no change)
-uniform float uContrast;         // 0.0 to 2.0 (1 = no change)
-uniform float uSaturation;       // 0.0 to 2.0 (1 = no change)
-uniform float uHue;              // -180 to 180 degrees
-uniform float uGamma;            // 0.1 to 3.0 (1 = no change, > 1 brightens)
+uniform int uColorEnabled;       // 0 = trims off, 1 = on (the trims: kColorMatrixUniformsGlsl)
 uniform int uLutEnabled;         // 0 = no LUT, 1 = sample uLutTex
 uniform sampler3D uLutTex;       // always unit 2 (the output's LUT or a 1x1x1 placeholder)
 uniform vec3 uLutScale;          // texel-centre transform of the LUT domain (LutTransform)
@@ -166,8 +161,7 @@ uniform vec3 uLutOffset;
 inline constexpr char kColorStages[] = R"(    
     // Per-output color: the five trims, then the 3D LUT (explicit LOD 0: one level)
     if (uColorEnabled != 0) {
-        color.rgb = applyColorCorrection(color.rgb, uBrightness, uContrast,
-                                         uSaturation, uHue, uGamma);
+        color.rgb = applyColorMatrix(color.rgb, uColorMatrix, uColorOffset, uInvGamma);
     }
     if (uLutEnabled != 0) {
         color.rgb = textureLod(uLutTex, color.rgb * uLutScale + uLutOffset, 0.0).rgb;
@@ -205,10 +199,11 @@ inline std::string assembleFragmentB() {
     }
 
     std::string b;
-    b.reserve(a.size() + sizeof(kColorDeclarations) + sizeof(kColorCorrectionGlsl) +
-              sizeof(kColorStages));
+    b.reserve(a.size() + sizeof(kColorDeclarations) + sizeof(kColorMatrixUniformsGlsl) +
+              sizeof(kColorCorrectionGlsl) + sizeof(kColorStages));
     b.append(a.substr(0, decl));
     b.append(kColorDeclarations);
+    b.append(kColorMatrixUniformsGlsl);
     b.append(kColorCorrectionGlsl);
     b.append("\n");
     b.append(a.substr(decl, stages - decl));

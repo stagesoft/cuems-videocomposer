@@ -157,11 +157,9 @@ private:
         GLint warpEnabled = -1;
         GLint warpTex = -1;
         GLint colorEnabled = -1;
-        GLint brightness = -1;
-        GLint contrast = -1;
-        GLint saturation = -1;
-        GLint hue = -1;
-        GLint gamma = -1;
+        GLint colorMatrix = -1;   // the trims as M * rgb + off (ColorMatrix.h)
+        GLint colorOffset = -1;
+        GLint invGamma = -1;
         GLint lutEnabled = -1;
         GLint lutTex = -1;
         GLint lutScale = -1;
