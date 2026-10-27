@@ -27,6 +27,7 @@
  * - Output region layouts (canvas positions)
  * - Edge blending parameters
  * - Geometric warping
+ * - Per-output color correction (color_* keys)
  * - Configuration persistence (save/load)
  */
 
@@ -89,8 +90,25 @@ struct OutputConfiguration {
     bool warpEnabled = false;
     std::string warpMeshPath;   // Path to warp mesh file
     
+    // Color (programme phase 3): the color_* keys. Unlike blend, it reaches the
+    // output's region under every canvas_layout (applyColorToRegions).
+    OutputColor color;
+    
     // Status
     bool enabled = true;
+    
+    /** Any trim off its default, or a LUT configured */
+    bool hasColor() const { return color.trimsActive() || color.lutConfigured(); }
+};
+
+/**
+ * What the last loadFromFile() found wrong with the color_* keys. Every item is
+ * also logged when it is found; this keeps a count for diagnostics and the tests.
+ */
+struct DisplayConfigLoadReport {
+    int colorErrors = 0;     // refused values (unparsable, non-finite, refused LUT path)
+    int colorWarnings = 0;   // out-of-range values used clamped
+    std::vector<std::string> colorWithoutCanvasRegion;  // sections with color_* keys and no canvas_region
 };
 
 /**
@@ -241,6 +259,15 @@ public:
     void setOutputBlend(const std::string& name, const BlendEdges& blend);
     
     /**
+     * Copy each configured output's color (trims + LUT path, as parsed) into its
+     * region, whatever the canvas layout. Only outputs with color are touched; each
+     * gets a fresh draw state, no LUT texture and LutStatus::None - loading the LUT
+     * is the backend's (it needs a GL context). GL-free.
+     * @return number of regions that received a color
+     */
+    int applyColorToRegions(std::vector<OutputRegion>& regions) const;
+    
+    /**
      * Enable/disable output
      */
     void setOutputEnabled(const std::string& name, bool enabled);
@@ -260,6 +287,11 @@ public:
      * @return true on success
      */
     bool loadFromFile(const std::string& path);
+    
+    /**
+     * What the last loadFromFile() found wrong with the color_* keys
+     */
+    const DisplayConfigLoadReport& lastLoadReport() const { return loadReport_; }
     
     /**
      * Get default config file path
@@ -284,6 +316,7 @@ private:
     std::map<int, ConfigChangeCallback> changeListeners_;
     int nextListenerId_ = 0;
     bool resolutionPolicySpecified_ = false;  // set by loadFromFile() when resolution_policy= is present
+    DisplayConfigLoadReport loadReport_;      // filled by loadFromFile()
     
     void notifyListeners();
     void updateTimestamp();

@@ -257,6 +257,79 @@ bool test_Contract_StateShowLock() {
            present["result"]["outputs"][0]["current"] == "1920x1080@60.00p";
 }
 
+bool test_Contract_StateCarriesColor() {
+    // Programme phase 3, plan 2.7: per-output color in get_state, GL-free.
+    ContractSnapshot s = sampleSnapshot();
+    ContractOutputState configured = s.state.outputs[0];
+    configured.color.brightness = 0.02f;
+    configured.color.contrast = 1.08f;
+    configured.color.saturation = 1.0f;
+    configured.color.hue = -3.0f;
+    configured.color.gamma = 1.05f;
+    configured.color.lut = "/etc/cuems/luts/p2-christie.cube";
+    configured.color.lutStatus = "ok";
+    configured.color.applied = true;
+    ContractOutputState plain;                       // unconfigured: identity values
+    plain.connector = "HDMI-A-2";
+    plain.color.applied = true;
+    ContractOutputState failed = configured;         // B failed or its first draw failed
+    failed.connector = "HDMI-A-3";
+    failed.color.lut = "/etc/cuems/luts/gone.cube";
+    failed.color.lutStatus = "missing";
+    failed.color.applied = false;
+    s.state.outputs = {configured, plain, failed};
+
+    auto r = json::parse(ContractProtocol::handle(R"({"v":1,"id":"c","op":"get_state"})", s, identity()));
+    if (r["ok"] != true) { std::cerr << "[get_state not ok] "; return false; }
+    const auto& outs = r["result"]["outputs"];
+    // Floats come out as the decimal written (1.08, not 1.0800000429153442).
+    const json expectConfigured = {
+        {"brightness", 0.02}, {"contrast", 1.08}, {"saturation", 1.0}, {"hue", -3.0}, {"gamma", 1.05},
+        {"lut", "/etc/cuems/luts/p2-christie.cube"}, {"lut_status", "ok"}, {"applied", true}};
+    const json expectPlain = {
+        {"brightness", 0.0}, {"contrast", 1.0}, {"saturation", 1.0}, {"hue", 0.0}, {"gamma", 1.0},
+        {"lut", nullptr}, {"lut_status", "none"}, {"applied", true}};
+    if (outs[0]["color"] != expectConfigured) { std::cerr << "[configured] " << outs[0]["color"].dump() << " "; return false; }
+    if (outs[1]["color"] != expectPlain) { std::cerr << "[plain] " << outs[1]["color"].dump() << " "; return false; }
+    if (outs[2]["color"]["applied"] != false || outs[2]["color"]["lut_status"] != "missing") {
+        std::cerr << "[failed] " << outs[2]["color"].dump() << " ";
+        return false;
+    }
+    // The text, not only the parsed value: no float noise on the wire.
+    const std::string text = ContractProtocol::stateJson(s, false);
+    if (text.find("\"contrast\":1.08,") == std::string::npos || text.find("1.0800000") != std::string::npos) {
+        std::cerr << "[float text] ";
+        return false;
+    }
+    // A default-constructed state (legacy mode: no color report) is identity, not applied.
+    ContractOutputState legacy;
+    if (legacy.color.applied || legacy.color.lutStatus != "none" || !legacy.color.lut.empty()) {
+        std::cerr << "[legacy default] ";
+        return false;
+    }
+
+    // Caps: the token only when the canvas is up and program B linked.
+    const auto with = ContractProtocol::caps(true);
+    const auto without = ContractProtocol::caps(false);
+    const std::vector<std::string> base = {"report_v1", "mode_timing", "interlace_flag"};
+    if (without != base) { std::cerr << "[caps without] "; return false; }
+    std::vector<std::string> plusColor = base;
+    plusColor.push_back("output_color");
+    if (with != plusColor) { std::cerr << "[caps with] "; return false; }
+    ContractProtocol::Identity id = identity();
+    id.caps = with;
+    auto c = json::parse(ContractProtocol::handle(R"({"v":1,"id":"k","op":"get_caps"})", s, id));
+    id.caps = without;
+    auto n = json::parse(ContractProtocol::handle(R"({"v":1,"id":"k","op":"get_caps"})", s, id));
+    if (c["result"]["caps"] != json(plusColor) || n["result"]["caps"] != json(base)) {
+        std::cerr << "[get_caps] ";
+        return false;
+    }
+
+    // Identity::showLockPath defaults to the gate's constant (one path, n6).
+    return ContractProtocol::Identity{}.showLockPath == std::string(kShowLockPath);
+}
+
 bool test_Contract_ServerRoundTripAndBindFailure() {
     ContractSnapshotHolder holder;
     holder.set(sampleSnapshot());

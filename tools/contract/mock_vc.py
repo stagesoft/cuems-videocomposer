@@ -7,7 +7,11 @@
 two 4K30 panels and one free connector). For the manager team to build
 against without a GPU, and for tools/contract/test_contract.py.
 
-    mock_vc.py [--rep URL] [--pub URL] [--event-every SECONDS]
+    mock_vc.py [--rep URL] [--pub URL] [--event-every SECONDS] [--no-color-program]
+
+HDMI-A-1 carries a configured per-output color (trims + a LUT), HDMI-A-2 the
+identity. --no-color-program mocks a VC whose color program did not link: no
+"output_color" cap and applied=false on every output.
 """
 import argparse
 import json
@@ -70,15 +74,35 @@ def canned_hardware():
     return {"outputs": out}
 
 
-def canned_state(show_lock="/tmp/cuems.show.lock"):
+BASE_CAPS = ["report_v1", "mode_timing", "interlace_flag"]
+IDENTITY_COLOR = {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0, "gamma": 1.0,
+                  "lut": None, "lut_status": "none"}
+
+
+def canned_caps(color_program=True):
+    return BASE_CAPS + (["output_color"] if color_program else [])
+
+
+def canned_color(i, color_program=True):
+    if i == 0:
+        color = {"brightness": 0.02, "contrast": 1.08, "saturation": 1.0, "hue": -3.0, "gamma": 1.05,
+                 "lut": "/etc/cuems/luts/p2-christie.cube", "lut_status": "ok" if color_program else "none"}
+    else:
+        color = dict(IDENTITY_COLOR)
+    color["applied"] = color_program
+    return color
+
+
+def canned_state(show_lock="/tmp/cuems.show.lock", color_program=True):
     return {"mode": "show", "pacing": "coupled", "canvas": {"width": 7680, "height": 2160},
             "config_source": "mock", "show_loaded": os.path.exists(show_lock),
             "outputs": [{"connector": f"HDMI-A-{i + 1}", "enabled": True, "region": [3840 * i, 0, 3840, 2160],
                          "blend": {"left": 0, "right": 0, "top": 0, "bottom": 0, "gamma": 2.2},
-                         "current": "3840x2160@30.00p"} for i in range(2)]}
+                         "current": "3840x2160@30.00p",
+                         "color": canned_color(i, color_program)} for i in range(2)]}
 
 
-def handle(raw, ident):
+def handle(raw, ident, color_program=True):
     try:
         req = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
@@ -104,16 +128,16 @@ def handle(raw, ident):
     if req["v"] > VERSION:
         return err("version_unsupported", "this videocomposer speaks contract v1", max_v=VERSION)
     if op == "get_caps":
-        return ok({"caps": ["report_v1", "mode_timing", "interlace_flag"]})
+        return ok({"caps": canned_caps(color_program)})
     if op == "get_hardware":
         full = canned_hardware()
         return ok(full if req.get("detail") == "full" else simple(full))
     if op == "get_state":
-        return ok(canned_state())
+        return ok(canned_state(color_program=color_program))
     return err("unsupported_op", f"unknown op '{op}'")
 
 
-def serve(rep_url, pub_url, event_every, stop):
+def serve(rep_url, pub_url, event_every, stop, color_program=True):
     ident = {"vc_version": "mock", "pid": os.getpid(), "hostname": os.uname().nodename}
     with pynng.Rep0(listen=rep_url, recv_timeout=200) as rep, pynng.Pub0(listen=pub_url) as pub:
         seq = 0
@@ -121,7 +145,7 @@ def serve(rep_url, pub_url, event_every, stop):
         while not stop.is_set():
             try:
                 raw = rep.recv()
-                rep.send(json.dumps(handle(raw.decode(errors="replace"), ident)).encode())
+                rep.send(json.dumps(handle(raw.decode(errors="replace"), ident, color_program)).encode())
             except pynng.Timeout:
                 pass
             if next_event and time.monotonic() >= next_event:
@@ -136,10 +160,12 @@ def main():
     ap.add_argument("--rep", default="ipc:///tmp/cuems-videocomposer.ipc")
     ap.add_argument("--pub", default="ipc:///tmp/cuems-videocomposer-events.ipc")
     ap.add_argument("--event-every", type=float, default=0.0)
+    ap.add_argument("--no-color-program", action="store_true",
+                    help="mock a VC whose color program did not link (no output_color cap, applied=false)")
     args = ap.parse_args()
     stop = threading.Event()
     try:
-        serve(args.rep, args.pub, args.event_every, stop)
+        serve(args.rep, args.pub, args.event_every, stop, color_program=not args.no_color_program)
     except KeyboardInterrupt:
         stop.set()
 

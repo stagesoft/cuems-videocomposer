@@ -70,8 +70,13 @@ fields they do not know. Anything that changes meaning bumps `v`. Capabilities a
 ### 2.2 `get_caps`
 
 ```json
-→ {"result": {"caps": ["report_v1", "mode_timing", "interlace_flag"]}}
+→ {"result": {"caps": ["report_v1", "mode_timing", "interlace_flag", "output_color"]}}
 ```
+
+`output_color`: `get_state` reports per-output color (§2.4). It is listed **only when the VC runs its
+virtual canvas and its color program linked** on this GPU; on a VC in legacy (single-output) mode, or where
+the color program failed to compile or link, the token is absent, and so it is on a VC older than per-output
+color. Without the token, ignore any `color` field: nothing on that VC can show a correction.
 
 `hotplug` is **not** in v1's list yet: cable plug/unplug events will be announced by that token when they
 exist. Until then, re-read `get_hardware` when you need fresh connector state.
@@ -134,7 +139,9 @@ display/sync/total values, DRM `flags` and `type`). Configuration tools do not n
  "outputs": [
    {"connector": "HDMI-A-1", "enabled": true, "region": [0, 0, 3840, 2160],
     "blend": {"left": 0, "right": 0, "top": 0, "bottom": 0, "gamma": 2.2},
-    "current": "3840x2160@30.00p"}
+    "current": "3840x2160@30.00p",
+    "color": {"brightness": 0.02, "contrast": 1.08, "saturation": 1.0, "hue": -3.0, "gamma": 1.05,
+              "lut": "/etc/cuems/luts/p2-christie.cube", "lut_status": "ok", "applied": true}}
  ]}
 ```
 
@@ -147,6 +154,24 @@ display/sync/total values, DRM `flags` and `type`). Configuration tools do not n
   will be refused while it is present.
 - `outputs` lists the outputs of the VC's canvas; `region` is `[x, y, width, height]` in canvas pixels;
   `current` is the `id` of the mode driven there (as in `get_hardware`), `null` when not driven.
+- `color` (with the `output_color` cap, §2.2): the output's color correction (applied to the output's
+  picture before its edge-blend ramp) — the five trims as `display.conf`'s `color_*` keys take them
+  (`brightness` −1…1, `contrast` 0…2, `saturation` 0…2, `hue` −180…180 degrees, `gamma` 0.1…3), and
+  `lut`, the **resolved path** of the configured 3D LUT, or `null` when none is configured.
+  - **Every output carries `color`, with identity values (0, 1, 1, 0, 1, `null`) when nothing is
+    configured.** Do not infer "configured" from the field being present: compare with the identity values,
+    or look at `lut_status`.
+  - `lut_status`: `none` (no LUT configured, or configured but not loaded because the color program is
+    unavailable), `ok` (loaded), `missing` (file not found) or `invalid` (unreadable, malformed, wrong size,
+    or the GPU upload failed). With `missing`/`invalid` the output runs with its trims only.
+  - `applied`: `true` when the VC's color program is linked and this output's color draw has not failed —
+    what the screen shows matches the values above. `false` means the values are what is *configured*, but
+    the output is drawn without color (the program failed on this GPU, its first draw on this output raised
+    a GL error, or the VC is in legacy mode). On an output with identity values `applied: true` simply means
+    there is nothing to apply.
+  - Color is set today by `display.conf` (at VC start) and by the VC's own OSC `display/color` command (no
+    project loaded); each change publishes `state_changed`. **Writing color through the contract is v2**,
+    like every other write.
 
 ## 3. Events
 
