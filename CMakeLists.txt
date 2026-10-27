@@ -1009,6 +1009,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestOutputColor.cpp
         src/cuems_videocomposer/cpp/test/TestDisplayConfigColor.cpp
         src/cuems_videocomposer/cpp/test/TestOutputColorCommands.cpp
+        src/cuems_videocomposer/cpp/test/TestDayAlign.cpp
     )
     
     # C++ implementation files needed by tests
@@ -1128,9 +1129,17 @@ if(BUILD_TESTS)
         endif()
     endif()
     
-    # Link mtcreceiver and cuemslogger if MIDI is enabled
+    # Link mtcreceiver and cuemslogger if MIDI is enabled. The test binary gets
+    # its own build of mtcreceiver with MTCRECV_TESTING (the day-alignment tests
+    # drive MtcReceiver::toLocalDay through setHeadAuthoritativeForTesting); the
+    # define is PUBLIC so every test TU sees the same class. The shipped binary
+    # keeps linking the plain `mtcreceiver` target.
     if(ENABLE_MIDI AND RTMIDI_FOUND)
-        target_link_libraries(cuems_videocomposer_test mtcreceiver cuemslogger)
+        add_library(mtcreceiver_testing STATIC src/mtcreceiver/mtcreceiver.cpp)
+        target_include_directories(mtcreceiver_testing PUBLIC src/mtcreceiver ${RTMIDI_INCLUDE_DIRS})
+        target_compile_definitions(mtcreceiver_testing PUBLIC MTCRECV_TESTING HAVE_CUEMS_LOGGER)
+        target_link_libraries(mtcreceiver_testing ${RTMIDI_LIBRARIES})
+        target_link_libraries(cuems_videocomposer_test mtcreceiver_testing cuemslogger)
         target_include_directories(cuems_videocomposer_test PRIVATE
             src/mtcreceiver
             src/cuemslogger

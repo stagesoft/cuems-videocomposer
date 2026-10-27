@@ -1240,8 +1240,10 @@ bool RemoteCommandRouter::handleLayerOffset(VideoLayer* layer, const std::vector
         
         offset = SMPTEUtils::smpteStringToFrame(offsetStr, framerate, haveDropframes, false, true);
     } else {
-        // Integer frame offset
-        offset = std::atoll(offsetStr.c_str());
+        // Integer frame offset: the engine path (25 fps MTC frames in the
+        // engine's MTC day). Day-aligned by the layer before it is used.
+        layer->setEngineTimeOffset(std::atoll(offsetStr.c_str()));
+        return true;
     }
     
     layer->setTimeOffset(offset);
