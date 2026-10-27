@@ -144,6 +144,12 @@ private:
     
     // Master layer properties (for composite output)
     MasterProperties masterProperties_;
+    bool masterTransformWarned_ = false;  // core profile: transforms are ignored, said once
+
+    // Whether compositeLayers() takes the master FBO path. In a core profile
+    // (DRM) only master color can be drawn: the transforms live on the
+    // fixed-function path, which draws nothing there.
+    bool masterPassActive();
     
     // FBO for off-screen rendering (used when master transforms are active)
     GLuint masterFBO_;              // Framebuffer Object
