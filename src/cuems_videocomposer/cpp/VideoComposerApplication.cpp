@@ -43,6 +43,7 @@
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
 #include "sync/MtcReceiverMIDIDriver.h"  // MtcReceiver::resetWrapOffset() in resetAll()
+#include "sync/DayAlign.h"
 #include "layer/LayerManager.h"
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
@@ -163,6 +164,8 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
 
     // Initialize global MIDI sync source (shared across all layers)
     initializeGlobalSyncSource();
+    // Engine offsets are day-aligned on the mtcreceiver head (sync/DayAlign.h)
+    LOG_INFO << dayalign::banner(dayalign::mtcReceiverDrivers().load() > 0);
 
     // Create initial layer if movie file provided
     std::string movieFile = config_->getMovieFile();

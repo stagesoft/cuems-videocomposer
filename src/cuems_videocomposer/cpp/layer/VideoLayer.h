@@ -113,6 +113,9 @@ public:
     // Time-scaling (applied to sync source frames)
     void setTimeOffset(int64_t offset);
     int64_t getTimeOffset() const;
+    // The engine's integer /offset: day-aligned before use (LayerPlayback)
+    void setEngineTimeOffset(int64_t rawFrames);
+    bool hasPendingEngineOffset() const;
     
     void setTimeScale(double scale);
     double getTimeScale() const;
