@@ -25,6 +25,8 @@
 #include "SyncSource.h"
 #include "MIDIDriver.h"
 #include "MTCDecoder.h"
+#include "MtcInvalidHold.h"
+#include "QfSeqlock.h"
 #include <atomic>
 #include <string>
 #include <memory>
@@ -119,6 +121,21 @@ public:
      */
     long getDisplayLatencyMs() const override { return displayLatencyMs_.load(); }
 
+    /**
+     * Undecodable timecode (D13): register mtcreceiver's tick callback and
+     * judge the quarter frames with the audio player's anchored-run rule.
+     * After 800 ms of a moving head without an anchored tick (a doubled
+     * rtpmidid subscription) the source holds: pollFrame() and getTimeMs()
+     * return the values they had at that instant and full-frame
+     * notifications are swallowed, until the first anchored tick. Call once,
+     * from the application's own global sync source, after connect(); a no-op
+     * unless the connected driver is the mtcreceiver one. The callback is the
+     * single static one of mtcreceiver: nothing else may register it.
+     */
+    bool enableAnchoredLiveness();
+    bool isAnchoredLivenessEnabled() const { return livenessEnabled_; }
+    bool isHeldOnInvalidTimecode() const { return hold_.held(); }
+
 private:
     std::unique_ptr<MIDIDriver> driver_;
     MTCDecoder mtcDecoder_;
@@ -127,6 +144,18 @@ private:
     int64_t currentFrame_;
     bool connected_;
     std::atomic<long> displayLatencyMs_;
+
+    // D13: the anchored-run liveness rule and its hold (render thread only,
+    // except ticks_, whose writer is the MIDI thread)
+    void updateLiveness();
+    long getTimeMsFollowing() const;   // the smoothed MTC time (today's getTimeMs)
+    TickSeqlock ticks_;
+    TickSample lastTick_;
+    MtcInvalidHold hold_;
+    bool livenessEnabled_ = false;
+    int64_t frozenFrame_ = -1;
+    mutable long lastTimeMs_ = -1;
+    long frozenTimeMs_ = -1;
 };
 
 } // namespace videocomposer
