@@ -895,6 +895,12 @@ void DRMBackend::clearCurrent() {
 }
 
 OpenGLRenderer* DRMBackend::getRenderer() {
+    // Virtual Canvas mode has no renderer_ of its own: the canvas renderer is
+    // the one that draws, so master commands must reach it. Returning null here
+    // sent them to VideoComposerApplication's static dummy (1amfwm7fp88).
+    if (useVirtualCanvas_ && multiRenderer_) {
+        return multiRenderer_->getRenderer();
+    }
     return renderer_.get();
 }
 
