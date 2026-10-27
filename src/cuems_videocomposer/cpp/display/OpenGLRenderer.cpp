@@ -825,7 +825,7 @@ void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layer
     evictRemovedLayerTextures(layers);
 
     // Check if master transforms are active
-    bool useMasterFBO = masterProperties_.isActive();
+    bool useMasterFBO = masterPassActive();
 
     // The target the caller bound: the window (0) on X11/Wayland, the virtual
     // canvas FBO on DRM. The master pass must end there, not on 0: on DRM, 0 is
@@ -1644,6 +1644,25 @@ void OpenGLRenderer::cleanupMasterFBO() {
     masterFBOWidth_ = 0;
     masterFBOHeight_ = 0;
     masterFBOInitialized_ = false;
+}
+
+bool OpenGLRenderer::masterPassActive() {
+    const MasterProperties& props = masterProperties_;
+    if (!isCoreProfile_) {
+        return props.isActive();
+    }
+    MasterProperties transformsOnly = props;
+    transformsOnly.colorAdjust.reset();
+    if (transformsOnly.isActive()) {
+        if (!masterTransformWarned_) {
+            LOG_WARNING << "Master position/scale/rotation/opacity/corners are not supported on this"
+                           " display backend (core profile) and are ignored; master color still applies";
+            masterTransformWarned_ = true;
+        }
+    } else {
+        masterTransformWarned_ = false;
+    }
+    return props.colorAdjust.isActive();
 }
 
 void OpenGLRenderer::renderMasterQuadWithTransforms() {
