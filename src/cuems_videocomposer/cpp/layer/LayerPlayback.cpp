@@ -375,8 +375,13 @@ void LayerPlayback::updateFromSyncSource() {
             }
         }
         
+        // A looping cue with the engine's period wraps on it (869ejxng3);
+        // without one, the totalFrames wrap/clamp below is unchanged.
+        const bool periodApplied = wraparound_ && loopPeriod_.valid() && inputSource_ &&
+                                   applyLoopPeriod(adjustedFrame, syncFrame);
+
         // Clamp frame to valid range (no automatic wrapping - use loop instead)
-        if (inputSource_) {
+        if (inputSource_ && !periodApplied) {
             FrameInfo info = inputSource_->getFrameInfo();
             int64_t totalFrames = info.totalFrames;
             
@@ -499,6 +504,114 @@ void LayerPlayback::updateFromSyncSource() {
             }
         }
     }
+}
+
+void LayerPlayback::setLoopPeriod(int64_t num, int64_t den, int64_t frames, const std::string& tag) {
+    loopperiod::Period p;
+    p.num = num;
+    p.den = den;
+    p.realFrames = frames > 0 ? frames : 0;
+    if (!p.valid()) {
+        if (loopPeriod_.valid()) {
+            LOG_INFO << "loop period cleared for layer " << tag;
+        }
+        clearLoopPeriod();
+        return;
+    }
+    loopTag_ = tag;
+    if (p == loopPeriod_) {
+        return;   // the per-pass re-send
+    }
+    loopPeriod_ = p;
+    loopLogged_ = false;
+    loopMismatchLogged_ = false;
+    loopBeyondLogged_ = false;
+    loopNoFramesLogged_ = false;
+    loopEndLogged_ = false;
+    loopLastPass_ = -2;
+}
+
+void LayerPlayback::clearLoopPeriod() {
+    loopPeriod_ = loopperiod::Period();
+    loopLogged_ = false;
+    loopMismatchLogged_ = false;
+    loopBeyondLogged_ = false;
+    loopNoFramesLogged_ = false;
+    loopEndLogged_ = false;
+    loopLastPass_ = -2;
+}
+
+bool LayerPlayback::applyLoopPeriod(int64_t& adjustedFrame, int64_t syncFrame) {
+    loopperiod::Rate rate;
+    if (!inputSource_->getFrameRateRational(rate.num, rate.den)) {
+        // No rational rate (not a file input): the double, on a 1001 base.
+        const double fps = inputSource_->getFrameInfo().framerate;
+        rate.num = static_cast<int64_t>(std::llround(fps * 1001.0));
+        rate.den = 1001;
+    }
+    const char* rule = "none";
+    const int64_t own = inputSource_->realFrames(&rule);
+    const int64_t frames = loopPeriod_.realFrames > 0 ? loopPeriod_.realFrames : own;
+    if (!rate.valid() || frames <= 0) {
+        if (!loopNoFramesLogged_) {
+            LOG_WARNING << "loop period for layer " << loopTag_ << " not applied: "
+                        << (rate.valid() ? "no frame count" : "no frame rate")
+                        << "; wrapping on the file's length";
+            loopNoFramesLogged_ = true;
+        }
+        return false;
+    }
+    const loopperiod::Band band = loopperiod::band(loopPeriod_, rate, frames);
+    if (!loopLogged_) {
+        LOG_INFO << "loop period for layer " << loopTag_ << ": " << loopPeriod_.num << "/"
+                 << loopPeriod_.den << " s = " << loopperiod::pfFrames(loopPeriod_, rate)
+                 << " frames at " << rate.num << "/" << rate.den << " fps; frames engine "
+                 << (loopPeriod_.realFrames > 0 ? std::to_string(loopPeriod_.realFrames) : std::string("-"))
+                 << ", own " << own << " (" << rule << "); band " << loopperiod::bandName(band)
+                 << "; passes " << loopPasses_;
+        loopLogged_ = true;
+    }
+    if (loopPeriod_.realFrames > 0 && own >= 0 && std::llabs(own - loopPeriod_.realFrames) > 2 &&
+        !loopMismatchLogged_) {
+        LOG_ERROR << "loop frame count for layer " << loopTag_ << ": engine " << loopPeriod_.realFrames
+                  << ", own " << own << " (" << rule << "), more than 2 frames apart; the engine's rules";
+        loopMismatchLogged_ = true;
+    }
+    if (band == loopperiod::Band::Beyond && !loopBeyondLogged_) {
+        LOG_ERROR << "loop period beyond the stretch bound: "
+                  << loopperiod::stretchPercent(loopPeriod_, rate, frames)
+                  << " %, holding at the cut (layer " << loopTag_ << ")";
+        loopBeyondLogged_ = true;
+    }
+
+    loopperiod::Shown shown = loopperiod::shownFrame(adjustedFrame, loopPeriod_, rate, frames, loopPasses_);
+    // The decode queue's own bound: never ask past the container's length.
+    const int64_t totalFrames = inputSource_->getFrameInfo().totalFrames;
+    if (totalFrames > 0 && shown.frame > totalFrames - 1) {
+        shown.frame = totalFrames - 1;
+    }
+
+    if (shown.pass > loopLastPass_ && shown.pass >= 1 && loopLastPass_ >= 0 && !shown.ended) {
+        long mtcFrame = static_cast<long>(syncFrame);
+#ifdef HAVE_MTCRECEIVER
+        mtcFrame = MtcReceiver::mtcHead.load() / 40;
+#endif
+        if (shown.pass <= 3) {
+            LOG_INFO << "loop pass " << shown.pass + 1 << " of layer " << loopTag_ << " at MTC frame "
+                     << mtcFrame << " (position " << adjustedFrame << ", shows " << shown.frame << ")";
+        } else {
+            LOG_DEBUG << "loop pass " << shown.pass + 1 << " of layer " << loopTag_ << " at MTC frame "
+                      << mtcFrame << " (position " << adjustedFrame << ", shows " << shown.frame << ")";
+        }
+    }
+    if (shown.ended && !loopEndLogged_) {
+        LOG_INFO << "loop of layer " << loopTag_ << " ended after " << loopPasses_
+                 << " passes; holding frame " << shown.frame;
+        loopEndLogged_ = true;
+    }
+    loopLastPass_ = shown.pass;
+    adjustedFrame = shown.frame;
+    return true;
 }
 
 bool LayerPlayback::isHardwareDecodeLayer() const {

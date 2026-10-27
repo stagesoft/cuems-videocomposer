@@ -294,6 +294,10 @@ void VideoLayer::setWraparound(bool enabled) {
     }
 }
 
+void VideoLayer::setLoopPeriod(int64_t num, int64_t den, int64_t frames) {
+    playback_.setLoopPeriod(num, den, frames, cueId_.empty() ? std::to_string(layerId_) : cueId_);
+}
+
 bool VideoLayer::getWraparound() const {
     return playback_.getWraparound();
 }

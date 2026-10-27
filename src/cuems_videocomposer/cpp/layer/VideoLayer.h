@@ -122,6 +122,12 @@ public:
     
     void setWraparound(bool enabled);
     bool getWraparound() const;
+
+    // The engine's loop period and pass count (869ejxng3 section 4.4); see
+    // LayerPlayback::setLoopPeriod.
+    void setLoopPeriod(int64_t num, int64_t den, int64_t frames);
+    void clearLoopPeriod() { playback_.clearLoopPeriod(); }
+    void setLoopPasses(int passes) { playback_.setLoopPasses(passes); }
     
     /**
      * MTC follow control - and the hang guard's only decision point.
