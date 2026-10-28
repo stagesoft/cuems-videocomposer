@@ -29,6 +29,7 @@
 #include "../guard/SaturationSignals.h"
 #include "../utils/ExitReporter.h"
 #include "../utils/Logger.h"
+#include <algorithm>
 #include <chrono>
 
 extern "C" {

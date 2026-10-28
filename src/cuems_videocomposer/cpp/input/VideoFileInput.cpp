@@ -951,7 +951,9 @@ bool VideoFileInput::isIntraFrameCodec() const {
         case AV_CODEC_ID_R210:       // Uncompressed RGB 10-bit
         case AV_CODEC_ID_R10K:       // AJA Kona 10-bit RGB
         case AV_CODEC_ID_AVUI:       // Avid Meridien Uncompressed
+        #if LIBAVCODEC_VERSION_MAJOR < 62  // removed in FFmpeg 8 (an enum value, so #ifdef can't test it)
         case AV_CODEC_ID_AYUV:       // Uncompressed packed 4:4:4
+        #endif
         case AV_CODEC_ID_TARGA_Y216: // Pinnacle TARGA CineWave YUV16
         case AV_CODEC_ID_JPEG2000:   // JPEG 2000 (intra-frame)
         #ifdef AV_CODEC_ID_CINEFORM
