@@ -247,7 +247,10 @@ out vec2 vTexCoord;
 
 void main() {
     gl_Position = vec4(aPos, 0.0, 1.0);
-    vTexCoord = aTexCoord;
+    // The shared quad flips v for video frames (stored top-down); the master
+    // FBO texture is stored bottom-up, so flip it back or the master comes out
+    // upside down (1amfwm7fp88).
+    vTexCoord = vec2(aTexCoord.x, 1.0 - aTexCoord.y);
 }
 )";
 

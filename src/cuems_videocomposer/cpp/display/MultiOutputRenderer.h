@@ -188,6 +188,12 @@ public:
      */
     VirtualCanvas* getCanvas() { return canvas_.get(); }
     const VirtualCanvas* getCanvas() const { return canvas_.get(); }
+
+    /**
+     * The renderer that composites the canvas (its master properties are the
+     * ones that take effect in Virtual Canvas mode)
+     */
+    OpenGLRenderer* getRenderer() { return renderer_.get(); }
     
     /**
      * Get canvas dimensions
