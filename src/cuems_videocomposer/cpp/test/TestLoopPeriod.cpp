@@ -346,9 +346,13 @@ bool test_LoopPeriod_Int128NoOverflow() {
     }
     // int64 would overflow: F b x R ~ 2e6 x 48000 x 1001 x 3.2e5 > 9.2e18
     TEST_ASSERT_TRUE((long double)2000000 * 48000 * 1001 * R > 9.3e18L);
-    // the int32 extreme of the wire with a 1001 rate: no overflow in the tail test
-    const lp::Period big{2147483647, 48000, 1341000};
-    TEST_ASSERT_TRUE(lp::tailKind(big, ntsc, 1341000) == lp::TailKind::NotDrawn);
+    // the int32 extreme of the wire with a 1001 rate: no overflow in the tail
+    // test. P = 2147483647 / 48000 = 44 739.24 s; 1 340 000 frames = 44 711.33 s
+    // (27.9 s of tail: not drawn); 1 341 000 frames = 44 744.70 s (cut 5.5 s)
+    const lp::Period big{2147483647, 48000, 1340000};
+    TEST_ASSERT_TRUE(lp::tailKind(big, ntsc, 1340000) == lp::TailKind::NotDrawn);
+    TEST_ASSERT_TRUE(lp::tailKind(big, ntsc, 1341000) == lp::TailKind::CutBeyond);
+    TEST_ASSERT_TRUE(std::fabs(lp::tailMs(big, ntsc, 1340000) - 27909.3) < 0.5);
     return true;
 }
 
