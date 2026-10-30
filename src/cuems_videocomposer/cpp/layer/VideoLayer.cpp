@@ -133,6 +133,23 @@ void VideoLayer::update() {
         display_.getProperties().awaitingFrame = false;
     }
 
+    // A loop tail not drawn (869ejxng3 D15, R11): set while the period path
+    // says blank; cleared on the first fresh frame of the next pass, like
+    // awaitingFrame (never merely at the wrap: a decode miss there would draw
+    // the stale last frame for a vsync after the dark tail), and at once when
+    // the period path stops applying (/loop/period 0 0 0, /loop 0, reset, a
+    // new load, wraparound off).
+    {
+        auto& props = display_.getProperties();
+        if (playback_.tailBlank()) {
+            props.tailBlank = true;
+        } else if (props.tailBlank &&
+                   (!playback_.hasLoopPeriod() || !playback_.getWraparound() ||
+                    playback_.getCurrentFrame() != frameBefore)) {
+            props.tailBlank = false;
+        }
+    }
+
     // Check for playback end and handle looping/auto-unload
     if (playback_.checkPlaybackEnd()) {
         auto& props = properties();

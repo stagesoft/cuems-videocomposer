@@ -21,8 +21,10 @@
 
 // The shared loop period (plan cuems-RELATIONS
 // Plans/2026-10-19-audio-loop-varispeed-869ejxng3-1amfwm7e6cw.md, section
-// 4.4, Phase B step 9): the band arithmetic (layer/LoopPeriod.h), a VideoLayer
-// wrapping on the engine's period, the files' own frame counts, the caps
+// 4.4, Phase B step 9; rev 3.17, D15): the tail rule (layer/LoopPeriod.h:
+// held within the slack threshold or 0.5 s, not drawn beyond, cut when the
+// period is shorter), a VideoLayer wrapping on the engine's period and
+// drawing nothing in a dark tail, the files' own frame counts, the caps
 // file, and the undecodable-timecode hold (D13) driven through the real
 // mtcreceiver decoder. GL-free; the file tests need the ffmpeg CLI and are
 // skipped without it.
@@ -62,21 +64,27 @@ const lp::Period P2010{96480, 48000, 50};
 const lp::Rate R25{25, 1};
 
 // Reference: the same rule in long double, for positions where it is exact.
-int64_t refShown(int64_t F, double pf, int64_t R, int passes, bool stretch) {
+int64_t refShown(int64_t F, double pf, int64_t R, int passes) {
     if (F < 0) return 0;
     const long double k = std::floor((long double)F / pf);
     if (passes > 0 && k >= passes) return R - 1;
     const long double f = (long double)F - k * pf;
-    const long double s = stretch ? std::floor(f * R / pf) : std::floor(f);
-    return std::min<int64_t>((int64_t)s, R - 1);
+    return std::min<int64_t>((int64_t)std::floor(f), R - 1);
 }
+
+// P = n / 48000 s at 25 fps with the video `frames` long: n samples.
+lp::Period at48k(int64_t samples, int64_t frames) { return lp::Period{samples, 48000, frames}; }
 
 class PeriodInput : public InputSource {
 public:
     bool open(const std::string&) override { return true; }
     void close() override {}
     bool seek(int64_t) override { return true; }
-    bool readFrame(int64_t frameNumber, FrameBuffer&) override { last_ = frameNumber; return true; }
+    bool readFrame(int64_t frameNumber, FrameBuffer&) override {
+        if (fail_) return false;   // a decode miss
+        last_ = frameNumber;
+        return true;
+    }
     FrameInfo getFrameInfo() const override {
         FrameInfo info;
         info.width = 1920;
@@ -93,6 +101,7 @@ public:
     bool getFrameRateRational(int64_t& num, int64_t& den) const override { num = 25; den = 1; return true; }
     int64_t realFrames(const char** rule) const override { if (rule) *rule = "stream"; return own_; }
     int64_t last_ = -1;
+    bool fail_ = false;
     int64_t totalFrames_ = 51;   // the container estimate: the longest stream
     int64_t own_ = 50;
 };
@@ -152,50 +161,92 @@ bool ffmpeg(const std::string& args) {
 
 } // namespace
 
-// Band 1: |Pf - realFrames| <= 2. A period longer than the video holds its
-// last frame until the wrap; a video longer than the period is cut there.
-bool test_LoopPeriod_Band1HoldAndCut() {
-    TEST_ASSERT_TRUE(lp::band(P2010, R25, 50) == lp::Band::Hold);
+// Within the slack threshold T = max(2 frames, 80 ms): a period longer than
+// the video holds its last frame until the wrap; a video longer than the
+// period is cut there. Never blank.
+bool test_LoopPeriod_SlackHoldAndCut() {
+    TEST_ASSERT_TRUE(lp::tailKind(P2010, R25, 50) == lp::TailKind::Slack);
     TEST_ASSERT_EQ(lp::shownFrame(49, P2010, R25, 50, -1).frame, 49);
     TEST_ASSERT_EQ(lp::shownFrame(50, P2010, R25, 50, -1).frame, 49);   // held: Pf = 50.25
+    TEST_ASSERT_FALSE(lp::shownFrame(50, P2010, R25, 50, -1).blank);
     TEST_ASSERT_EQ(lp::shownFrame(50, P2010, R25, 50, -1).pass, 0);
     TEST_ASSERT_EQ(lp::shownFrame(51, P2010, R25, 50, -1).frame, 0);    // pass 1 from 50.25
     TEST_ASSERT_EQ(lp::shownFrame(51, P2010, R25, 50, -1).pass, 1);
     // video 52 frames, period 50.25: cut at the wrap
-    TEST_ASSERT_TRUE(lp::band(P2010, R25, 52) == lp::Band::Hold);
+    TEST_ASSERT_TRUE(lp::tailKind(P2010, R25, 52) == lp::TailKind::Slack);
     TEST_ASSERT_EQ(lp::shownFrame(50, P2010, R25, 52, -1).frame, 50);
     TEST_ASSERT_EQ(lp::shownFrame(51, P2010, R25, 52, -1).frame, 0);
-    // three frames off is no longer band 1
-    TEST_ASSERT_TRUE(lp::band(P2010, R25, 53) != lp::Band::Hold);
+    // 2.75 frames = 110 ms: beyond T at 25 fps
+    TEST_ASSERT_TRUE(lp::tailKind(P2010, R25, 53) == lp::TailKind::Cut);
     for (int64_t F = 0; F < 5000; ++F) {
-        TEST_ASSERT_EQ(lp::shownFrame(F, P2010, R25, 50, -1).frame, refShown(F, 50.25, 50, -1, false));
+        TEST_ASSERT_EQ(lp::shownFrame(F, P2010, R25, 50, -1).frame, refShown(F, 50.25, 50, -1));
     }
+    // exactly T at 25 fps (80 ms = 2 frames) and one sample beyond
+    TEST_ASSERT_TRUE(lp::tailKind(at48k(30 * 48000 + 3840, 750), R25, 750) == lp::TailKind::Slack);
+    TEST_ASSERT_TRUE(lp::tailKind(at48k(30 * 48000 + 3841, 750), R25, 750) == lp::TailKind::Held);
+    // the 80 ms floor at 60 fps: 75 ms = 4.5 frames is still slack (R5)
+    const lp::Rate r60{60, 1};
+    TEST_ASSERT_TRUE(lp::tailKind(at48k(10 * 48000 + 3600, 600), r60, 600) == lp::TailKind::Slack);
+    TEST_ASSERT_TRUE(lp::tailKind(at48k(10 * 48000 - 3600, 600), r60, 600) == lp::TailKind::Slack);
+    TEST_ASSERT_TRUE(lp::tailKind(at48k(10 * 48000 + 3841, 600), r60, 600) == lp::TailKind::Held);
+    // a lone VideoCue: P = V exactly, no tail at all
+    const lp::Period own{750, 25, 750};
+    TEST_ASSERT_TRUE(lp::tailKind(own, R25, 750) == lp::TailKind::Exact);
+    TEST_ASSERT_EQ(lp::shownFrame(749, own, R25, 750, -1).frame, 749);
+    TEST_ASSERT_EQ(lp::shownFrame(750, own, R25, 750, -1).frame, 0);
     return true;
 }
 
-// Band 2: > 2 frames and <= 1 %: the pass is stretched over Pf, never past
-// the last frame, frame 0 at every wrap (sintel: 106 ms over 888 s).
-bool test_LoopPeriod_Band2Stretch() {
-    const int64_t R = 22200;                        // 888 s at 25 fps
-    const lp::Period p{(R * 40 + 106) * 48, 48000, R};   // P = 888.106 s
-    TEST_ASSERT_TRUE(lp::band(p, R25, R) == lp::Band::Stretch);
-    const double pf = lp::pfFrames(p, R25);
-    int64_t prev = -1;
-    int repeats = 0;
-    for (int64_t F = 0; F < (int64_t)(2 * pf) + 2; ++F) {
-        const lp::Shown s = lp::shownFrame(F, p, R25, R, -1);
-        TEST_ASSERT_TRUE(s.frame >= 0 && s.frame <= R - 1);
-        // the long double reference can round across an exact integer
-        TEST_ASSERT_TRUE(std::llabs(s.frame - refShown(F, pf, R, -1, true)) <= 1);
-        if (s.pass == 0 && s.frame == prev) ++repeats;
-        if (s.pass == 0) prev = s.frame;
+// A tail up to HOLD_TAIL_MAX_MS holds the last frame, never stretched,
+// never blank (sintel as a pair: 106 ms of the audio's digital silence).
+bool test_LoopPeriod_TailHeldWithinBound() {
+    const lp::Rate r24{24, 1};
+    const int64_t R = 21311;                          // 887.958 s at 24 fps
+    const lp::Period p = at48k(42627072, R);          // A = 888.064 s
+    TEST_ASSERT_TRUE(lp::tailKind(p, r24, R) == lp::TailKind::Held);
+    TEST_ASSERT_TRUE(std::fabs(lp::tailMs(p, r24, R) - 105.67) < 0.1);
+    for (int64_t F = 0; F < R; F += 7) {
+        TEST_ASSERT_EQ(lp::shownFrame(F, p, r24, R, -1).frame, F);   // 1:1, nothing stretched
     }
-    TEST_ASSERT_EQ(lp::shownFrame((int64_t)std::ceil(pf), p, R25, R, -1).frame, 0);
-    TEST_ASSERT_TRUE(repeats >= 1 && repeats <= 3);   // ~2.65 frames spread over the pass
+    for (int64_t F = R; F < R + 2; ++F) {
+        const lp::Shown s = lp::shownFrame(F, p, r24, R, -1);
+        TEST_ASSERT_EQ(s.frame, R - 1);
+        TEST_ASSERT_FALSE(s.blank);
+    }
+    const double pf = lp::pfFrames(p, r24);
+    TEST_ASSERT_EQ(lp::shownFrame((int64_t)std::ceil(pf), p, r24, R, -1).frame, 0);
+    // exactly 500 ms is held; one sample more is not drawn
+    TEST_ASSERT_TRUE(lp::tailKind(at48k(30 * 48000 + 24000, 750), R25, 750) == lp::TailKind::Held);
+    TEST_ASSERT_TRUE(lp::tailKind(at48k(30 * 48000 + 24001, 750), R25, 750) == lp::TailKind::NotDrawn);
+    TEST_ASSERT_FALSE(lp::shownFrame(760, at48k(30 * 48000 + 24000, 750), R25, 750, -1).blank);
+    TEST_ASSERT_TRUE(lp::shownFrame(760, at48k(30 * 48000 + 24001, 750), R25, 750, -1).blank);
     return true;
 }
 
-// A finite loop ends: passes 3 -> from 3 Pf on, the last frame, ended.
+// A tail beyond HOLD_TAIL_MAX_MS is not drawn: from the video's last frame
+// to the loop point, then frame 0 of the next pass (v30a32: 2 s).
+bool test_LoopPeriod_TailNotDrawnBeyondBound() {
+    const lp::Period p = at48k(32 * 48000, 750);      // Pf = 800, video 750
+    TEST_ASSERT_TRUE(lp::tailKind(p, R25, 750) == lp::TailKind::NotDrawn);
+    TEST_ASSERT_TRUE(std::fabs(lp::tailMs(p, R25, 750) - 2000.0) < 1e-6);
+    TEST_ASSERT_EQ(lp::shownFrame(749, p, R25, 750, -1).frame, 749);
+    TEST_ASSERT_FALSE(lp::shownFrame(749, p, R25, 750, -1).blank);
+    for (int64_t F = 750; F < 800; ++F) {
+        const lp::Shown s = lp::shownFrame(F, p, R25, 750, -1);
+        TEST_ASSERT_TRUE(s.blank);
+        TEST_ASSERT_EQ(s.frame, 749);                 // the decoder keeps the last frame
+        TEST_ASSERT_EQ(s.pass, 0);
+    }
+    const lp::Shown next = lp::shownFrame(800, p, R25, 750, -1);
+    TEST_ASSERT_FALSE(next.blank);
+    TEST_ASSERT_EQ(next.frame, 0);
+    TEST_ASSERT_EQ(next.pass, 1);
+    TEST_ASSERT_TRUE(lp::shownFrame(1550, p, R25, 750, -1).blank);   // every pass
+    return true;
+}
+
+// A finite loop ends: passes 3 -> from 3 Pf on, the last frame, ended; blank
+// when the tail was dark, so the last frame never flashes back (R2).
 bool test_LoopPeriod_FinitePassesEnd() {
     const lp::Shown before = lp::shownFrame(150, P2010, R25, 50, 3);   // 150 < 150.75
     TEST_ASSERT_FALSE(before.ended);
@@ -203,10 +254,24 @@ bool test_LoopPeriod_FinitePassesEnd() {
     TEST_ASSERT_EQ(before.frame, 49);
     const lp::Shown after = lp::shownFrame(151, P2010, R25, 50, 3);
     TEST_ASSERT_TRUE(after.ended);
+    TEST_ASSERT_FALSE(after.blank);
     TEST_ASSERT_EQ(after.frame, 49);
     TEST_ASSERT_TRUE(lp::shownFrame(100000, P2010, R25, 50, 3).ended);
     TEST_ASSERT_FALSE(lp::shownFrame(100000, P2010, R25, 50, -1).ended);
     TEST_ASSERT_FALSE(lp::shownFrame(100000, P2010, R25, 50, 0).ended);   // 0 = forever
+    // after a dark tail the end is blank, a held tail ends on the last frame
+    const lp::Period dark = at48k(32 * 48000, 750);
+    const lp::Shown end = lp::shownFrame(2400, dark, R25, 750, 3);
+    TEST_ASSERT_TRUE(end.ended);
+    TEST_ASSERT_TRUE(end.blank);
+    TEST_ASSERT_TRUE(lp::shownFrame(9999, dark, R25, 750, 3).blank);
+    const lp::Period held = at48k(std::llround(30.3 * 48000), 750);
+    TEST_ASSERT_FALSE(lp::shownFrame(9999, held, R25, 750, 3).blank);
+    // a cut pair ends on the last frame before the cut
+    const lp::Period cut = at48k(std::llround(29.7 * 48000), 750);
+    const lp::Shown c = lp::shownFrame(9999, cut, R25, 750, 3);
+    TEST_ASSERT_TRUE(c.ended);
+    TEST_ASSERT_FALSE(c.blank);
     return true;
 }
 
@@ -236,46 +301,62 @@ bool test_LoopPeriod_NegativeRegionHoldsFrameZero() {
     TEST_ASSERT_EQ(lp::shownFrame(-1, P2010, R25, 50, -1).pass, -1);
     TEST_ASSERT_EQ(lp::shownFrame(-1000000, P2010, R25, 50, 3).frame, 0);
     TEST_ASSERT_FALSE(lp::shownFrame(-1000000, P2010, R25, 50, 3).ended);
+    TEST_ASSERT_FALSE(lp::shownFrame(-1, at48k(32 * 48000, 750), R25, 750, -1).blank);
     return true;
 }
 
-// A period beyond the stretch bound (> 2 frames and > 1 %) is applied as
-// band 1: it wraps on Pf and holds at the cut, never stretches (H9, I4).
-bool test_LoopPeriod_BeyondBoundHoldsNeverStretches() {
-    const lp::Period p{60 * 48000 / 25, 48000, 50};   // Pf = 60, video 50: +20 %
-    TEST_ASSERT_TRUE(lp::band(p, R25, 50) == lp::Band::Beyond);
-    TEST_ASSERT_EQ(lp::shownFrame(30, p, R25, 50, -1).frame, 30);   // 1:1, not 25
-    TEST_ASSERT_EQ(lp::shownFrame(55, p, R25, 50, -1).frame, 49);   // held at the cut
-    TEST_ASSERT_EQ(lp::shownFrame(60, p, R25, 50, -1).frame, 0);    // wraps on Pf
-    // and shorter by > 1 %: cut
-    const lp::Period q{40 * 48000 / 25, 48000, 50};
-    TEST_ASSERT_TRUE(lp::band(q, R25, 50) == lp::Band::Beyond);
-    TEST_ASSERT_EQ(lp::shownFrame(39, q, R25, 50, -1).frame, 39);
-    TEST_ASSERT_EQ(lp::shownFrame(40, q, R25, 50, -1).frame, 0);
-    // a short loop never stretches: 3 frames off on 50 is beyond, not band 2
-    const lp::Period r{53 * 48000 / 25, 48000, 50};
-    TEST_ASSERT_TRUE(lp::band(r, R25, 50) == lp::Band::Beyond);
+// A period shorter than the video cuts it at Pf, whatever the length: up to
+// 0.5 s it is a pair on its audio length (R23), beyond it cannot come from
+// the engine's rule (ERROR in the layer); never dropped, never stretched.
+bool test_LoopPeriod_ShortPeriodCuts() {
+    const lp::Period cut = at48k(std::llround(29.7 * 48000), 750);   // v30a29.7: Pf = 742.5
+    TEST_ASSERT_TRUE(lp::tailKind(cut, R25, 750) == lp::TailKind::Cut);
+    TEST_ASSERT_TRUE(std::fabs(lp::tailMs(cut, R25, 750) + 300.0) < 1e-6);
+    TEST_ASSERT_EQ(lp::shownFrame(742, cut, R25, 750, -1).frame, 742);
+    TEST_ASSERT_EQ(lp::shownFrame(743, cut, R25, 750, -1).frame, 0);   // wraps on Pf
+    TEST_ASSERT_FALSE(lp::shownFrame(743, cut, R25, 750, -1).blank);
+    // exactly 500 ms short is a cut; one sample more is beyond the bound
+    TEST_ASSERT_TRUE(lp::tailKind(at48k(30 * 48000 - 24000, 750), R25, 750) == lp::TailKind::Cut);
+    TEST_ASSERT_TRUE(lp::tailKind(at48k(30 * 48000 - 24001, 750), R25, 750) == lp::TailKind::CutBeyond);
+    // the forced-period row: 1 s short, beyond the bound, still applied
+    const lp::Period forced = at48k(29 * 48000, 750);
+    TEST_ASSERT_TRUE(lp::tailKind(forced, R25, 750) == lp::TailKind::CutBeyond);
+    TEST_ASSERT_EQ(lp::shownFrame(724, forced, R25, 750, -1).frame, 724);
+    TEST_ASSERT_EQ(lp::shownFrame(725, forced, R25, 750, -1).frame, 0);
+    TEST_ASSERT_EQ(lp::shownFrame(725, forced, R25, 750, -1).pass, 1);
     return true;
 }
 
-// No overflow at 1001-denominator rates past many hours (L12d): band 2 on a
-// 3 h file at 30000/1001, positions 20 h in, against a long double reference
-// at positions where it is exact.
+// No overflow at 1001-denominator rates past many hours (L12d): a held tail
+// on a 3 h file at 30000/1001, positions 20 h in, against a long double
+// reference at positions where it is exact; the tail arithmetic too.
 bool test_LoopPeriod_Int128NoOverflow() {
     const lp::Rate ntsc{30000, 1001};
     const int64_t R = 323676;                           // 3 h at 29.97
     // P a little longer than R frames: (R + 5) x 1001 / 30000 s, written over 48 kHz
     const lp::Period p{(R + 5) * 1001 * 48000 / 30000 + 7, 48000, R};
-    TEST_ASSERT_TRUE(lp::band(p, ntsc, R) == lp::Band::Stretch);
+    TEST_ASSERT_TRUE(lp::tailKind(p, ntsc, R) == lp::TailKind::Held);
     const double pf = lp::pfFrames(p, ntsc);
     for (int64_t F = 2000000; F < 2000000 + 20000; F += 97) {
         const lp::Shown s = lp::shownFrame(F, p, ntsc, R, -1);
         TEST_ASSERT_TRUE(s.frame >= 0 && s.frame <= R - 1);
-        const int64_t ref = refShown(F, pf, R, -1, true);
+        TEST_ASSERT_FALSE(s.blank);
+        const int64_t ref = refShown(F, pf, R, -1);
         TEST_ASSERT_TRUE(std::llabs(s.frame - ref) <= 1);   // the double reference rounds
     }
     // int64 would overflow: F b x R ~ 2e6 x 48000 x 1001 x 3.2e5 > 9.2e18
     TEST_ASSERT_TRUE((long double)2000000 * 48000 * 1001 * R > 9.3e18L);
+    // the int32 extreme of the wire with a 1001 rate: no overflow in the tail test
+    const lp::Period big{2147483647, 48000, 1341000};
+    TEST_ASSERT_TRUE(lp::tailKind(big, ntsc, 1341000) == lp::TailKind::NotDrawn);
+    return true;
+}
+
+// The constant is the engine's PAIR_SLACK_MS (cuemsengine loop_mode.py).
+bool test_LoopPeriod_HoldTailMaxIs500() {
+    TEST_ASSERT_EQ(lp::HOLD_TAIL_MAX_MS, (int64_t)500);
+    TEST_ASSERT_EQ(lp::SLACK_FRAMES, (int64_t)2);
+    TEST_ASSERT_EQ(lp::SLACK_FLOOR_MS, (int64_t)80);
     return true;
 }
 
@@ -339,6 +420,63 @@ bool test_LoopPeriod_LayerNoPeriodWrapsOnTotalFrames() {
     r.layer->setLoopPeriod(96480, 48000, 50);
     r.layer->setWraparound(false);
     TEST_ASSERT_EQ(r.show(70), 61);       // non-loop: hold the last frame
+    return true;
+}
+
+// The tail blank on a layer (R11): set while the period path says so, kept
+// through a decode miss at the wrap, cleared on the first fresh frame of the
+// next pass and at once when the period path stops applying; a finite loop
+// that ends after a dark tail stays blank (R2).
+bool test_LoopPeriod_LayerTailBlankLifecycle() {
+    Rig r = makeRig(750, 751);
+    r.layer->setWraparound(true);
+    r.layer->setLoopPasses(-1);
+    r.layer->setLoopPeriod(32 * 48000, 48000, 750);    // a 2 s tail: not drawn
+    auto blank = [&r]() { return r.layer->properties().tailBlank; };
+    TEST_ASSERT_EQ(r.show(700), 700);
+    TEST_ASSERT_FALSE(blank());
+    TEST_ASSERT_EQ(r.show(760), 749);
+    TEST_ASSERT_TRUE(blank());
+    TEST_ASSERT_EQ(r.show(799), 749);
+    TEST_ASSERT_TRUE(blank());
+    // a decode miss at the wrap: the stale last frame must not be drawn
+    r.input->fail_ = true;
+    r.show(801);
+    TEST_ASSERT_TRUE(blank());
+    r.input->fail_ = false;
+    TEST_ASSERT_EQ(r.show(802), 2);
+    TEST_ASSERT_FALSE(blank());
+    // cleared at once when the period is cleared (/loop/period 0 0 0)
+    TEST_ASSERT_EQ(r.show(1560), 749);
+    TEST_ASSERT_TRUE(blank());
+    r.layer->setLoopPeriod(0, 0, 0);
+    r.show(1561);
+    TEST_ASSERT_FALSE(blank());
+    // and on /loop 0 (the router turns wraparound off and clears the period)
+    r.layer->setLoopPeriod(32 * 48000, 48000, 750);
+    r.show(1570);
+    TEST_ASSERT_TRUE(blank());
+    r.layer->setWraparound(false);
+    r.layer->clearLoopPeriod();
+    r.show(1571);
+    TEST_ASSERT_FALSE(blank());
+    // a finite loop that ends after a dark tail stays blank (R2)
+    r.layer->setWraparound(true);
+    r.layer->setLoopPasses(2);
+    r.layer->setLoopPeriod(32 * 48000, 48000, 750);
+    r.show(1500);
+    TEST_ASSERT_FALSE(blank());
+    r.show(1700);
+    TEST_ASSERT_TRUE(blank());
+    r.show(5000);
+    TEST_ASSERT_TRUE(blank());
+    // a held tail never blanks
+    r.layer->setLoopPasses(-1);
+    r.layer->setLoopPeriod(std::llround(30.3 * 48000), 48000, 750);   // Pf = 757.5
+    r.show(5001);                                     // pass 6 (from 4545), frame 456
+    TEST_ASSERT_FALSE(blank());
+    TEST_ASSERT_EQ(r.show(4545 + 752), 749);          // in the 300 ms tail: held
+    TEST_ASSERT_FALSE(blank());
     return true;
 }
 

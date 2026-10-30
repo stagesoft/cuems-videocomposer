@@ -126,6 +126,10 @@ public:
     void setLoopPeriod(int64_t num, int64_t den, int64_t frames, const std::string& tag);
     void clearLoopPeriod();
     bool hasLoopPeriod() const { return loopPeriod_.valid(); }
+    // The period path's decision for the current position: draw nothing (a
+    // tail beyond HOLD_TAIL_MAX_MS, or the end of a finite loop after one;
+    // D15, R2). VideoLayer bridges it into LayerProperties::tailBlank.
+    bool tailBlank() const { return tailBlank_; }
     const loopperiod::Period& getLoopPeriod() const { return loopPeriod_; }
     // Passes of a full-file loop (/loop 1 <passes>); <= 0 = forever.
     void setLoopPasses(int passes) { loopPasses_ = passes; }
@@ -185,9 +189,10 @@ private:
     loopperiod::Period loopPeriod_;
     int loopPasses_ = -1;
     std::string loopTag_;
-    bool loopLogged_ = false;          // the load line (both counts, band) is out
+    bool loopLogged_ = false;          // the load line (both counts, the tail) is out
     bool loopMismatchLogged_ = false;  // ERROR once: engine and own count > 2 apart
-    bool loopBeyondLogged_ = false;    // ERROR once: beyond the stretch bound
+    bool loopCutLogged_ = false;       // once: a period shorter than the video (INFO/ERROR)
+    bool tailBlank_ = false;           // the current position is in a tail not drawn
     bool loopNoFramesLogged_ = false;  // WARNING once: no frame count at all
     bool loopEndLogged_ = false;       // INFO once: a finite loop ended
     int64_t loopLastPass_ = -2;        // last pass seen (pass-boundary lines)

@@ -376,7 +376,9 @@ void LayerPlayback::updateFromSyncSource() {
         }
         
         // A looping cue with the engine's period wraps on it (869ejxng3);
-        // without one, the totalFrames wrap/clamp below is unchanged.
+        // without one, the totalFrames wrap/clamp below is unchanged. The tail
+        // blank is decided afresh on every position (D15).
+        tailBlank_ = false;
         const bool periodApplied = wraparound_ && loopPeriod_.valid() && inputSource_ &&
                                    applyLoopPeriod(adjustedFrame, syncFrame);
 
@@ -525,20 +527,22 @@ void LayerPlayback::setLoopPeriod(int64_t num, int64_t den, int64_t frames, cons
     loopPeriod_ = p;
     loopLogged_ = false;
     loopMismatchLogged_ = false;
-    loopBeyondLogged_ = false;
+    loopCutLogged_ = false;
     loopNoFramesLogged_ = false;
     loopEndLogged_ = false;
     loopLastPass_ = -2;
+    tailBlank_ = false;
 }
 
 void LayerPlayback::clearLoopPeriod() {
     loopPeriod_ = loopperiod::Period();
     loopLogged_ = false;
     loopMismatchLogged_ = false;
-    loopBeyondLogged_ = false;
+    loopCutLogged_ = false;
     loopNoFramesLogged_ = false;
     loopEndLogged_ = false;
     loopLastPass_ = -2;
+    tailBlank_ = false;
 }
 
 bool LayerPlayback::applyLoopPeriod(int64_t& adjustedFrame, int64_t syncFrame) {
@@ -561,14 +565,15 @@ bool LayerPlayback::applyLoopPeriod(int64_t& adjustedFrame, int64_t syncFrame) {
         }
         return false;
     }
-    const loopperiod::Band band = loopperiod::band(loopPeriod_, rate, frames);
+    const loopperiod::TailKind kind = loopperiod::tailKind(loopPeriod_, rate, frames);
+    const double tailMs = loopperiod::tailMs(loopPeriod_, rate, frames);
     if (!loopLogged_) {
         LOG_INFO << "loop period for layer " << loopTag_ << ": " << loopPeriod_.num << "/"
                  << loopPeriod_.den << " s = " << loopperiod::pfFrames(loopPeriod_, rate)
                  << " frames at " << rate.num << "/" << rate.den << " fps; frames engine "
                  << (loopPeriod_.realFrames > 0 ? std::to_string(loopPeriod_.realFrames) : std::string("-"))
-                 << ", own " << own << " (" << rule << "); band " << loopperiod::bandName(band)
-                 << "; passes " << loopPasses_;
+                 << ", own " << own << " (" << rule << "); tail " << tailMs << " ms, "
+                 << loopperiod::tailKindName(kind) << "; passes " << loopPasses_;
         loopLogged_ = true;
     }
     if (loopPeriod_.realFrames > 0 && own >= 0 && std::llabs(own - loopPeriod_.realFrames) > 2 &&
@@ -577,11 +582,18 @@ bool LayerPlayback::applyLoopPeriod(int64_t& adjustedFrame, int64_t syncFrame) {
                   << ", own " << own << " (" << rule << "), more than 2 frames apart; the engine's rules";
         loopMismatchLogged_ = true;
     }
-    if (band == loopperiod::Band::Beyond && !loopBeyondLogged_) {
-        LOG_ERROR << "loop period beyond the stretch bound: "
-                  << loopperiod::stretchPercent(loopPeriod_, rate, frames)
-                  << " %, holding at the cut (layer " << loopTag_ << ")";
-        loopBeyondLogged_ = true;
+    // A period shorter than the video: within 0.5 s a same-file pair loops on
+    // its audio length and the video is cut there (R23, INFO); beyond 0.5 s it
+    // cannot come from the engine's rule (a bad sidecar or the test knob):
+    // still applied, never dropped (H9, I4), ERROR.
+    if (!loopCutLogged_ && kind == loopperiod::TailKind::Cut) {
+        LOG_INFO << "loop period shorter than the video by " << -tailMs
+                 << " ms, cut at the loop point (layer " << loopTag_ << ")";
+        loopCutLogged_ = true;
+    } else if (!loopCutLogged_ && kind == loopperiod::TailKind::CutBeyond) {
+        LOG_ERROR << "loop period shorter than the video by " << -tailMs
+                  << " ms, cutting at the period (layer " << loopTag_ << ")";
+        loopCutLogged_ = true;
     }
 
     loopperiod::Shown shown = loopperiod::shownFrame(adjustedFrame, loopPeriod_, rate, frames, loopPasses_);
@@ -596,20 +608,30 @@ bool LayerPlayback::applyLoopPeriod(int64_t& adjustedFrame, int64_t syncFrame) {
 #ifdef HAVE_MTCRECEIVER
         mtcFrame = MtcReceiver::mtcHead.load() / 40;
 #endif
+        const bool tailed = kind == loopperiod::TailKind::Held || kind == loopperiod::TailKind::NotDrawn;
         if (shown.pass <= 3) {
             LOG_INFO << "loop pass " << shown.pass + 1 << " of layer " << loopTag_ << " at MTC frame "
-                     << mtcFrame << " (position " << adjustedFrame << ", shows " << shown.frame << ")";
+                     << mtcFrame << " (position " << adjustedFrame << ", shows " << shown.frame << ")"
+                     << (tailed ? ", tail " + std::to_string(std::llround(tailMs)) + " ms, " +
+                                      loopperiod::tailKindName(kind)
+                                : std::string());
         } else {
             LOG_DEBUG << "loop pass " << shown.pass + 1 << " of layer " << loopTag_ << " at MTC frame "
                       << mtcFrame << " (position " << adjustedFrame << ", shows " << shown.frame << ")";
         }
     }
     if (shown.ended && !loopEndLogged_) {
-        LOG_INFO << "loop of layer " << loopTag_ << " ended after " << loopPasses_
-                 << " passes; holding frame " << shown.frame;
+        if (shown.blank) {
+            LOG_INFO << "loop of layer " << loopTag_ << " ended after " << loopPasses_
+                     << " passes, after a tail not drawn: nothing drawn (R2)";
+        } else {
+            LOG_INFO << "loop of layer " << loopTag_ << " ended after " << loopPasses_
+                     << " passes; holding frame " << shown.frame;
+        }
         loopEndLogged_ = true;
     }
     loopLastPass_ = shown.pass;
+    tailBlank_ = shown.blank;
     adjustedFrame = shown.frame;
     return true;
 }

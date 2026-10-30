@@ -38,6 +38,7 @@ struct LayerProperties {
     int zOrder = 0;         // Layer stacking order
     bool visible = false;   // Show/hide layer (hidden until engine sends visible=1)
     bool awaitingFrame = false;  // Skip rendering until a fresh frame loads (prevents stale frame flash on 0→1 transition)
+    bool tailBlank = false;      // Skip rendering in a loop tail not drawn (869ejxng3 D15; VideoLayer::update owns it)
     
     // Transform (simplified for now, can be extended)
     float scaleX = 1.0f;

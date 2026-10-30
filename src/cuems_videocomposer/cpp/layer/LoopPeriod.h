@@ -24,15 +24,27 @@
 
 // The engine's loop period for a looping VideoCue (plan 869ejxng3 +
 // 1amfwm7e6cw, section 4.4): /videocomposer/layer/<id>/loop/period
-// num den [frames]. The period P = num / den seconds is the one the audio
-// player wraps on (the decoded audio length of an A/V file, D2), so the
-// layer wraps on it too and both ends turn at the same MTC instant.
+// num den [frames]. P = num / den seconds is the length the engine chose for
+// this cue (D15, rev 3.17, section 4.1a): its own track (P = V, Pf =
+// realFrames exactly), the audio length of a file whose tracks are within
+// the slack threshold, or a same-file pair's choice (the audio length within
+// 0.5 s, the longest track beyond). The audio player of a pair wraps on the
+// same P, so both ends turn at the same MTC instant.
+//
+// What the layer does with the tail, P against the video's realFrames:
+//   |Pf - realFrames| <= T = max(2 frames, 80 ms)  the existing clamp: held or
+//                                                   cut, invisible at the jump
+//   Pf > realFrames, tail <= HOLD_TAIL_MAX_MS        the last frame held
+//   Pf > realFrames, tail >  HOLD_TAIL_MAX_MS        nothing drawn (Shown::blank)
+//   Pf < realFrames by <= HOLD_TAIL_MAX_MS           cut at Pf, INFO once (R23)
+//   Pf < realFrames by >  HOLD_TAIL_MAX_MS           cut at Pf, ERROR once (a
+//                                                   bad sidecar or the test knob)
+// Nothing is ever stretched (D8's bands 2-3 are gone).
 //
 // Pure arithmetic, no state of its own: everything in integer rationals,
 // cross-multiplied, in __int128 (K14, L12d). With Pf = P x fps frames not
 // representable, floor(F / Pf) in doubles is one frame late exactly when
-// k x Pf is an integer, and band 2's F x realFrames overflows int64 past
-// ~2 h at 1001-denominator rates.
+// k x Pf is an integer.
 
 #include <cstdint>
 #include <cstdlib>
@@ -40,22 +52,14 @@
 namespace videocomposer {
 namespace loopperiod {
 
-// The three bands of D2/D8 (how the period relates to the video's own
-// frame count realFrames).
-enum class Band {
-    Hold,      // |Pf - realFrames| <= 2 frames: hold (or cut) at the loop cut
-    Stretch,   // > 2 frames and <= 1 %: stretch the pass over Pf (long files)
-    Beyond     // > 2 frames and > 1 %: applied as Hold, ERROR once (H9, I4)
-};
-
-inline const char* bandName(Band b) {
-    switch (b) {
-    case Band::Hold: return "1";
-    case Band::Stretch: return "2";
-    case Band::Beyond: return "beyond";
-    }
-    return "?";
-}
+// S, the content threshold of D15 (rev 3.17): a tail up to this is slack
+// (held, or cut), beyond it is content (not drawn). The engine's
+// PAIR_SLACK_MS (cuemsengine/cues/loop_mode.py) is the same value: it decides
+// P, this decides the picture; a mismatch could never touch sync.
+constexpr int64_t HOLD_TAIL_MAX_MS = 500;
+// T, the slack threshold (R5): max(2 frames, 80 ms).
+constexpr int64_t SLACK_FRAMES = 2;
+constexpr int64_t SLACK_FLOOR_MS = 80;
 
 struct Period {
     int64_t num = 0;         // P = num / den seconds
@@ -94,39 +98,85 @@ inline double pfFrames(const Period& p, const Rate& r) {
     return (double)p.num * (double)r.num / ((double)p.den * (double)r.den);
 }
 
-inline Band band(const Period& p, const Rate& r, int64_t realFrames) {
-    // |Pf - R| <= 2  <=>  |num fps_num - R den fps_den| <= 2 den fps_den
-    const i128 a = pfNum(p, r);
-    const i128 b = pfDen(p, r);
-    i128 diff = a - (i128)realFrames * b;
-    if (diff < 0) diff = -diff;
-    if (diff <= 2 * b) return Band::Hold;
-    // stretch > 1 %  <=>  100 |Pf - R| > R
-    if (100 * diff > (i128)realFrames * b) return Band::Beyond;
-    return Band::Stretch;
+// The tail, Pf - realFrames, as a numerator over pfDen(): > 0 the period runs
+// past the video's last frame, < 0 the video is longer than the period.
+inline i128 tailNum(const Period& p, const Rate& r, int64_t realFrames) {
+    return pfNum(p, r) - (i128)realFrames * pfDen(p, r);
 }
 
-// Stretch of the period against realFrames, in percent (for logs only).
-inline double stretchPercent(const Period& p, const Rate& r, int64_t realFrames) {
-    if (realFrames <= 0) return 0.0;
-    const double pf = pfFrames(p, r);
-    return 100.0 * (pf - (double)realFrames) / (double)realFrames;
+inline i128 absI(i128 x) { return x < 0 ? -x : x; }
+
+// |tail| > boundMs:  |t| / b frames x 1000 fps_den / fps_num > boundMs
+//               <=>  |t| x 1000 x fps_den > boundMs x b x fps_num
+inline bool tailBeyondMs(i128 t, const Period& p, const Rate& r, int64_t boundMs) {
+    return absI(t) * 1000 * r.den > (i128)boundMs * pfDen(p, r) * r.num;
+}
+
+// The tail in ms, signed (for logs only).
+inline double tailMs(const Period& p, const Rate& r, int64_t realFrames) {
+    if (!p.valid() || !r.valid()) return 0.0;
+    return (pfFrames(p, r) - (double)realFrames) * 1000.0 * (double)r.den / (double)r.num;
+}
+
+// |tail| <= T = max(2 frames, 80 ms).
+inline bool withinSlack(i128 t, const Period& p, const Rate& r) {
+    return absI(t) <= (i128)SLACK_FRAMES * pfDen(p, r) || !tailBeyondMs(t, p, r, SLACK_FLOOR_MS);
+}
+
+// A tail the layer does not draw: the period runs past the video's end by
+// more than HOLD_TAIL_MAX_MS.
+inline bool darkTail(const Period& p, const Rate& r, int64_t realFrames) {
+    const i128 t = tailNum(p, r, realFrames);
+    return t > 0 && tailBeyondMs(t, p, r, HOLD_TAIL_MAX_MS);
+}
+
+enum class TailKind {
+    Exact,      // Pf == realFrames
+    Slack,      // |tail| <= T: held or cut, the existing clamp
+    Held,       // T < tail <= HOLD_TAIL_MAX_MS: the last frame held
+    NotDrawn,   // tail > HOLD_TAIL_MAX_MS: nothing drawn until the loop point
+    Cut,        // T < -tail <= HOLD_TAIL_MAX_MS: cut at Pf (a pair, R23), INFO
+    CutBeyond   // -tail > HOLD_TAIL_MAX_MS: cut at Pf, ERROR (cannot come from D15)
+};
+
+inline TailKind tailKind(const Period& p, const Rate& r, int64_t realFrames) {
+    const i128 t = tailNum(p, r, realFrames);
+    if (t == 0) return TailKind::Exact;
+    if (withinSlack(t, p, r)) return TailKind::Slack;
+    const bool beyond = tailBeyondMs(t, p, r, HOLD_TAIL_MAX_MS);
+    if (t > 0) return beyond ? TailKind::NotDrawn : TailKind::Held;
+    return beyond ? TailKind::CutBeyond : TailKind::Cut;
+}
+
+inline const char* tailKindName(TailKind k) {
+    switch (k) {
+    case TailKind::Exact: return "none";
+    case TailKind::Slack: return "within the slack threshold";
+    case TailKind::Held: return "held";
+    case TailKind::NotDrawn: return "not drawn";
+    case TailKind::Cut: return "cut";
+    case TailKind::CutBeyond: return "cut beyond the bound";
+    }
+    return "?";
 }
 
 struct Shown {
-    int64_t frame = 0;   // the frame to show
+    int64_t frame = 0;   // the frame to show (the last one while blank)
     int64_t pass = 0;    // k: the pass index (0 = first); -1 before the start
     bool ended = false;  // a finite loop is past its last pass
+    bool blank = false;  // draw nothing: a dark tail, or the end after one (R2)
 };
 
 // The frame shown for the layer position F (video frames since the cue's
 // start, offset applied) under period p at rate r with `realFrames` frames
 // and `passes` passes (<= 0: forever). Section 4.4:
-//   F < 0                    -> frame 0 (before the start, G21)
+//   F < 0                       -> frame 0 (before the start, G21)
 //   k = floor(F / Pf)
-//   passes > 0 and k >= passes -> realFrames - 1 (the engine ends the cue)
-//   band 1 / beyond          -> min(floor(F - k Pf), realFrames - 1)
-//   band 2                   -> min(floor((F - k Pf) x realFrames / Pf), realFrames - 1)
+//   passes > 0 and k >= passes  -> ended: the last frame, blank after a dark tail
+//   f = floor(F - k Pf)
+//   f < realFrames              -> f
+//   otherwise                   -> the last frame; blank when the tail is dark
+// A period shorter than the video simply wraps before its end (cut).
 inline Shown shownFrame(int64_t F, const Period& p, const Rate& r, int64_t realFrames, int passes) {
     Shown s;
     if (F < 0) {
@@ -139,20 +189,21 @@ inline Shown shownFrame(int64_t F, const Period& p, const Rate& r, int64_t realF
     const i128 k = floorDiv((i128)F * b, a);
     s.pass = (int64_t)k;
     const int64_t last = realFrames > 0 ? realFrames - 1 : 0;
+    const bool dark = realFrames > 0 && darkTail(p, r, realFrames);
     if (passes > 0 && k >= passes) {
         s.frame = last;
         s.ended = true;
+        s.blank = dark;
         return s;
     }
     // f_cont x b = F b - k a  (in [0, a))
-    const i128 rem = (i128)F * b - k * a;
-    i128 f;
-    if (band(p, r, realFrames) == Band::Stretch) {
-        f = floorDiv(rem * realFrames, a);
+    const i128 f = floorDiv((i128)F * b - k * a, b);
+    if (f > last) {
+        s.frame = last;
+        s.blank = dark;
     } else {
-        f = floorDiv(rem, b);
+        s.frame = (int64_t)f;
     }
-    s.frame = f > last ? last : (int64_t)f;
     return s;
 }
 
