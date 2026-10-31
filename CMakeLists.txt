@@ -716,6 +716,40 @@ if(ENABLE_DRM_BACKEND AND DRM_FOUND AND EGL_FOUND)
         )
         
         message(STATUS "DRM/KMS backend enabled (GBM + EGL)")
+
+        # Hardware-configuration contract (docs/contract-v1.md): NNG + JSON,
+        # report-only in phase 2a. Optional so builds without nng/nlohmann work.
+        option(CUEMS_CONTRACT "Serve the hardware-configuration contract (NNG + JSON)" ON)
+        if(CUEMS_CONTRACT)
+            find_package(nng CONFIG QUIET)
+            find_package(nlohmann_json 3.2 CONFIG QUIET)
+            if(nng_FOUND AND nlohmann_json_FOUND)
+                add_definitions(-DHAVE_CONTRACT)
+                set(CUEMS_CONTRACT_ACTIVE ON)
+                # Static nng by default: the nodes are provisioned offline and do not
+                # carry libnng1; the static archive only needs mbedtls, already present.
+                option(CUEMS_NNG_STATIC "Link nng statically" ON)
+                find_library(CUEMS_NNG_ARCHIVE NAMES libnng.a)
+                if(CUEMS_NNG_STATIC AND CUEMS_NNG_ARCHIVE)
+                    find_library(MBEDTLS_LIB mbedtls)
+                    find_library(MBEDX509_LIB mbedx509)
+                    find_library(MBEDCRYPTO_LIB mbedcrypto)
+                    set(CUEMS_NNG_LINK ${CUEMS_NNG_ARCHIVE} ${MBEDTLS_LIB} ${MBEDX509_LIB} ${MBEDCRYPTO_LIB} Threads::Threads)
+                    find_package(Threads REQUIRED)
+                    message(STATUS "nng linked statically: ${CUEMS_NNG_ARCHIVE}")
+                else()
+                    set(CUEMS_NNG_LINK nng::nng)
+                endif()
+                list(APPEND CPP_SOURCES
+                    src/cuems_videocomposer/cpp/remote/ContractTypes.cpp
+                    src/cuems_videocomposer/cpp/remote/ContractProtocol.cpp
+                    src/cuems_videocomposer/cpp/remote/ContractServer.cpp
+                )
+                message(STATUS "Hardware-configuration contract enabled (nng ${nng_VERSION}, nlohmann_json ${nlohmann_json_VERSION})")
+            else()
+                message(STATUS "Hardware-configuration contract disabled (nng or nlohmann_json not found)")
+            endif()
+        endif()
     else()
         message(STATUS "DRM/KMS backend disabled (GBM not found)")
     endif()
@@ -933,6 +967,9 @@ install(TARGETS cuems-videoindexer DESTINATION bin)
 
 # Create executable
 add_executable(cuems-videocomposer ${C_SOURCES} ${CPP_SOURCES})
+if(CUEMS_CONTRACT_ACTIVE)
+    target_link_libraries(cuems-videocomposer ${CUEMS_NNG_LINK} nlohmann_json::nlohmann_json)
+endif()
 add_dependencies(cuems-videocomposer splash_png_embed)
 
 # Debian package version, logged at startup ("cuems-videocomposer <v> starting")
@@ -1000,6 +1037,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestIntegration.cpp
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
         src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
+        src/cuems_videocomposer/cpp/test/TestContract.cpp
         src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
         src/cuems_videocomposer/cpp/test/TestLayerPathId.cpp
         src/cuems_videocomposer/cpp/test/TestExitReporter.cpp
@@ -1087,7 +1125,18 @@ if(BUILD_TESTS)
         endif()
     endif()
     
+    if(CUEMS_CONTRACT_ACTIVE)
+        list(APPEND TEST_CPP_SOURCES
+            src/cuems_videocomposer/cpp/remote/ContractTypes.cpp
+            src/cuems_videocomposer/cpp/remote/ContractProtocol.cpp
+            src/cuems_videocomposer/cpp/remote/ContractServer.cpp
+        )
+    endif()
     add_executable(cuems_videocomposer_test ${TEST_SOURCES} ${TEST_CPP_SOURCES} ${TEST_HAP_SOURCES} src/cuems_videocomposer/common.c)
+    if(CUEMS_CONTRACT_ACTIVE)
+        target_compile_definitions(cuems_videocomposer_test PRIVATE HAVE_CONTRACT_TESTS)
+        target_link_libraries(cuems_videocomposer_test ${CUEMS_NNG_LINK} nlohmann_json::nlohmann_json)
+    endif()
     target_include_directories(cuems_videocomposer_test PRIVATE
         src/cuems_videocomposer
         src/cuems_videocomposer/cpp
