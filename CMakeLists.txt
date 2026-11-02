@@ -714,6 +714,7 @@ if(ENABLE_DRM_BACKEND AND DRM_FOUND AND EGL_FOUND)
             src/cuems_videocomposer/cpp/display/drm/SeatManager.cpp
             src/cuems_videocomposer/cpp/display/drm/DRMBackend.cpp
             src/cuems_videocomposer/cpp/display/drm/PresentationTiming.cpp
+        src/cuems_videocomposer/cpp/display/CadenceStats.cpp
         )
         
         message(STATUS "DRM/KMS backend enabled (GBM + EGL)")
@@ -1002,6 +1003,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
         src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
         src/cuems_videocomposer/cpp/test/TestOutputSnapshot.cpp
+        src/cuems_videocomposer/cpp/test/TestCadenceStats.cpp
         src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
         src/cuems_videocomposer/cpp/test/TestLayerPathId.cpp
         src/cuems_videocomposer/cpp/test/TestExitReporter.cpp
@@ -1020,6 +1022,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/config/ConfigurationManager.cpp
         src/cuems_videocomposer/cpp/display/drm/PresentationTiming.cpp
         src/cuems_videocomposer/cpp/display/OutputSnapshot.cpp
+        src/cuems_videocomposer/cpp/display/CadenceStats.cpp
         src/cuems_videocomposer/cpp/layer/VideoLayer.cpp
         src/cuems_videocomposer/cpp/layer/LayerPlayback.cpp
         src/cuems_videocomposer/cpp/layer/LayerDisplay.cpp

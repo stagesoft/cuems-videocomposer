@@ -75,6 +75,18 @@ ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-previe
   zero. `VIDEOCOMPOSER_COUPLED_PACING=1` is still honoured and forces coupled; `=0` no longer selects
   per-surface (it did on 0.1.2-9), the startup line `frame pacing = …` always states the model in force.
 
+- **CadenceStats** (opt-in, `VIDEOCOMPOSER_CADENCE_STATS=1` in the service environment; plan R9 step S1):
+  one INFO line per output and layer every 60 s, and a `final` line when the layer leaves or the VC stops:
+  `CadenceStats: output=HDMI-A-1 layer=1 fps=29.970 hz=30.000 presents=… changes=… holds{1:…,2:…}
+  outsideA=0 minority=… expected=… skipped=0 back=0 wraps=0 disc=0`. A *hold* is how many vsyncs a frame
+  stayed on screen, counted from the msc of the flip events; `outsideA` counts holds outside
+  {floor(r), ceil(r)}, r = hz / fps (the "3 then 1" irregular pairs); `minority` vs `expected` is the
+  inherent drift the rate predicts (29.97 on 30 Hz: one 2-hold per ~1000 frames). Coupled path only;
+  in coupled mode every visible layer is counted on every output (one shared composite). Read the
+  journal as root (`sudo journalctl -u cuems-videocomposer | grep CadenceStats`): cuems-admin is not
+  in `systemd-journal` and sees nothing. First rig reading, test2 node01 Panera 2×4K30 2026-10-21:
+  `holds{1:7186,2:7} outsideA=0 minority=7 expected=7.2` per output after 4 min.
+
 ## Resolution control
 
 Precedence (after the DRMBackend patch on `main`/`rc_1`): **`--resolution` CLI flag > `resolution_policy` in `/run/cuems/display.conf` (general) > built-in 1080p default**, with **per-output `resolution=WxH` lines always overriding on top**. So this works:
