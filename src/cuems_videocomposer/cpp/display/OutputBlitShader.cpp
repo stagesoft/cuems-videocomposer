@@ -24,104 +24,29 @@
  */
 
 #include "OutputBlitShader.h"
+#include "OutputBlitGlsl.h"
+#include "ColorMatrix.h"
+#include "OutputLutTexture.h"
 #include "../utils/Logger.h"
 
 #include <GL/glew.h>
 #include <GL/gl.h>
+#include <cstdio>
 #include <cstring>
+#include <string>
+#include <utility>
 
 namespace videocomposer {
 
-// Vertex shader - simple fullscreen quad
+// Vertex shader - simple fullscreen quad (shared by programs A and B)
 const char* OutputBlitShader::getVertexShaderSource() {
-    return R"(
-#version 330 core
-
-layout(location = 0) in vec2 aPosition;
-layout(location = 1) in vec2 aTexCoord;
-
-out vec2 vTexCoord;
-
-void main() {
-    gl_Position = vec4(aPosition, 0.0, 1.0);
-    vTexCoord = aTexCoord;
-}
-)";
+    return OutputBlitGlsl::kVertex;
 }
 
-// Fragment shader with edge blending and warp support
+// Fragment shader with edge blending and warp support (program A, the 0.1.2-11
+// text verbatim; program B is assembled from it in OutputBlitGlsl.h)
 const char* OutputBlitShader::getFragmentShaderSource() {
-    return R"(
-#version 330 core
-
-uniform sampler2D uCanvasTex;
-uniform vec2 uCanvasSize;        // Canvas dimensions in pixels
-uniform vec4 uSourceRect;        // x, y, width, height in canvas pixels
-uniform vec2 uOutputSize;        // Output dimensions in pixels
-uniform vec4 uBlendWidths;       // left, right, top, bottom blend widths in pixels
-uniform float uBlendGamma;       // Gamma for perceptual blending (typically 2.2)
-uniform int uWarpEnabled;        // 0 = disabled, 1 = enabled
-uniform sampler2D uWarpTex;      // Warp displacement texture
-
-in vec2 vTexCoord;               // 0-1 across output
-out vec4 fragColor;
-
-void main() {
-    vec2 outputPos = vTexCoord;
-    
-    // Apply warp displacement if enabled
-    if (uWarpEnabled != 0) {
-        // Warp texture stores displacement as RG values (0.5 = no displacement)
-        vec2 warpOffset = texture(uWarpTex, vTexCoord).xy * 2.0 - 1.0;
-        // Scale displacement (adjust 0.1 for warp strength)
-        outputPos += warpOffset * 0.1;
-        // Clamp to valid range
-        outputPos = clamp(outputPos, vec2(0.0), vec2(1.0));
-    }
-    
-    // Map output position to canvas coordinates
-    vec2 canvasCoord = uSourceRect.xy + outputPos * uSourceRect.zw;
-    
-    // Normalize to texture coordinates (0-1)
-    vec2 texCoord = canvasCoord / uCanvasSize;
-    
-    // Sample canvas texture
-    vec4 color = texture(uCanvasTex, texCoord);
-    
-    // Calculate edge blending alpha
-    float alpha = 1.0;
-    vec2 pixelPos = vTexCoord * uOutputSize;
-    
-    // Left edge blend
-    if (uBlendWidths.x > 0.0 && pixelPos.x < uBlendWidths.x) {
-        alpha *= smoothstep(0.0, uBlendWidths.x, pixelPos.x);
-    }
-    
-    // Right edge blend
-    if (uBlendWidths.y > 0.0 && pixelPos.x > (uOutputSize.x - uBlendWidths.y)) {
-        alpha *= smoothstep(0.0, uBlendWidths.y, uOutputSize.x - pixelPos.x);
-    }
-    
-    // Top edge blend
-    if (uBlendWidths.z > 0.0 && pixelPos.y < uBlendWidths.z) {
-        alpha *= smoothstep(0.0, uBlendWidths.z, pixelPos.y);
-    }
-    
-    // Bottom edge blend
-    if (uBlendWidths.w > 0.0 && pixelPos.y > (uOutputSize.y - uBlendWidths.w)) {
-        alpha *= smoothstep(0.0, uBlendWidths.w, uOutputSize.y - pixelPos.y);
-    }
-    
-    // Apply gamma correction for perceptual blending
-    // This ensures the overlap region appears correctly bright
-    if (alpha < 1.0) {
-        alpha = pow(alpha, uBlendGamma);
-    }
-    
-    // Output with blending applied
-    fragColor = vec4(color.rgb * alpha, 1.0);
-}
-)";
+    return OutputBlitGlsl::fragmentA();
 }
 
 OutputBlitShader::OutputBlitShader() {
@@ -160,6 +85,10 @@ bool OutputBlitShader::init() {
     uWarpEnabled_ = glGetUniformLocation(program_, "uWarpEnabled");
     uWarpTex_ = glGetUniformLocation(program_, "uWarpTex");
     
+    // Color program (B). Its failure never fails init(): every output then
+    // keeps program A, i.e. runs without color (the canvas layout is kept).
+    compileColorProgram();
+    
     initialized_ = true;
     LOG_INFO << "OutputBlitShader: Initialized";
     
@@ -182,6 +111,17 @@ void OutputBlitShader::cleanup() {
         program_ = 0;
     }
     
+    if (colorProgram_ != 0) {
+        glDeleteProgram(colorProgram_);
+        colorProgram_ = 0;
+    }
+    colorProgramAvailable_ = false;
+    
+    if (colorFragmentShader_ != 0) {
+        glDeleteShader(colorFragmentShader_);
+        colorFragmentShader_ = 0;
+    }
+    
     if (vertexShader_ != 0) {
         glDeleteShader(vertexShader_);
         vertexShader_ = 0;
@@ -200,6 +140,14 @@ void OutputBlitShader::blit(GLuint canvasTexture,
                             const OutputRegion& region) {
     if (!initialized_) {
         LOG_ERROR << "OutputBlitShader: Not initialized";
+        return;
+    }
+    
+    // Program B only for an output with color, while B is usable and its first
+    // draw on this output did not fail; program A (below, unchanged) otherwise.
+    if (region.hasColor() && colorProgramAvailable_ &&
+        !(region.colorDraw && region.colorDraw->failed)) {
+        blitColor(canvasTexture, canvasWidth, canvasHeight, region);
         return;
     }
     
@@ -276,6 +224,250 @@ void OutputBlitShader::blitSimple(GLuint canvasTexture,
     region.warpMesh = nullptr;
     
     blit(canvasTexture, canvasWidth, canvasHeight, region);
+}
+
+namespace {
+
+// glGetError() returns one flag per call and flags are sticky until read: drop
+// stale ones so a check only sees what the call it brackets raised. Bounded,
+// because a lost context may keep returning an error.
+void clearStaleGlErrors() {
+    for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; ++i) {
+    }
+}
+
+// Compile one shader, returning its info log instead of logging it, so the
+// color program's failure is reported as a single ERROR line.
+GLuint compileShaderWithLog(GLenum type, const char* source, std::string& log) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    
+    GLint compileStatus = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compileStatus);
+    if (compileStatus != GL_TRUE) {
+        GLchar infoLog[1024];
+        infoLog[0] = '\0';
+        glGetShaderInfoLog(shader, sizeof(infoLog), nullptr, infoLog);
+        log = infoLog;
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+} // namespace
+
+void OutputBlitShader::compileColorProgram() {
+    colorProgramAvailable_ = false;
+    
+    const std::string source = OutputBlitGlsl::assembleFragmentB();
+    std::string reason;
+    if (source.empty()) {
+        reason = "its text could not be assembled from program A (anchor not found exactly once)";
+    } else {
+        colorFragmentShader_ = compileShaderWithLog(GL_FRAGMENT_SHADER, source.c_str(), reason);
+        if (colorFragmentShader_ == 0) {
+            reason = "fragment shader compile failed: " + reason;
+        } else {
+            colorProgram_ = glCreateProgram();
+            glAttachShader(colorProgram_, vertexShader_);
+            glAttachShader(colorProgram_, colorFragmentShader_);
+            glLinkProgram(colorProgram_);
+            
+            GLint linkStatus = GL_FALSE;
+            glGetProgramiv(colorProgram_, GL_LINK_STATUS, &linkStatus);
+            if (linkStatus != GL_TRUE) {
+                GLchar infoLog[1024];
+                infoLog[0] = '\0';
+                glGetProgramInfoLog(colorProgram_, sizeof(infoLog), nullptr, infoLog);
+                reason = std::string("link failed: ") + infoLog;
+            }
+        }
+    }
+    
+    if (!reason.empty()) {
+        LOG_ERROR << "OutputBlitShader: color program unavailable (" << reason
+                  << ") — every output runs without color";
+        if (colorProgram_ != 0) {
+            glDeleteProgram(colorProgram_);
+            colorProgram_ = 0;
+        }
+        if (colorFragmentShader_ != 0) {
+            glDeleteShader(colorFragmentShader_);
+            colorFragmentShader_ = 0;
+        }
+        return;
+    }
+    
+    // B's own locations for every uniform it uses (A's are not valid in B)
+    colorLoc_.canvasTex = glGetUniformLocation(colorProgram_, "uCanvasTex");
+    colorLoc_.canvasSize = glGetUniformLocation(colorProgram_, "uCanvasSize");
+    colorLoc_.sourceRect = glGetUniformLocation(colorProgram_, "uSourceRect");
+    colorLoc_.outputSize = glGetUniformLocation(colorProgram_, "uOutputSize");
+    colorLoc_.blendWidths = glGetUniformLocation(colorProgram_, "uBlendWidths");
+    colorLoc_.blendGamma = glGetUniformLocation(colorProgram_, "uBlendGamma");
+    colorLoc_.warpEnabled = glGetUniformLocation(colorProgram_, "uWarpEnabled");
+    colorLoc_.warpTex = glGetUniformLocation(colorProgram_, "uWarpTex");
+    colorLoc_.colorEnabled = glGetUniformLocation(colorProgram_, "uColorEnabled");
+    colorLoc_.colorMatrix = glGetUniformLocation(colorProgram_, kUniformColorMatrix);
+    colorLoc_.colorOffset = glGetUniformLocation(colorProgram_, kUniformColorOffset);
+    colorLoc_.invGamma = glGetUniformLocation(colorProgram_, kUniformInvGamma);
+    colorLoc_.lutEnabled = glGetUniformLocation(colorProgram_, "uLutEnabled");
+    colorLoc_.lutTex = glGetUniformLocation(colorProgram_, "uLutTex");
+    colorLoc_.lutScale = glGetUniformLocation(colorProgram_, "uLutScale");
+    colorLoc_.lutOffset = glGetUniformLocation(colorProgram_, "uLutOffset");
+    
+    // Every uniform B uses must be live: a location of -1 makes glUniform* a silent
+    // no-op, so a misnamed uColorMatrix would leave the matrix at zero and the output
+    // black with no GL error for the draw check to see. Such a B is not used.
+    const std::pair<const char*, GLint> required[] = {
+        {"uCanvasTex", colorLoc_.canvasTex},     {"uCanvasSize", colorLoc_.canvasSize},
+        {"uSourceRect", colorLoc_.sourceRect},   {"uOutputSize", colorLoc_.outputSize},
+        {"uBlendWidths", colorLoc_.blendWidths}, {"uBlendGamma", colorLoc_.blendGamma},
+        {"uWarpEnabled", colorLoc_.warpEnabled}, {"uWarpTex", colorLoc_.warpTex},
+        {"uColorEnabled", colorLoc_.colorEnabled},
+        {kUniformColorMatrix, colorLoc_.colorMatrix}, {kUniformColorOffset, colorLoc_.colorOffset},
+        {kUniformInvGamma, colorLoc_.invGamma},
+        {"uLutEnabled", colorLoc_.lutEnabled},   {"uLutTex", colorLoc_.lutTex},
+        {"uLutScale", colorLoc_.lutScale},       {"uLutOffset", colorLoc_.lutOffset},
+    };
+    std::string missing;
+    for (const auto& [name, location] : required) {
+        if (location < 0) {
+            missing += missing.empty() ? name : std::string(", ") + name;
+        }
+    }
+    if (!missing.empty()) {
+        LOG_ERROR << "OutputBlitShader: color program unavailable (uniform not found: " << missing
+                  << ") — every output runs without color";
+        glDeleteProgram(colorProgram_);
+        colorProgram_ = 0;
+        glDeleteShader(colorFragmentShader_);
+        colorFragmentShader_ = 0;
+        return;
+    }
+    
+    colorProgramAvailable_ = true;
+    LOG_INFO << "OutputBlitShader: Color program compiled and linked";
+}
+
+void OutputBlitShader::blitColor(GLuint canvasTexture,
+                                 int canvasWidth, int canvasHeight,
+                                 const OutputRegion& region) {
+    // The LUT, or the placeholder (the sampler3D must always see a 3D texture).
+    // Fetched first: creating the placeholder reads glGetError() itself.
+    const OutputLutTexture* lut = region.lut.get();
+    const GLuint lutTexture = lut ? lut->texture() : OutputLutTexture::placeholderTexture();
+    
+    // One-shot draw check per output: a program that links can still fail every
+    // draw (e.g. a sampler3D and a sampler2D on one unit), which would otherwise
+    // be a silent black output. Stale errors are dropped first, so the check
+    // covers this program's whole setup and draw and nothing before it.
+    ColorDrawState* drawState = region.colorDraw.get();
+    const bool checkDraw = drawState && !drawState->checked;
+    if (checkDraw) {
+        clearStaleGlErrors();
+    }
+    
+    glUseProgram(colorProgram_);
+    
+    // Same uniforms as program A, through B's own locations
+    glUniform2f(colorLoc_.canvasSize,
+                static_cast<float>(canvasWidth),
+                static_cast<float>(canvasHeight));
+    
+    glUniform4f(colorLoc_.sourceRect,
+                static_cast<float>(region.canvasX),
+                static_cast<float>(region.canvasY),
+                static_cast<float>(region.canvasWidth),
+                static_cast<float>(region.canvasHeight));
+    
+    glUniform2f(colorLoc_.outputSize,
+                static_cast<float>(region.physicalWidth),
+                static_cast<float>(region.physicalHeight));
+    
+    glUniform4f(colorLoc_.blendWidths,
+                region.blend.left,
+                region.blend.right,
+                region.blend.top,
+                region.blend.bottom);
+    
+    glUniform1f(colorLoc_.blendGamma, region.blend.gamma);
+    
+    bool hasWarp = region.hasWarping();
+    glUniform1i(colorLoc_.warpEnabled, hasWarp ? 1 : 0);
+    
+    // Trims (the shader skips them entirely when off)
+    const OutputColor& color = region.color;
+    const bool trims = color.trimsActive();
+    glUniform1i(colorLoc_.colorEnabled, trims ? 1 : 0);
+    if (trims) {
+        // Composed per draw, as for the layers: a handful of flops, no cache to invalidate
+        const ColorMatrix cm = composeColorMatrix(color);
+        glUniformMatrix3fv(colorLoc_.colorMatrix, 1, GL_FALSE, cm.m);
+        glUniform3f(colorLoc_.colorOffset, cm.off[0], cm.off[1], cm.off[2]);
+        glUniform1f(colorLoc_.invGamma, cm.invGamma);
+    }
+    
+    // LUT: size and domain come from the texture object itself
+    if (lut) {
+        const LutTransform& t = lut->transform();
+        glUniform1i(colorLoc_.lutEnabled, 1);
+        glUniform3f(colorLoc_.lutScale, t.scale[0], t.scale[1], t.scale[2]);
+        glUniform3f(colorLoc_.lutOffset, t.offset[0], t.offset[1], t.offset[2]);
+    } else {
+        glUniform1i(colorLoc_.lutEnabled, 0);
+        glUniform3f(colorLoc_.lutScale, 1.0f, 1.0f, 1.0f);
+        glUniform3f(colorLoc_.lutOffset, 0.0f, 0.0f, 0.0f);
+    }
+    
+    // Bind canvas texture to unit 0. uLutTex is set to its own unit every time
+    // B is bound: a sampler3D left on unit 0 next to uCanvasTex's sampler2D
+    // makes every draw fail with GL_INVALID_OPERATION (and init() never binds
+    // the program, so it cannot be set there).
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, canvasTexture);
+    glUniform1i(colorLoc_.canvasTex, 0);
+    glUniform1i(colorLoc_.lutTex, kLutUnit);
+    
+    // Bind warp texture to unit 1 if enabled
+    if (hasWarp && region.warpMesh) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, region.warpMesh->getTexture());
+        glUniform1i(colorLoc_.warpTex, 1);
+    }
+    
+    // The LUT (or the placeholder) on its own unit
+    glActiveTexture(GL_TEXTURE0 + kLutUnit);
+    glBindTexture(GL_TEXTURE_3D, lutTexture);
+    
+    // Draw fullscreen quad
+    glBindVertexArray(vao_);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    
+    if (checkDraw) {
+        const GLenum err = glGetError();
+        if (err != GL_NO_ERROR) {
+            char code[16];
+            std::snprintf(code, sizeof(code), "0x%04X", static_cast<unsigned>(err));
+            LOG_ERROR << "OutputColor: " << region.name << " color program draw failed (GL "
+                      << code << ") — this output runs without color";
+            drawState->failed = true;
+        }
+        drawState->checked = true;
+    }
+    
+    // Cleanup. Unit 2 first: the final active unit must be 0, because the layer
+    // renderer binds its textures without glActiveTexture.
+    glActiveTexture(GL_TEXTURE0 + kLutUnit);
+    glBindTexture(GL_TEXTURE_3D, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
 }
 
 bool OutputBlitShader::compileShaders() {

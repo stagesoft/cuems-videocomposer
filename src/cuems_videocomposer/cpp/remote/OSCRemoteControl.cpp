@@ -116,6 +116,9 @@ bool OSCRemoteControl::initialize(int port) {
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/autounload", "i", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop", "i", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop", "ii", handleOSCMessage, userData_);
+    // The engine's loop period (869ejxng3): num den frames, or num den (own count)
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/period", "iii", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/period", "ii", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/region", "ii", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/region", "iii", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/region/disable", "", handleOSCMessage, userData_);

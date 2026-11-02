@@ -127,6 +127,12 @@ private:
     bool initializeLayerManager();
     bool createInitialLayer();
     bool initializeGlobalSyncSource();
+    // /run/cuems/videocomposer.caps (869ejxng3 section 4.2): written at the
+    // end of initialize(), unlinked by shutdown() when it is still ours
+    void writeCapsFile();
+    void removeCapsFile();
+    std::string capsPath_;
+    bool capsWritten_ = false;
     
     // Common helper methods
     std::unique_ptr<InputSource> createInputSource(const std::string& source);

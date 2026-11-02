@@ -61,6 +61,28 @@ extern bool test_Integration_MIDISyncSource_RateWindowImmuneToPollCadence();
 
 extern bool test_MTCDecoder();
 
+// Day alignment of engine layer offsets (1amfwm7fbqy, 24h MTC wrap)
+extern bool test_DayAlign_FrameMsConversionAndSign();
+extern bool test_DayAlign_KZeroIsByteIdentical();
+extern bool test_DayAlign_TwelveHourTies();
+extern bool test_DayAlign_LatchPendingLatestWinsAndClear();
+extern bool test_DayAlign_UnresolvedWarningOncePerValue();
+extern bool test_DayAlign_ImplausiblePosition();
+extern bool test_DayAlign_LogLines();
+extern bool test_DayAlign_Int64ExtremesNoOverflow();
+#if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
+extern bool test_DayAlign_RealResolverWaitsForAuthoritativeHead();
+extern bool test_DayAlign_LayerAfterRestartShowsTheRightFrame();
+extern bool test_DayAlign_LayerAheadOfEngineShowsTheRightFrame();
+extern bool test_DayAlign_LayerAlignedIsUnchanged();
+extern bool test_DayAlign_LaterWriterReplacesPending();
+extern bool test_DayAlign_NoReceiverDriverAppliesAsReceived();
+extern bool test_DayAlign_ResolvedOnReceiptWhenAuthoritative();
+extern bool test_DayAlign_PendingLayerStillPollsOncePerUpdate();
+extern bool test_DayAlign_LoopLayerAtNonZeroK();
+extern bool test_DayAlign_LayerInt64Extremes();
+#endif
+
 extern bool test_SMPTEUtils_Overflow24h();
 extern bool test_LayerPathId_IntegerIds();
 extern bool test_LayerPathId_UuidsAreNotIntegerIds();
@@ -122,6 +144,64 @@ extern bool test_NdiPreview_ReadLatestFrameZeroWaitIsNonBlocking();
 extern bool test_NdiPreview_FileLayerUnchangedWithoutSync();
 extern bool test_NdiPreview_AutoUnloadSkipsUnknownLength();
 extern bool test_NdiPreview_FitOutputTest3Regions();
+
+// Per-output color (programme phase 3)
+extern bool test_CubeLut_ParsesHeaderAndData();
+extern bool test_CubeLut_RedVariesFastest();
+extern bool test_CubeLut_DomainMinMax();
+extern bool test_CubeLut_InputRangeMapsToDomain();
+extern bool test_CubeLut_RejectsDomainAndInputRangeDisagree();
+extern bool test_CubeLut_RejectsDomainMaxNotAboveMin();
+extern bool test_CubeLut_RejectsSizeOutOfRange();
+extern bool test_CubeLut_RejectsShortOrLongData();
+extern bool test_CubeLut_RejectsFourTokenLine();
+extern bool test_CubeLut_Rejects1D();
+extern bool test_CubeLut_RejectsUnknownKeyword();
+extern bool test_CubeLut_RejectsNonFinite();
+extern bool test_CubeLut_AcceptsBomTabsScientificCrlf();
+extern bool test_CubeLut_ClampsOutOfRangeAndCounts();
+extern bool test_CubeLut_RefusesNonRegularFile();
+extern bool test_CubeLut_RejectsDotDotRelativePath();
+extern bool test_CubeLut_SizeCap16MiB();
+extern bool test_CubeLut_ParseTime65();
+extern bool test_OutputColor_DefaultsAreIdentity();
+extern bool test_OutputColor_ClampsMatchLayerHandlers();
+extern bool test_OutputColor_HueFoldNeverLoops();
+extern bool test_OutputColor_FromCharsWholeToken();
+extern bool test_OutputColor_ReferenceMatchesLayerSemantics();
+extern bool test_OutputColor_LutCoordHalfTexel();
+extern bool test_OutputBlitShader_ProgramATextUnchanged();
+extern bool test_OutputBlitShader_ProgramBEmbedsSharedGlsl();
+extern bool test_VideoShaders_ColorFunctionsPinned();
+extern bool test_ColorMatrix_MatchesReference();
+extern bool test_ColorMatrix_KnownValues();
+extern bool test_ColorMatrix_IdentityIsIdentity();
+extern bool test_ColorMatrix_HueZeroSkipsRotation();
+extern bool test_ColorMatrix_ColumnMajor();
+extern bool test_ColorGlsl_MultiplyOrder();
+extern bool test_ColorGlsl_UniformNamesDeclared();
+extern bool test_VideoShaders_ColorFragmentsUseMatrix();
+extern bool test_OutputRegion_CopyCarriesLut();
+extern bool test_DisplayConfig_ColorKeysRoundTrip();
+extern bool test_DisplayConfig_PartialColorKeys();
+extern bool test_DisplayConfig_ValueCrlfAndTrailingSpaceStripped();
+extern bool test_DisplayConfig_BadColorValueIsLoudAndIgnored();
+extern bool test_DisplayConfig_OutOfRangeClampedWithWarning();
+extern bool test_DisplayConfig_NonFiniteRefused();
+extern bool test_DisplayConfig_UnknownKeysStillIgnored();
+extern bool test_DisplayConfig_SpacedKeyIsUnknown();
+extern bool test_DisplayConfig_ColorWithAutoLayout();
+extern bool test_DisplayConfig_ColorWithoutCanvasRegionWarns();
+extern bool test_DisplayConfig_LutPathRules();
+extern bool test_ShowLock_GateOnTempPath();
+extern bool test_ShowLock_RefusalLineNamesBothCauses();
+extern bool test_OutputColorCommands_ParsesAndClamps();
+extern bool test_OutputColorCommands_RejectsPathsAndDotDot();
+extern bool test_OutputColorCommands_PasteReadyLine();
+extern bool test_OutputColorCommands_DumpAllowedUnderLock();
+extern bool test_OutputColorCommands_LutNoneClearsOnlyLut();
+extern bool test_OutputColorCommands_StatusToLogLine();
+extern bool test_OutputList_ColorLineNeverMatchesRegionRegex();
 extern bool test_NdiPreview_FitOutputNativeMatchesEngine();
 extern bool test_NdiPreview_FitOutputNarrowCanvasAndFallback();
 extern bool test_NdiPreview_FitOutputRefitsOnFormatChange();
@@ -146,6 +226,29 @@ extern bool test_PresentationTiming_SustainedUnderrateDetected();
 extern bool test_PresentationTiming_NoUnderrateAtFullRate();
 
 using namespace videocomposer::test;
+
+// Shared loop period + undecodable-timecode hold (869ejxng3 Phase B, section 4.4, D13)
+extern bool test_LoopPeriod_SlackHoldAndCut();
+extern bool test_LoopPeriod_TailHeldWithinBound();
+extern bool test_LoopPeriod_TailNotDrawnBeyondBound();
+extern bool test_LoopPeriod_FinitePassesEnd();
+extern bool test_LoopPeriod_FractionalPassStart();
+extern bool test_LoopPeriod_NegativeRegionHoldsFrameZero();
+extern bool test_LoopPeriod_ShortPeriodCuts();
+extern bool test_LoopPeriod_Int128NoOverflow();
+extern bool test_LoopPeriod_HoldTailMaxIs500();
+extern bool test_LoopPeriod_LayerTailBlankLifecycle();
+extern bool test_LoopPeriod_LayerUsesEngineFrames();
+extern bool test_LoopPeriod_LayerTwoIntsUsesOwnCount();
+extern bool test_LoopPeriod_LayerNoPeriodWrapsOnTotalFrames();
+extern bool test_LoopPeriod_FileInputRealFrames();
+extern bool test_CapsFile_WrittenAndUnlinked();
+extern bool test_MtcHold_FrozenHeadNeverHolds();
+extern bool test_MtcHold_RuleEdges();
+#if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
+extern bool test_MtcHold_HealthyStreamNeverHolds();
+extern bool test_MtcHold_DoubledQuarterFramesHoldThenRecover();
+#endif
 
 int main() {
     // Register all tests
@@ -187,6 +290,27 @@ int main() {
 #endif
 
     TestFramework::instance().addTest("MTCDecoder", test_MTCDecoder);
+
+    TestFramework::instance().addTest("DayAlign_FrameMsConversionAndSign", test_DayAlign_FrameMsConversionAndSign);
+    TestFramework::instance().addTest("DayAlign_KZeroIsByteIdentical", test_DayAlign_KZeroIsByteIdentical);
+    TestFramework::instance().addTest("DayAlign_TwelveHourTies", test_DayAlign_TwelveHourTies);
+    TestFramework::instance().addTest("DayAlign_LatchPendingLatestWinsAndClear", test_DayAlign_LatchPendingLatestWinsAndClear);
+    TestFramework::instance().addTest("DayAlign_UnresolvedWarningOncePerValue", test_DayAlign_UnresolvedWarningOncePerValue);
+    TestFramework::instance().addTest("DayAlign_ImplausiblePosition", test_DayAlign_ImplausiblePosition);
+    TestFramework::instance().addTest("DayAlign_LogLines", test_DayAlign_LogLines);
+    TestFramework::instance().addTest("DayAlign_Int64ExtremesNoOverflow", test_DayAlign_Int64ExtremesNoOverflow);
+#if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
+    TestFramework::instance().addTest("DayAlign_RealResolverWaitsForAuthoritativeHead", test_DayAlign_RealResolverWaitsForAuthoritativeHead);
+    TestFramework::instance().addTest("DayAlign_LayerAfterRestartShowsTheRightFrame", test_DayAlign_LayerAfterRestartShowsTheRightFrame);
+    TestFramework::instance().addTest("DayAlign_LayerAheadOfEngineShowsTheRightFrame", test_DayAlign_LayerAheadOfEngineShowsTheRightFrame);
+    TestFramework::instance().addTest("DayAlign_LayerAlignedIsUnchanged", test_DayAlign_LayerAlignedIsUnchanged);
+    TestFramework::instance().addTest("DayAlign_LaterWriterReplacesPending", test_DayAlign_LaterWriterReplacesPending);
+    TestFramework::instance().addTest("DayAlign_NoReceiverDriverAppliesAsReceived", test_DayAlign_NoReceiverDriverAppliesAsReceived);
+    TestFramework::instance().addTest("DayAlign_ResolvedOnReceiptWhenAuthoritative", test_DayAlign_ResolvedOnReceiptWhenAuthoritative);
+    TestFramework::instance().addTest("DayAlign_PendingLayerStillPollsOncePerUpdate", test_DayAlign_PendingLayerStillPollsOncePerUpdate);
+    TestFramework::instance().addTest("DayAlign_LoopLayerAtNonZeroK", test_DayAlign_LoopLayerAtNonZeroK);
+    TestFramework::instance().addTest("DayAlign_LayerInt64Extremes", test_DayAlign_LayerInt64Extremes);
+#endif
     TestFramework::instance().addTest("SMPTEUtils_Overflow24h", test_SMPTEUtils_Overflow24h);
     TestFramework::instance().addTest("LayerPathId_IntegerIds", test_LayerPathId_IntegerIds);
     TestFramework::instance().addTest("LayerPathId_UuidsAreNotIntegerIds", test_LayerPathId_UuidsAreNotIntegerIds);
@@ -262,8 +386,86 @@ int main() {
     TestFramework::instance().addTest("NdiPreview_AddressForm", test_NdiPreview_AddressForm);
     TestFramework::instance().addTest("NdiPreview_TransportDecision", test_NdiPreview_TransportDecision);
     TestFramework::instance().addTest("NdiPreview_JournalContractRelay", test_NdiPreview_JournalContractRelay);
+
+    TestFramework::instance().addTest("CubeLut_ParsesHeaderAndData", test_CubeLut_ParsesHeaderAndData);
+    TestFramework::instance().addTest("CubeLut_RedVariesFastest", test_CubeLut_RedVariesFastest);
+    TestFramework::instance().addTest("CubeLut_DomainMinMax", test_CubeLut_DomainMinMax);
+    TestFramework::instance().addTest("CubeLut_InputRangeMapsToDomain", test_CubeLut_InputRangeMapsToDomain);
+    TestFramework::instance().addTest("CubeLut_RejectsDomainAndInputRangeDisagree", test_CubeLut_RejectsDomainAndInputRangeDisagree);
+    TestFramework::instance().addTest("CubeLut_RejectsDomainMaxNotAboveMin", test_CubeLut_RejectsDomainMaxNotAboveMin);
+    TestFramework::instance().addTest("CubeLut_RejectsSizeOutOfRange", test_CubeLut_RejectsSizeOutOfRange);
+    TestFramework::instance().addTest("CubeLut_RejectsShortOrLongData", test_CubeLut_RejectsShortOrLongData);
+    TestFramework::instance().addTest("CubeLut_RejectsFourTokenLine", test_CubeLut_RejectsFourTokenLine);
+    TestFramework::instance().addTest("CubeLut_Rejects1D", test_CubeLut_Rejects1D);
+    TestFramework::instance().addTest("CubeLut_RejectsUnknownKeyword", test_CubeLut_RejectsUnknownKeyword);
+    TestFramework::instance().addTest("CubeLut_RejectsNonFinite", test_CubeLut_RejectsNonFinite);
+    TestFramework::instance().addTest("CubeLut_AcceptsBomTabsScientificCrlf", test_CubeLut_AcceptsBomTabsScientificCrlf);
+    TestFramework::instance().addTest("CubeLut_ClampsOutOfRangeAndCounts", test_CubeLut_ClampsOutOfRangeAndCounts);
+    TestFramework::instance().addTest("CubeLut_RefusesNonRegularFile", test_CubeLut_RefusesNonRegularFile);
+    TestFramework::instance().addTest("CubeLut_RejectsDotDotRelativePath", test_CubeLut_RejectsDotDotRelativePath);
+    TestFramework::instance().addTest("CubeLut_SizeCap16MiB", test_CubeLut_SizeCap16MiB);
+    TestFramework::instance().addTest("CubeLut_ParseTime65", test_CubeLut_ParseTime65);
+    TestFramework::instance().addTest("OutputColor_DefaultsAreIdentity", test_OutputColor_DefaultsAreIdentity);
+    TestFramework::instance().addTest("OutputColor_ClampsMatchLayerHandlers", test_OutputColor_ClampsMatchLayerHandlers);
+    TestFramework::instance().addTest("OutputColor_HueFoldNeverLoops", test_OutputColor_HueFoldNeverLoops);
+    TestFramework::instance().addTest("OutputColor_FromCharsWholeToken", test_OutputColor_FromCharsWholeToken);
+    TestFramework::instance().addTest("OutputColor_ReferenceMatchesLayerSemantics", test_OutputColor_ReferenceMatchesLayerSemantics);
+    TestFramework::instance().addTest("OutputColor_LutCoordHalfTexel", test_OutputColor_LutCoordHalfTexel);
+    TestFramework::instance().addTest("OutputBlitShader_ProgramATextUnchanged", test_OutputBlitShader_ProgramATextUnchanged);
+    TestFramework::instance().addTest("OutputBlitShader_ProgramBEmbedsSharedGlsl", test_OutputBlitShader_ProgramBEmbedsSharedGlsl);
+    TestFramework::instance().addTest("VideoShaders_ColorFunctionsPinned", test_VideoShaders_ColorFunctionsPinned);
+    TestFramework::instance().addTest("ColorMatrix_MatchesReference", test_ColorMatrix_MatchesReference);
+    TestFramework::instance().addTest("ColorMatrix_KnownValues", test_ColorMatrix_KnownValues);
+    TestFramework::instance().addTest("ColorMatrix_IdentityIsIdentity", test_ColorMatrix_IdentityIsIdentity);
+    TestFramework::instance().addTest("ColorMatrix_HueZeroSkipsRotation", test_ColorMatrix_HueZeroSkipsRotation);
+    TestFramework::instance().addTest("ColorMatrix_ColumnMajor", test_ColorMatrix_ColumnMajor);
+    TestFramework::instance().addTest("ColorGlsl_MultiplyOrder", test_ColorGlsl_MultiplyOrder);
+    TestFramework::instance().addTest("ColorGlsl_UniformNamesDeclared", test_ColorGlsl_UniformNamesDeclared);
+    TestFramework::instance().addTest("VideoShaders_ColorFragmentsUseMatrix", test_VideoShaders_ColorFragmentsUseMatrix);
+    TestFramework::instance().addTest("OutputRegion_CopyCarriesLut", test_OutputRegion_CopyCarriesLut);
+    TestFramework::instance().addTest("DisplayConfig_ColorKeysRoundTrip", test_DisplayConfig_ColorKeysRoundTrip);
+    TestFramework::instance().addTest("DisplayConfig_PartialColorKeys", test_DisplayConfig_PartialColorKeys);
+    TestFramework::instance().addTest("DisplayConfig_ValueCrlfAndTrailingSpaceStripped", test_DisplayConfig_ValueCrlfAndTrailingSpaceStripped);
+    TestFramework::instance().addTest("DisplayConfig_BadColorValueIsLoudAndIgnored", test_DisplayConfig_BadColorValueIsLoudAndIgnored);
+    TestFramework::instance().addTest("DisplayConfig_OutOfRangeClampedWithWarning", test_DisplayConfig_OutOfRangeClampedWithWarning);
+    TestFramework::instance().addTest("DisplayConfig_NonFiniteRefused", test_DisplayConfig_NonFiniteRefused);
+    TestFramework::instance().addTest("DisplayConfig_UnknownKeysStillIgnored", test_DisplayConfig_UnknownKeysStillIgnored);
+    TestFramework::instance().addTest("DisplayConfig_SpacedKeyIsUnknown", test_DisplayConfig_SpacedKeyIsUnknown);
+    TestFramework::instance().addTest("DisplayConfig_ColorWithAutoLayout", test_DisplayConfig_ColorWithAutoLayout);
+    TestFramework::instance().addTest("DisplayConfig_ColorWithoutCanvasRegionWarns", test_DisplayConfig_ColorWithoutCanvasRegionWarns);
+    TestFramework::instance().addTest("DisplayConfig_LutPathRules", test_DisplayConfig_LutPathRules);
+    TestFramework::instance().addTest("ShowLock_GateOnTempPath", test_ShowLock_GateOnTempPath);
+    TestFramework::instance().addTest("ShowLock_RefusalLineNamesBothCauses", test_ShowLock_RefusalLineNamesBothCauses);
+    TestFramework::instance().addTest("OutputColorCommands_ParsesAndClamps", test_OutputColorCommands_ParsesAndClamps);
+    TestFramework::instance().addTest("OutputColorCommands_RejectsPathsAndDotDot", test_OutputColorCommands_RejectsPathsAndDotDot);
+    TestFramework::instance().addTest("OutputColorCommands_PasteReadyLine", test_OutputColorCommands_PasteReadyLine);
+    TestFramework::instance().addTest("OutputColorCommands_DumpAllowedUnderLock", test_OutputColorCommands_DumpAllowedUnderLock);
+    TestFramework::instance().addTest("OutputColorCommands_LutNoneClearsOnlyLut", test_OutputColorCommands_LutNoneClearsOnlyLut);
+    TestFramework::instance().addTest("OutputColorCommands_StatusToLogLine", test_OutputColorCommands_StatusToLogLine);
+    TestFramework::instance().addTest("OutputList_ColorLineNeverMatchesRegionRegex", test_OutputList_ColorLineNeverMatchesRegionRegex);
     TestFramework::instance().addTest("NdiPreview_ExtraIps", test_NdiPreview_ExtraIps);
     TestFramework::instance().addTest("NdiPreview_JournalContractExtraIps", test_NdiPreview_JournalContractExtraIps);
+    TestFramework::instance().addTest("LoopPeriod_SlackHoldAndCut", test_LoopPeriod_SlackHoldAndCut);
+    TestFramework::instance().addTest("LoopPeriod_TailHeldWithinBound", test_LoopPeriod_TailHeldWithinBound);
+    TestFramework::instance().addTest("LoopPeriod_TailNotDrawnBeyondBound", test_LoopPeriod_TailNotDrawnBeyondBound);
+    TestFramework::instance().addTest("LoopPeriod_FinitePassesEnd", test_LoopPeriod_FinitePassesEnd);
+    TestFramework::instance().addTest("LoopPeriod_FractionalPassStart", test_LoopPeriod_FractionalPassStart);
+    TestFramework::instance().addTest("LoopPeriod_NegativeRegionHoldsFrameZero", test_LoopPeriod_NegativeRegionHoldsFrameZero);
+    TestFramework::instance().addTest("LoopPeriod_ShortPeriodCuts", test_LoopPeriod_ShortPeriodCuts);
+    TestFramework::instance().addTest("LoopPeriod_Int128NoOverflow", test_LoopPeriod_Int128NoOverflow);
+    TestFramework::instance().addTest("LoopPeriod_HoldTailMaxIs500", test_LoopPeriod_HoldTailMaxIs500);
+    TestFramework::instance().addTest("LoopPeriod_LayerTailBlankLifecycle", test_LoopPeriod_LayerTailBlankLifecycle);
+    TestFramework::instance().addTest("LoopPeriod_LayerUsesEngineFrames", test_LoopPeriod_LayerUsesEngineFrames);
+    TestFramework::instance().addTest("LoopPeriod_LayerTwoIntsUsesOwnCount", test_LoopPeriod_LayerTwoIntsUsesOwnCount);
+    TestFramework::instance().addTest("LoopPeriod_LayerNoPeriodWrapsOnTotalFrames", test_LoopPeriod_LayerNoPeriodWrapsOnTotalFrames);
+    TestFramework::instance().addTest("LoopPeriod_FileInputRealFrames", test_LoopPeriod_FileInputRealFrames);
+    TestFramework::instance().addTest("CapsFile_WrittenAndUnlinked", test_CapsFile_WrittenAndUnlinked);
+    TestFramework::instance().addTest("MtcHold_FrozenHeadNeverHolds", test_MtcHold_FrozenHeadNeverHolds);
+    TestFramework::instance().addTest("MtcHold_RuleEdges", test_MtcHold_RuleEdges);
+#if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
+    TestFramework::instance().addTest("MtcHold_HealthyStreamNeverHolds", test_MtcHold_HealthyStreamNeverHolds);
+    TestFramework::instance().addTest("MtcHold_DoubledQuarterFramesHoldThenRecover", test_MtcHold_DoubledQuarterFramesHoldThenRecover);
+#endif
     return TestFramework::instance().runAll();
 }
 
