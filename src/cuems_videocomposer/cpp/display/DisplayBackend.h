@@ -233,6 +233,52 @@ public:
         return false;
     }
     
+    // ===== Per-output color (programme phase 3, /videocomposer/display/color) =====
+    // Only a backend with the virtual canvas can run it (DRM); the defaults say
+    // Unsupported so the handler logs that, never a silent no-op. The show lock is
+    // the handler's (display/ShowLock.h), not the backend's.
+    
+    /**
+     * Set the five trims of an output (`trims`' LUT fields are ignored: the LUT
+     * has its own calls). BadValue when a trim is not finite or out of range.
+     */
+    virtual OutputColorStatus configureOutputColor(const std::string& outputName,
+                                                   const OutputColor& trims) {
+        (void)outputName; (void)trims;
+        return OutputColorStatus::Unsupported;
+    }
+    
+    /**
+     * Load the LUT at `resolvedPath` and put it on an output; `displayValue` is
+     * how the operator named it (the paste-ready lines print it). On LutFailed
+     * the previous LUT stays and `info.error` says why.
+     */
+    virtual OutputColorStatus configureOutputLut(const std::string& outputName,
+                                                 const std::string& resolvedPath,
+                                                 const std::string& displayValue,
+                                                 OutputLutLoadInfo& info) {
+        (void)outputName; (void)resolvedPath; (void)displayValue; (void)info;
+        return OutputColorStatus::Unsupported;
+    }
+    
+    /** Remove an output's LUT; its trims are kept. */
+    virtual OutputColorStatus clearOutputLut(const std::string& outputName) {
+        (void)outputName;
+        return OutputColorStatus::Unsupported;
+    }
+    
+    /** Trims back to identity and the LUT removed. */
+    virtual OutputColorStatus resetOutputColor(const std::string& outputName) {
+        (void)outputName;
+        return OutputColorStatus::Unsupported;
+    }
+    
+    /** Every output's color, in canvas order (read-only: display/color dump, output/list). */
+    virtual OutputColorStatus getOutputColors(std::vector<OutputColorReport>& out) const {
+        out.clear();
+        return OutputColorStatus::Unsupported;
+    }
+    
     // ===== Virtual Output / Capture Support =====
     
     /**

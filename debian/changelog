@@ -1,3 +1,68 @@
+cuems-videocomposer (0.1.2-12) unstable; urgency=medium
+
+  * Gapless MTC-locked loops (869ejxng3 + 1amfwm7e6cw, PR #22): a looping
+    layer wraps on the engine's loop period (/loop/period num den frames,
+    one period per file shared with the audio player) instead of being
+    re-anchored by the engine every pass; a capabilities file tells
+    cuems-engine >= 0.1.0rc6-7 that this VC understands it.
+  * Loop tail (D15): a video shorter than the period holds its last frame
+    for a tail of up to 0.5 s and draws nothing beyond (the blank-layer
+    flag, cleared at the next pass; a finite loop whose tail was dark ends
+    dark); a period shorter than the video cuts at the loop point (INFO
+    within 0.5 s, ERROR beyond).
+  * Undecodable timecode (D13): with doubled quarter frames the layer holds
+    its frame after 800 ms without an anchored tick and follows again when
+    the timecode decodes, the audio player's rule; ERROR names the likely
+    cause (a doubled rtpmidid subscription).
+  * MTC day alignment (1amfwm7fbqy, PR #18): an engine layer offset is
+    converted into this process's MTC day (mtcreceiver eb7ad4f, toLocalDay,
+    12 h rule), so a videocomposer restarted after the engine passed 24 h
+    no longer places cues a day off; while the head is not authoritative
+    the offset stays pending and is polled, never applied blind. Journal:
+    "MTC day-align: ..." lines.
+  * Per-output color correction (programme phase 3, PR #17): each output
+    can carry brightness, contrast, saturation, hue and gamma, plus an
+    optional 3D LUT (.cube, up to 65^3), applied in the output blit after
+    edge blending. Set in /etc/cuems/display.conf per [output:...] with
+    color_brightness= color_contrast= color_saturation= color_hue=
+    color_gamma= color_lut= (a relative LUT path is resolved under
+    /etc/cuems/luts/, ".." refused), or live over OSC with
+    /videocomposer/display/color <connector> <param> <value> | reset |
+    lut <file|none>. An output without color draws exactly as 0.1.2-11 and
+    costs nothing; color on an output costs GPU (trims + 65^3 LUT on
+    2x4K30 Panera: about +13 points of render busy).
+  * Show lock: display color and every restart-class display command are
+    refused while /tmp/cuems.show.lock exists (a project loaded) and
+    applied hot otherwise, with the cause in the REFUSED line. The lock is
+    written by cuems-engine >= 0.1.0rc6-6; with an older engine on any box
+    nothing is gated, so install this VC only where the engine is >= rc6-6.
+  * Layer and master color use the same CPU-composed color matrix as the
+    outputs (brightness, contrast, saturation and hue as one 3x3 matrix +
+    offset, gamma per pixel): same picture within 1/255, less GPU work.
+  * output/list prints one output_color line per output after the region
+    lines (which are unchanged, so the power-bridge NDI preview parser
+    keeps working).
+  * Master color now works on the DRM canvas (1amfwm7fp88, PR #20): master
+    commands reached a dummy renderer, and the master pass rebound
+    framebuffer 0 instead of the canvas, so master trims did nothing on
+    every DRM show box since the feature (c592ca2). Master color is also
+    right way up now. Master transforms (position, scale, rotation,
+    corners) stay a no-op on DRM, now with one WARNING instead of a
+    risk of a blank output.
+  * Build: compiles against FFmpeg 8 (AV_CODEC_ID_AYUV guard, explicit
+    <algorithm>) for CI on Ubuntu 26.04 (PR #21).
+  * Verified (cuems-RELATIONS Plans/2026-10-22-vc-output-colour-phase3.md
+    section 10): pixel readbacks of output, layer and master trims within
+    1/255 of the CPU reference on N97 (i915) and FP530 (radeonsi), every
+    shader compiles on both; frame cadence with color equal to the cadence
+    without it at 25/29.97/30@60, 29.97/25@50 and 3x60 fps layers; by eye
+    on .111 and the test controller (2026-10-28 .. 11-02).
+  * Install together with the rest of the 869ejxng3 batch: cuems-engine
+    0.1.0rc6-7, cuems-audioplayer 0.0.3-15, cuems-utils 0.1.0rc18,
+    cuems-editor 0.1.0rc1-8; the whole cluster takes it at once.
+
+ -- Ion Reguera <ion@stagelab.coop>  Tue, 03 Nov 2026 00:26:29 +0100
+
 cuems-videocomposer (0.1.2-11) unstable; urgency=high
 
   * Sync: content at the MTC rate (25 fps) now goes through the smooth clock

@@ -28,6 +28,8 @@
 #include "../osd/OSDManager.h"
 #include "../display/OpenGLRenderer.h"
 #include "../display/DisplayBackend.h"
+#include "../display/ShowLock.h"
+#include "OutputColorCommands.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
 #include "../layer/OutputFit.h"
 #include "../input/NdiExtraIps.h"
@@ -163,6 +165,9 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     });
     registerLayerCommand("autounload", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerAutoUnload(layer, args);
+    });
+    registerLayerCommand("loop/period", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerLoopPeriod(layer, args);
     });
     registerLayerCommand("loop/region", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerLoopRegion(layer, args);
@@ -324,6 +329,9 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     });
     registerAppCommand("display/blend", [this](const std::vector<std::string>& args) {
         return handleDisplayBlend(args);
+    });
+    registerAppCommand("display/color", [this](const std::vector<std::string>& args) {
+        return handleDisplayColorCommand(app_->getDisplayBackend(), args);
     });
     registerAppCommand("display/save", [this](const std::vector<std::string>& args) {
         return handleDisplaySave(args);
@@ -982,6 +990,9 @@ bool RemoteCommandRouter::handleLayerLoop(VideoLayer* layer, const std::vector<s
         props.fullFileLoopCount = loopCount;
         props.currentFullFileLoopCount = (loopCount > 0) ? loopCount : -1;
     }
+    // The pass count a loop period wraps against (869ejxng3): the second
+    // argument, forever without one.
+    layer->setLoopPasses(args.size() >= 2 ? std::atoi(args[1].c_str()) : -1);
     
     // Handle enable/disable (first argument)
     bool enabled = false;
@@ -991,12 +1002,27 @@ bool RemoteCommandRouter::handleLayerLoop(VideoLayer* layer, const std::vector<s
     }
     layer->setWraparound(enabled);
     
-    // If disabling, also reset loop counts
+    // If disabling, also reset loop counts (and the engine's loop period)
     if (!enabled) {
         props.fullFileLoopCount = 0;
         props.currentFullFileLoopCount = -1;
+        layer->clearLoopPeriod();
     }
     
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerLoopPeriod(VideoLayer* layer, const std::vector<std::string>& args) {
+    // /videocomposer/layer/<id>/loop/period num den [frames] (869ejxng3
+    // section 4.2): 0 0 [0] clears; with two ints the layer uses its own
+    // frame count (J12). Re-sent every pass, idempotent.
+    if (!layer || args.size() < 2) {
+        return false;
+    }
+    const int64_t num = std::atoll(args[0].c_str());
+    const int64_t den = std::atoll(args[1].c_str());
+    const int64_t frames = args.size() >= 3 ? std::atoll(args[2].c_str()) : 0;
+    layer->setLoopPeriod(num, den, frames);
     return true;
 }
 
@@ -1235,8 +1261,10 @@ bool RemoteCommandRouter::handleLayerOffset(VideoLayer* layer, const std::vector
         
         offset = SMPTEUtils::smpteStringToFrame(offsetStr, framerate, haveDropframes, false, true);
     } else {
-        // Integer frame offset
-        offset = std::atoll(offsetStr.c_str());
+        // Integer frame offset: the engine path (25 fps MTC frames in the
+        // engine's MTC day). Day-aligned by the layer before it is used.
+        layer->setEngineTimeOffset(std::atoll(offsetStr.c_str()));
+        return true;
     }
     
     layer->setTimeOffset(offset);
@@ -1854,6 +1882,9 @@ bool RemoteCommandRouter::handleDisplayMode(const std::vector<std::string>& args
         LOG_WARNING << "display/mode requires: <name> <width> <height> [refresh]";
         return false;
     }
+    if (refuseUnderShowLock("display/mode")) {
+        return false;
+    }
     
     auto* backend = app_->getDisplayBackend();
     if (!backend) {
@@ -1928,6 +1959,9 @@ bool RemoteCommandRouter::handleDisplayResolutionMode(const std::vector<std::str
         LOG_INFO << "Usage: /videocomposer/display/resolution_mode <mode>";
         return true;
     }
+    if (refuseUnderShowLock("display/resolution_mode")) {
+        return false;
+    }
     
     auto* backend = app_->getDisplayBackend();
     if (!backend) {
@@ -1950,6 +1984,9 @@ bool RemoteCommandRouter::handleDisplayResolutionMode(const std::vector<std::str
 
 bool RemoteCommandRouter::handleDisplayRegion(const std::vector<std::string>& args) {
     // Expected: /videocomposer/display/region <outputName> <canvasX> <canvasY> [width] [height]
+    if (refuseUnderShowLock("display/region")) {
+        return false;
+    }
     if (args.size() < 3) {
         LOG_WARNING << "display/region requires: <outputName> <canvasX> <canvasY> [width] [height]";
         return false;
@@ -2004,6 +2041,9 @@ bool RemoteCommandRouter::handleDisplayAssign(const std::vector<std::string>& ar
 
 bool RemoteCommandRouter::handleDisplayBlend(const std::vector<std::string>& args) {
     // Expected: /videocomposer/display/blend <outputName> <left> <right> <top> <bottom> [gamma]
+    if (refuseUnderShowLock("display/blend")) {
+        return false;
+    }
     if (args.size() < 5) {
         LOG_WARNING << "display/blend requires: <outputName> <left> <right> <top> <bottom> [gamma]";
         return false;
@@ -2055,6 +2095,9 @@ bool RemoteCommandRouter::handleDisplaySave(const std::vector<std::string>& args
 
 bool RemoteCommandRouter::handleDisplayLoad(const std::vector<std::string>& args) {
     // Expected: /videocomposer/display/load [path]
+    if (refuseUnderShowLock("display/load")) {
+        return false;
+    }
     auto* backend = app_->getDisplayBackend();
     if (!backend) {
         LOG_WARNING << "display/load: No display backend available";
@@ -2171,6 +2214,10 @@ bool RemoteCommandRouter::handleOutputList(const std::vector<std::string>& args)
     for (const auto& region : backend->getCanvasRegions()) {
         LOG_INFO << journal::region(region.name, region.canvasX, region.canvasY,
                                     region.canvasWidth, region.canvasHeight);
+    }
+    // Per-output color, one output_color line each, after the region lines
+    for (const auto& line : outputColorListLines(*backend)) {
+        LOG_INFO << line;
     }
 
     // Capture status

@@ -29,6 +29,8 @@
 #ifndef VIDEOCOMPOSER_OUTPUTREGION_H
 #define VIDEOCOMPOSER_OUTPUTREGION_H
 
+#include "OutputColor.h"
+
 #include <string>
 #include <memory>
 
@@ -57,8 +59,24 @@ struct BlendEdges {
     }
 };
 
-// Forward declaration
+// Forward declarations
 class WarpMesh;
+class OutputLutTexture;
+
+/**
+ * ColorDrawState - the one-shot draw check of an output's color program.
+ *
+ * The first draw with the color program on an output is bracketed by glGetError():
+ * a link that succeeds can still fail every draw (e.g. two sampler types on one
+ * unit), which would otherwise be a silent black output. `failed` sends that output
+ * back to the plain program for good. Held through a shared_ptr so that every copy
+ * of the region (DRMBackend::outputRegions_ is the owner; MultiOutputRenderer keeps
+ * two copies) sees a flag set on the renderer's copy.
+ */
+struct ColorDrawState {
+    bool checked = false;   // the first color draw has been checked
+    bool failed = false;    // ...and raised a GL error: draw this output without color
+};
 
 /**
  * OutputRegion - Defines an output's position and configuration in the virtual canvas
@@ -93,6 +111,15 @@ struct OutputRegion {
     std::shared_ptr<WarpMesh> warpMesh;  // Optional warp mesh for geometric correction
     std::string warpMeshPath;       // Path to warp mesh file (for persistence)
     
+    // ===== Color (programme phase 3) =====
+    // Trims -> 3D LUT -> blend ramp, inside the output blit. DRMBackend::outputRegions_
+    // is the one owner: every apply writes there first and every rebuild copies those
+    // regions wholesale, so all three fields must survive a plain copy (they do: the
+    // LUT and the draw state are shared, not duplicated).
+    OutputColor color;                          // the five trims + configured LUT path/status
+    std::shared_ptr<OutputLutTexture> lut;      // uploaded LUT, null = none
+    std::shared_ptr<ColorDrawState> colorDraw = std::make_shared<ColorDrawState>();
+    
     // ===== State =====
     bool enabled = true;            // Is this output active?
     
@@ -110,6 +137,13 @@ struct OutputRegion {
      */
     bool hasWarping() const {
         return warpMesh != nullptr;
+    }
+    
+    /**
+     * Check if this region needs the color blit program (trims active or a LUT loaded)
+     */
+    bool hasColor() const {
+        return color.trimsActive() || lut != nullptr;
     }
     
     /**
