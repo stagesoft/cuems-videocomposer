@@ -29,6 +29,7 @@
 #include "../OutputColorConfig.h"
 #include "../OutputLutTexture.h"
 #include "../StartupSplash.h"
+#include "../OutputSnapshot.h"
 #include "../../layer/LayerManager.h"
 #include "../../layer/VideoLayer.h"
 #include "../../osd/OSDManager.h"
@@ -67,6 +68,7 @@ constexpr const char* kNoBackendForColor =
 }
 
 DRMBackend::DRMBackend() {
+    OutputSnapshot::installFromEnv();
     if (CadenceStats::enabledFromEnv()) {
         cadenceStats_ = std::make_unique<CadenceStats>();
         LOG_INFO << "DRMBackend: CadenceStats enabled (VIDEOCOMPOSER_CADENCE_STATS) -- "
