@@ -706,6 +706,10 @@ std::vector<Delivery> stream(int64_t mtc0, int64_t durNs, int64_t dblFrom, int64
     return out;
 }
 
+// The receiver's constructor opens an ALSA sequencer client even without a port
+// (RtMidiIn): a host without /dev/snd/seq (the CI runner) cannot run these two.
+bool alsaSeqAvailable() { return access("/dev/snd/seq", R_OK | W_OK) == 0; }
+
 struct HoldRun {
     std::vector<int64_t> entered, left;
 };
@@ -744,6 +748,10 @@ HoldRun runHold(const std::vector<Delivery>& d, int64_t durNs) {
 
 // A healthy stream through the real decoder never holds (60 s, full frames).
 bool test_MtcHold_HealthyStreamNeverHolds() {
+    if (!alsaSeqAvailable()) {
+        std::cout << "SKIPPED (no /dev/snd/seq) ";
+        return true;
+    }
     const int64_t dur = 60000 * MS;
     const HoldRun r = runHold(stream(3600000, dur, -1, -1), dur);
     TEST_ASSERT_EQ(r.entered.size(), (size_t)0);
@@ -753,6 +761,10 @@ bool test_MtcHold_HealthyStreamNeverHolds() {
 // Doubled quarter frames through the real decoder: held within 800 ms + a
 // group of the doubling (no hunting), left once it stops.
 bool test_MtcHold_DoubledQuarterFramesHoldThenRecover() {
+    if (!alsaSeqAvailable()) {
+        std::cout << "SKIPPED (no /dev/snd/seq) ";
+        return true;
+    }
     const int64_t dur = 30000 * MS;
     const HoldRun r = runHold(stream(3600000, dur, 10000 * MS, 20000 * MS), dur);
     TEST_ASSERT_EQ(r.entered.size(), (size_t)1);
