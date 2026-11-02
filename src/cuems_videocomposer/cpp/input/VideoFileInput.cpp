@@ -187,6 +187,20 @@ bool VideoFileInput::open(const std::string& source) {
         frameRateQ_.num = avStream->r_frame_rate.den;
     }
 
+    // The loop period's frame rate and this source's own frame count of the
+    // video stream (869ejxng3 section 4.4, log and compare only): the
+    // stream's duration, edit lists applied, on r_frame_rate; the container
+    // estimate (totalFrames) is the longest stream and is not it.
+    rateNum_ = avStream->r_frame_rate.num;
+    rateDen_ = avStream->r_frame_rate.den;
+    streamFrames_ = -1;
+    if (avStream->duration != AV_NOPTS_VALUE && avStream->duration > 0 &&
+        avStream->time_base.num > 0 && avStream->time_base.den > 0 && rateNum_ > 0 && rateDen_ > 0) {
+        const __int128 n = (__int128)avStream->duration * avStream->time_base.num * rateNum_;
+        const __int128 d = (__int128)avStream->time_base.den * rateDen_;
+        streamFrames_ = (int64_t)((2 * n + d) / (2 * d));
+    }
+
     // Dimensions - always from codec parameters, never from codecCtx_.
     // The hardware path no longer opens a codec context of its own (F2), so the
     // old codecCtx_ branch would read null there. codecpar carries the same
@@ -951,7 +965,9 @@ bool VideoFileInput::isIntraFrameCodec() const {
         case AV_CODEC_ID_R210:       // Uncompressed RGB 10-bit
         case AV_CODEC_ID_R10K:       // AJA Kona 10-bit RGB
         case AV_CODEC_ID_AVUI:       // Avid Meridien Uncompressed
+        #if LIBAVCODEC_VERSION_MAJOR < 62  // removed in FFmpeg 8 (an enum value, so #ifdef can't test it)
         case AV_CODEC_ID_AYUV:       // Uncompressed packed 4:4:4
+        #endif
         case AV_CODEC_ID_TARGA_Y216: // Pinnacle TARGA CineWave YUV16
         case AV_CODEC_ID_JPEG2000:   // JPEG 2000 (intra-frame)
         #ifdef AV_CODEC_ID_CINEFORM

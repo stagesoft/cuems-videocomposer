@@ -26,6 +26,7 @@
 #include "../input/HAPVideoInput.h"
 #include "../input/InputSource.h"
 #include "VideoShaders.h"
+#include "ColorMatrix.h"
 #include "HapShaders.h"
 #include <GL/glew.h>  // Must be included before GL/gl.h
 extern "C" {
@@ -531,7 +532,7 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
 
     // Get properties reference (safe since everything runs in main thread)
     const LayerProperties& props = layer->properties();
-    if (!props.visible || props.awaitingFrame) {
+    if (!props.visible || props.awaitingFrame || props.tailBlank) {
         return false;
     }
 
@@ -824,12 +825,23 @@ void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layer
     evictRemovedLayerTextures(layers);
 
     // Check if master transforms are active
-    bool useMasterFBO = masterProperties_.isActive();
+    bool useMasterFBO = masterPassActive();
+
+    // The target the caller bound: the window (0) on X11/Wayland, the virtual
+    // canvas FBO on DRM. The master pass must end there, not on 0: on DRM, 0 is
+    // the EGL back buffer that the per-output blit overwrites, so master color
+    // and transforms used to vanish (1amfwm7fp88).
+    GLint targetFBO = 0;
     
     if (useMasterFBO) {
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &targetFBO);
+
         // Initialize or resize FBO if needed
         if (!masterFBOInitialized_ || masterFBOWidth_ != viewportWidth_ || masterFBOHeight_ != viewportHeight_) {
-            if (!initMasterFBO(viewportWidth_, viewportHeight_)) {
+            const bool ok = initMasterFBO(viewportWidth_, viewportHeight_);
+            // initMasterFBO() leaves 0 bound, success or not
+            glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(targetFBO));
+            if (!ok) {
                 LOG_ERROR << "Failed to initialize master FBO, falling back to direct rendering";
                 useMasterFBO = false;
             }
@@ -855,11 +867,11 @@ void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layer
     }
     
     if (useMasterFBO && masterFBOInitialized_) {
-        // Unbind FBO, render to screen with master transforms
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        // Back to the caller's target, render the FBO there with master transforms
+        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(targetFBO));
         glViewport(0, 0, viewportWidth_, viewportHeight_);
         
-        // Clear screen
+        // Clear the target
         glClear(GL_COLOR_BUFFER_BIT);
         
         // Render FBO texture with master transforms
@@ -1634,6 +1646,25 @@ void OpenGLRenderer::cleanupMasterFBO() {
     masterFBOInitialized_ = false;
 }
 
+bool OpenGLRenderer::masterPassActive() {
+    const MasterProperties& props = masterProperties_;
+    if (!isCoreProfile_) {
+        return props.isActive();
+    }
+    MasterProperties transformsOnly = props;
+    transformsOnly.colorAdjust.reset();
+    if (transformsOnly.isActive()) {
+        if (!masterTransformWarned_) {
+            LOG_WARNING << "Master position/scale/rotation/opacity/corners are not supported on this"
+                           " display backend (core profile) and are ignored; master color still applies";
+            masterTransformWarned_ = true;
+        }
+    } else {
+        masterTransformWarned_ = false;
+    }
+    return props.colorAdjust.isActive();
+}
+
 void OpenGLRenderer::renderMasterQuadWithTransforms() {
     // Render the FBO texture to screen with master transforms applied
     const MasterProperties& props = masterProperties_;
@@ -1794,9 +1825,18 @@ void OpenGLRenderer::renderMasterQuadWithTransforms() {
 //   - Shader branch skips all color math (~0.02% GPU overhead)
 //
 // When enabled:
-//   - 6 uniforms are set (enabled + 5 color values)
-//   - Full color correction applied in shader
+//   - 4 uniforms are set (enabled + the CPU-composed matrix, offset and 1/gamma)
+//   - The shader applies M * rgb + off, then gamma and the clamp
 //
+// The trims reach the shaders as a CPU-composed matrix (ColorMatrix.h, programme
+// phase 3 rev 4): about 60 flops per colored layer per draw, instead of the hue
+// matrix and five function calls per pixel.
+void OpenGLRenderer::setColorMatrixUniforms(ShaderProgram* shader, const ColorMatrix& cm) {
+    shader->setUniformMatrix3fv(kUniformColorMatrix, cm.m);
+    shader->setUniform(kUniformColorOffset, cm.off[0], cm.off[1], cm.off[2]);
+    shader->setUniform(kUniformInvGamma, cm.invGamma);
+}
+
 void OpenGLRenderer::setColorCorrectionUniforms(ShaderProgram* shader, 
                                                 const LayerProperties::ColorAdjustment& colorAdjust) {
     if (!shader) return;
@@ -1805,11 +1845,9 @@ void OpenGLRenderer::setColorCorrectionUniforms(ShaderProgram* shader,
     shader->setUniform("uColorCorrectionEnabled", enabled ? 1 : 0);
     
     if (enabled) {
-        shader->setUniform("uBrightness", colorAdjust.brightness);
-        shader->setUniform("uContrast", colorAdjust.contrast);
-        shader->setUniform("uSaturation", colorAdjust.saturation);
-        shader->setUniform("uHue", colorAdjust.hue);
-        shader->setUniform("uGamma", colorAdjust.gamma);
+        setColorMatrixUniforms(shader, composeColorMatrix(colorAdjust.brightness, colorAdjust.contrast,
+                                                          colorAdjust.saturation, colorAdjust.hue,
+                                                          colorAdjust.gamma));
     }
 }
 
@@ -1821,11 +1859,9 @@ void OpenGLRenderer::setMasterColorCorrectionUniforms(ShaderProgram* shader,
     shader->setUniform("uColorCorrectionEnabled", enabled ? 1 : 0);
     
     if (enabled) {
-        shader->setUniform("uBrightness", colorAdjust.brightness);
-        shader->setUniform("uContrast", colorAdjust.contrast);
-        shader->setUniform("uSaturation", colorAdjust.saturation);
-        shader->setUniform("uHue", colorAdjust.hue);
-        shader->setUniform("uGamma", colorAdjust.gamma);
+        setColorMatrixUniforms(shader, composeColorMatrix(colorAdjust.brightness, colorAdjust.contrast,
+                                                          colorAdjust.saturation, colorAdjust.hue,
+                                                          colorAdjust.gamma));
     }
 }
 
