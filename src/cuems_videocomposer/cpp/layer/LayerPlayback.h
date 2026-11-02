@@ -25,6 +25,7 @@
 #include "../input/InputSource.h"
 #include "../sync/SyncSource.h"
 #include "../sync/DayAlign.h"
+#include "LoopPeriod.h"
 #include "../video/FrameBuffer.h"
 #include "../video/GPUTextureFrameBuffer.h"
 #include <memory>
@@ -113,6 +114,26 @@ public:
     
     void setWraparound(bool enabled) { wraparound_ = enabled; }
     bool getWraparound() const { return wraparound_; }
+
+    // The engine's loop period (869ejxng3 section 4.4, /loop/period):
+    // P = num / den s, `frames` = the engine's frame count of the video
+    // stream (0 = not sent: this source's own count is used, J12). While
+    // wraparound is on and a period is set, the layer wraps on P (the audio
+    // player's period) instead of totalFrames, counts its passes and holds
+    // the last frame after a finite loop's last pass. Idempotent: the engine
+    // re-sends it every pass. num = den = 0 clears it, as do /loop 0, a new
+    // load and a reset. `tag` names the layer in the log lines.
+    void setLoopPeriod(int64_t num, int64_t den, int64_t frames, const std::string& tag);
+    void clearLoopPeriod();
+    bool hasLoopPeriod() const { return loopPeriod_.valid(); }
+    // The period path's decision for the current position: draw nothing (a
+    // tail beyond HOLD_TAIL_MAX_MS, or the end of a finite loop after one;
+    // D15, R2). VideoLayer bridges it into LayerProperties::tailBlank.
+    bool tailBlank() const { return tailBlank_; }
+    const loopperiod::Period& getLoopPeriod() const { return loopPeriod_; }
+    // Passes of a full-file loop (/loop 1 <passes>); <= 0 = forever.
+    void setLoopPasses(int passes) { loopPasses_ = passes; }
+    int getLoopPasses() const { return loopPasses_; }
     
     // MTC follow control (enable/disable MTC following for this layer).
     // No effect on a live source (NDI): it always shows its newest frame.
@@ -164,8 +185,23 @@ private:
     GPUTextureFrameBuffer gpuFrameBuffer_;
     bool frameOnGPU_;     // True if current frame is in GPU buffer
     
+    // Loop period state (869ejxng3 section 4.4)
+    loopperiod::Period loopPeriod_;
+    int loopPasses_ = -1;
+    std::string loopTag_;
+    bool loopLogged_ = false;          // the load line (both counts, the tail) is out
+    bool loopMismatchLogged_ = false;  // ERROR once: engine and own count > 2 apart
+    bool loopCutLogged_ = false;       // once: a period shorter than the video (INFO/ERROR)
+    bool tailBlank_ = false;           // the current position is in a tail not drawn
+    bool loopNoFramesLogged_ = false;  // WARNING once: no frame count at all
+    bool loopEndLogged_ = false;       // INFO once: a finite loop ended
+    int64_t loopLastPass_ = -2;        // last pass seen (pass-boundary lines)
+
     // Internal methods
     void updateFromSyncSource();
+    // The period's shown frame for `adjustedFrame`; false when the period
+    // cannot be applied (no rate, no frame count): the totalFrames wrap then.
+    bool applyLoopPeriod(int64_t& adjustedFrame, int64_t syncFrame);
     void resolveEngineOffset();  // day-align a pending engine offset (main loop)
 
     /**

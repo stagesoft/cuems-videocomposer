@@ -166,6 +166,9 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerLayerCommand("autounload", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerAutoUnload(layer, args);
     });
+    registerLayerCommand("loop/period", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerLoopPeriod(layer, args);
+    });
     registerLayerCommand("loop/region", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerLoopRegion(layer, args);
     });
@@ -987,6 +990,9 @@ bool RemoteCommandRouter::handleLayerLoop(VideoLayer* layer, const std::vector<s
         props.fullFileLoopCount = loopCount;
         props.currentFullFileLoopCount = (loopCount > 0) ? loopCount : -1;
     }
+    // The pass count a loop period wraps against (869ejxng3): the second
+    // argument, forever without one.
+    layer->setLoopPasses(args.size() >= 2 ? std::atoi(args[1].c_str()) : -1);
     
     // Handle enable/disable (first argument)
     bool enabled = false;
@@ -996,12 +1002,27 @@ bool RemoteCommandRouter::handleLayerLoop(VideoLayer* layer, const std::vector<s
     }
     layer->setWraparound(enabled);
     
-    // If disabling, also reset loop counts
+    // If disabling, also reset loop counts (and the engine's loop period)
     if (!enabled) {
         props.fullFileLoopCount = 0;
         props.currentFullFileLoopCount = -1;
+        layer->clearLoopPeriod();
     }
     
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerLoopPeriod(VideoLayer* layer, const std::vector<std::string>& args) {
+    // /videocomposer/layer/<id>/loop/period num den [frames] (869ejxng3
+    // section 4.2): 0 0 [0] clears; with two ints the layer uses its own
+    // frame count (J12). Re-sent every pass, idempotent.
+    if (!layer || args.size() < 2) {
+        return false;
+    }
+    const int64_t num = std::atoll(args[0].c_str());
+    const int64_t den = std::atoll(args[1].c_str());
+    const int64_t frames = args.size() >= 3 ? std::atoll(args[2].c_str()) : 0;
+    layer->setLoopPeriod(num, den, frames);
     return true;
 }
 

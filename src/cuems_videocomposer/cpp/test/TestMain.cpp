@@ -225,6 +225,29 @@ extern bool test_PresentationTiming_NoUnderrateAtFullRate();
 
 using namespace videocomposer::test;
 
+// Shared loop period + undecodable-timecode hold (869ejxng3 Phase B, section 4.4, D13)
+extern bool test_LoopPeriod_SlackHoldAndCut();
+extern bool test_LoopPeriod_TailHeldWithinBound();
+extern bool test_LoopPeriod_TailNotDrawnBeyondBound();
+extern bool test_LoopPeriod_FinitePassesEnd();
+extern bool test_LoopPeriod_FractionalPassStart();
+extern bool test_LoopPeriod_NegativeRegionHoldsFrameZero();
+extern bool test_LoopPeriod_ShortPeriodCuts();
+extern bool test_LoopPeriod_Int128NoOverflow();
+extern bool test_LoopPeriod_HoldTailMaxIs500();
+extern bool test_LoopPeriod_LayerTailBlankLifecycle();
+extern bool test_LoopPeriod_LayerUsesEngineFrames();
+extern bool test_LoopPeriod_LayerTwoIntsUsesOwnCount();
+extern bool test_LoopPeriod_LayerNoPeriodWrapsOnTotalFrames();
+extern bool test_LoopPeriod_FileInputRealFrames();
+extern bool test_CapsFile_WrittenAndUnlinked();
+extern bool test_MtcHold_FrozenHeadNeverHolds();
+extern bool test_MtcHold_RuleEdges();
+#if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
+extern bool test_MtcHold_HealthyStreamNeverHolds();
+extern bool test_MtcHold_DoubledQuarterFramesHoldThenRecover();
+#endif
+
 int main() {
     // Register all tests
     TestFramework::instance().addTest("LayerManager_AddLayer", test_LayerManager_AddLayer);
@@ -418,6 +441,27 @@ int main() {
     TestFramework::instance().addTest("OutputList_ColorLineNeverMatchesRegionRegex", test_OutputList_ColorLineNeverMatchesRegionRegex);
     TestFramework::instance().addTest("NdiPreview_ExtraIps", test_NdiPreview_ExtraIps);
     TestFramework::instance().addTest("NdiPreview_JournalContractExtraIps", test_NdiPreview_JournalContractExtraIps);
+    TestFramework::instance().addTest("LoopPeriod_SlackHoldAndCut", test_LoopPeriod_SlackHoldAndCut);
+    TestFramework::instance().addTest("LoopPeriod_TailHeldWithinBound", test_LoopPeriod_TailHeldWithinBound);
+    TestFramework::instance().addTest("LoopPeriod_TailNotDrawnBeyondBound", test_LoopPeriod_TailNotDrawnBeyondBound);
+    TestFramework::instance().addTest("LoopPeriod_FinitePassesEnd", test_LoopPeriod_FinitePassesEnd);
+    TestFramework::instance().addTest("LoopPeriod_FractionalPassStart", test_LoopPeriod_FractionalPassStart);
+    TestFramework::instance().addTest("LoopPeriod_NegativeRegionHoldsFrameZero", test_LoopPeriod_NegativeRegionHoldsFrameZero);
+    TestFramework::instance().addTest("LoopPeriod_ShortPeriodCuts", test_LoopPeriod_ShortPeriodCuts);
+    TestFramework::instance().addTest("LoopPeriod_Int128NoOverflow", test_LoopPeriod_Int128NoOverflow);
+    TestFramework::instance().addTest("LoopPeriod_HoldTailMaxIs500", test_LoopPeriod_HoldTailMaxIs500);
+    TestFramework::instance().addTest("LoopPeriod_LayerTailBlankLifecycle", test_LoopPeriod_LayerTailBlankLifecycle);
+    TestFramework::instance().addTest("LoopPeriod_LayerUsesEngineFrames", test_LoopPeriod_LayerUsesEngineFrames);
+    TestFramework::instance().addTest("LoopPeriod_LayerTwoIntsUsesOwnCount", test_LoopPeriod_LayerTwoIntsUsesOwnCount);
+    TestFramework::instance().addTest("LoopPeriod_LayerNoPeriodWrapsOnTotalFrames", test_LoopPeriod_LayerNoPeriodWrapsOnTotalFrames);
+    TestFramework::instance().addTest("LoopPeriod_FileInputRealFrames", test_LoopPeriod_FileInputRealFrames);
+    TestFramework::instance().addTest("CapsFile_WrittenAndUnlinked", test_CapsFile_WrittenAndUnlinked);
+    TestFramework::instance().addTest("MtcHold_FrozenHeadNeverHolds", test_MtcHold_FrozenHeadNeverHolds);
+    TestFramework::instance().addTest("MtcHold_RuleEdges", test_MtcHold_RuleEdges);
+#if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
+    TestFramework::instance().addTest("MtcHold_HealthyStreamNeverHolds", test_MtcHold_HealthyStreamNeverHolds);
+    TestFramework::instance().addTest("MtcHold_DoubledQuarterFramesHoldThenRecover", test_MtcHold_DoubledQuarterFramesHoldThenRecover);
+#endif
     return TestFramework::instance().runAll();
 }
 

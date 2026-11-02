@@ -66,6 +66,20 @@ public:
     bool seek(int64_t frameNumber) override;
     void resetSeekState() override;
     FrameInfo getFrameInfo() const override;
+    bool getFrameRateRational(int64_t& num, int64_t& den) const override {
+        if (rateNum_ <= 0 || rateDen_ <= 0) return false;
+        num = rateNum_;
+        den = rateDen_;
+        return true;
+    }
+    int64_t realFrames(const char** rule = nullptr) const override {
+        if (streamFrames_ >= 0) {
+            if (rule) *rule = "stream";
+            return streamFrames_;
+        }
+        if (rule) *rule = "index";
+        return frameCount_ > 0 ? frameCount_ : -1;
+    }
     int64_t getCurrentFrame() const override;
     CodecType detectCodec() const override;
     bool supportsDirectGPUTexture() const override;
@@ -144,6 +158,9 @@ private:
     // Internal state
     bool ready_;
     AVRational frameRateQ_;
+    int64_t rateNum_ = 0;       // r_frame_rate (loop period, 869ejxng3)
+    int64_t rateDen_ = 0;
+    int64_t streamFrames_ = -1; // round(stream duration x r_frame_rate), -1 = no stream duration
     
 #ifdef ENABLE_HAP_DIRECT
     // HAP direct decoding

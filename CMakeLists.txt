@@ -1010,6 +1010,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestDisplayConfigColor.cpp
         src/cuems_videocomposer/cpp/test/TestOutputColorCommands.cpp
         src/cuems_videocomposer/cpp/test/TestDayAlign.cpp
+        src/cuems_videocomposer/cpp/test/TestLoopPeriod.cpp
     )
     
     # C++ implementation files needed by tests

@@ -532,7 +532,7 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
 
     // Get properties reference (safe since everything runs in main thread)
     const LayerProperties& props = layer->properties();
-    if (!props.visible || props.awaitingFrame) {
+    if (!props.visible || props.awaitingFrame || props.tailBlank) {
         return false;
     }
 

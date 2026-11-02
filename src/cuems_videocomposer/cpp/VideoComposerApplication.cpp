@@ -52,6 +52,7 @@
 #include "display/StartupSplash.h"
 #include "remote/OSCRemoteControl.h"
 #include "remote/JournalContract.h"
+#include "utils/CapsFile.h"
 
 #ifdef HAVE_VAAPI_INTEROP
 #endif
@@ -67,6 +68,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 
 // The Debian package version, passed by debian/rules (see CMakeLists.txt).
 // Logged at startup so a tool reading the journal knows which build it talks to.
@@ -179,7 +181,35 @@ bool VideoComposerApplication::initialize(int argc, char** argv) {
 
     initialized_ = true;
     running_ = true;
+    writeCapsFile();
     return true;
+}
+
+void VideoComposerApplication::writeCapsFile() {
+    // CUEMS_VC_CAPS_FILE overrides the path for a run outside the unit.
+    const char* env = std::getenv("CUEMS_VC_CAPS_FILE");
+    capsPath_ = (env && *env) ? env : capsfile::DEFAULT_PATH;
+    std::string err;
+    const std::vector<std::string> toks = capsfile::tokens();
+    if (capsfile::write(capsPath_, static_cast<long>(getpid()), toks, err)) {
+        capsWritten_ = true;
+        std::string list;
+        for (const std::string& t : toks) list += (list.empty() ? "" : " ") + t;
+        LOG_INFO << "capabilities written to " << capsPath_ << ": " << list;
+    } else {
+        // The engine then treats this videocomposer as an old one: legacy
+        // per-pass re-anchors for looping video, bounded to one pass.
+        LOG_WARNING << "capabilities file not written (" << err << "); the engine will"
+                       " run looping video cues in legacy mode";
+    }
+}
+
+void VideoComposerApplication::removeCapsFile() {
+    if (!capsWritten_) {
+        return;
+    }
+    capsWritten_ = false;
+    capsfile::removeIfOurs(capsPath_, static_cast<long>(getpid()));
 }
 
 bool VideoComposerApplication::initializeConfiguration(int argc, char** argv) {
@@ -656,6 +686,7 @@ OpenGLRenderer& VideoComposerApplication::renderer() {
 
 void VideoComposerApplication::shutdown() {
     running_ = false;
+    removeCapsFile();
 
     // Stop the monitor before the things it describes go away. It never holds
     // a pointer into a layer, so this is ordering hygiene rather than a
@@ -759,6 +790,9 @@ bool VideoComposerApplication::initializeGlobalSyncSource() {
         
         if (midiSync->isConnected()) {
             LOG_INFO << "Global MIDI sync source initialized and connected";
+            // D13 (869ejxng3): the one registration of mtcreceiver's tick
+            // callback, from the application's own sync source only.
+            midiSync->enableAnchoredLiveness();
         } else {
             LOG_WARNING << "Global MIDI sync source created but not connected (continuing without MIDI)";
         }
@@ -1095,6 +1129,11 @@ bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const
         return createLayerWithFile(cueId, filepath);
     }
     
+    // A new load is a new cue's media: the old loop period does not apply
+    // (869ejxng3). Cleared here, at the command, not when the async load
+    // completes, so a period sent right after this load is kept.
+    layer->clearLoopPeriod();
+
     // Layer exists - cancel any pending load and queue new async load
     if (asyncVideoLoader_) {
         // Cancel any previous pending load for this cue
