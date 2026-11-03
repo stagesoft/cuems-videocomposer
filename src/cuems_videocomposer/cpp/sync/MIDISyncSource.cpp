@@ -46,7 +46,66 @@ MIDISyncSource::MIDISyncSource()
 }
 
 MIDISyncSource::~MIDISyncSource() {
+#ifdef HAVE_MTCRECEIVER
+    if (livenessEnabled_) {
+        // Blocks until an in-flight callback returns: ticks_ outlives it.
+        MtcReceiver::setTickCallback(nullptr);
+        livenessEnabled_ = false;
+    }
+#endif
     disconnect();
+}
+
+namespace {
+
+int64_t monoNowNs() {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return static_cast<int64_t>(now.tv_sec) * 1000000000LL + now.tv_nsec;
+}
+
+} // namespace
+
+bool MIDISyncSource::enableAnchoredLiveness() {
+#ifdef HAVE_MTCRECEIVER
+    if (livenessEnabled_) {
+        return true;
+    }
+    if (!connected_ || !dynamic_cast<MtcReceiverMIDIDriver*>(driver_.get())) {
+        LOG_INFO << "MIDISyncSource: quarter-frame liveness off (driver "
+                 << getCurrentDriverName() << ", not mtcreceiver)";
+        return false;
+    }
+    TickSeqlock* ticks = &ticks_;
+    MtcReceiver::setTickCallback([ticks](long headMs, bool complete) {
+        ticks->onTick(headMs, complete, monoNowNs());
+    });
+    livenessEnabled_ = true;
+    LOG_INFO << "MIDISyncSource: quarter-frame liveness on (anchored run 8 ticks, gap 50 ms;"
+                " hold after " << MtcInvalidHold::INVALID_NS / 1000000 << " ms without an"
+                " anchored tick while the head moves)";
+    return true;
+#else
+    return false;
+#endif
+}
+
+void MIDISyncSource::updateLiveness() {
+#ifdef HAVE_MTCRECEIVER
+    ticks_.read(lastTick_);   // at most 3 retries, otherwise the previous sample
+    const MtcInvalidHold::Edges e = hold_.update(monoNowNs(), MtcReceiver::mtcHead.load(), lastTick_);
+    if (e.entered) {
+        frozenFrame_ = currentFrame_;
+        frozenTimeMs_ = lastTimeMs_ >= 0 ? lastTimeMs_
+                                         : MtcReceiver::mtcHead.load() + displayLatencyMs_.load();
+        LOG_ERROR << "MTC quarter frames invalid for " << e.invalidForMs
+                  << " ms (doubled rtpmidid subscription?); holding frame " << frozenFrame_
+                  << " until the timecode decodes again";
+    } else if (e.left) {
+        LOG_INFO << "MTC quarter frames valid again after " << e.invalidForMs
+                 << " ms held; following MTC";
+    }
+#endif
 }
 
 void MIDISyncSource::setDisplayLatencyMs(long ms) {
@@ -148,6 +207,20 @@ int64_t MIDISyncSource::pollFrame(uint8_t* rolling) {
     // Poll driver for frame (driver handles MIDI message parsing)
     int64_t frame = driver_->pollFrame();
 
+    if (livenessEnabled_) {
+        updateLiveness();
+        if (hold_.held()) {
+            // D13: the timecode cannot be decoded; keep the frame of the
+            // moment the hold began and swallow the full frames the doubled
+            // feed classifies as seeks (they would force a seek every 2 s).
+            wasFullFrameReceived();
+            if (rolling) {
+                *rolling = frozenFrame_ >= 0 ? 1 : 0;
+            }
+            return frozenFrame_;
+        }
+    }
+
     if (frame >= 0) {
         // Display-pipeline latency compensation: advance the chosen frame so
         // the buffer submitted now is the one visible at MTC = current wall
@@ -214,7 +287,15 @@ bool MIDISyncSource::wasFullFrameReceived() {
 #ifdef HAVE_MTCRECEIVER
     MtcReceiverMIDIDriver* mtcDriver = dynamic_cast<MtcReceiverMIDIDriver*>(driver_.get());
     if (mtcDriver) {
-        return mtcDriver->wasFullFrameReceived();
+        // Consumed either way; while held it is swallowed (D13), and
+        // MtcReceiver::wasLastUpdateFullFrame is cleared as well so the next
+        // driver poll does not raise it again.
+        const bool full = mtcDriver->wasFullFrameReceived();
+        if (livenessEnabled_ && hold_.held()) {
+            MtcReceiver::wasLastUpdateFullFrame.store(false);
+            return false;
+        }
+        return full;
     }
 #endif
     // Other drivers don't support full frame detection yet
@@ -222,6 +303,18 @@ bool MIDISyncSource::wasFullFrameReceived() {
 }
 
 long MIDISyncSource::getTimeMs() const {
+#ifdef HAVE_MTCRECEIVER
+    if (livenessEnabled_ && hold_.held()) {
+        return frozenTimeMs_;   // D13: the value of the moment the hold began
+    }
+    lastTimeMs_ = getTimeMsFollowing();
+    return lastTimeMs_;
+#else
+    return -1;
+#endif
+}
+
+long MIDISyncSource::getTimeMsFollowing() const {
 #ifdef HAVE_MTCRECEIVER
     long baseMtcMs = MtcReceiver::mtcHead.load();
     bool isRunning = MtcReceiver::isTimecodeRunning.load();

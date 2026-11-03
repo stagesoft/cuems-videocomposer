@@ -24,6 +24,7 @@
  */
 
 #include "DisplayConfigurationManager.h"
+#include "OutputColorConfig.h"
 #include "../utils/Logger.h"
 
 #include <fstream>
@@ -54,6 +55,7 @@ void DisplayConfigurationManager::resetToDefaults() {
     config_.canvasLayout = CanvasLayout::AUTO_HORIZONTAL;
     config_.outputs.clear();
     resolutionPolicySpecified_ = false;
+    loadReport_ = DisplayConfigLoadReport();
     updateTimestamp();
 }
 
@@ -384,6 +386,20 @@ void DisplayConfigurationManager::setOutputBlend(const std::string& name,
     notifyListeners();
 }
 
+int DisplayConfigurationManager::applyColorToRegions(std::vector<OutputRegion>& regions) const {
+    int applied = 0;
+    for (auto& region : regions) {
+        const OutputConfiguration* outConfig = getOutputConfig(region.name);
+        if (!outConfig || !outConfig->hasColor()) continue;
+        region.color = outConfig->color;
+        region.color.lutStatus = LutStatus::None;   // the backend sets it when it loads the LUT
+        region.lut.reset();
+        region.colorDraw = std::make_shared<ColorDrawState>();
+        ++applied;
+    }
+    return applied;
+}
+
 void DisplayConfigurationManager::setOutputEnabled(const std::string& name, bool enabled) {
     OutputConfiguration& out = ensureOutputConfig(name);
     out.enabled = enabled;
@@ -428,6 +444,11 @@ bool DisplayConfigurationManager::saveToFile(const std::string& path) const {
         file << "blend=" << out.blend.left << "," << out.blend.right
              << "," << out.blend.top << "," << out.blend.bottom
              << "," << out.blend.gamma << "\n";
+        // Color: only the keys off their default (and color_lut when set), in the
+        // syntax loadFromFile() reads back - no spaces, no inline comment
+        for (const auto& [key, value] : colorConfigEntries(out.color)) {
+            file << key << "=" << value << "\n";
+        }
         file << "enabled=" << (out.enabled ? "true" : "false") << "\n";
         file << "\n";
     }
@@ -447,6 +468,15 @@ bool DisplayConfigurationManager::loadFromFile(const std::string& path) {
     
     std::string line;
     std::string currentOutput;
+    
+    // Per section: did it carry a color_* key, and a canvas_region? (a color-only
+    // section is the wrong shape for an override, see the WARNING after the loop)
+    struct SectionKeys {
+        bool color = false;
+        bool canvasRegion = false;
+    };
+    std::map<std::string, SectionKeys> sectionKeys;
+    std::vector<std::string> sectionOrder;
     
     while (std::getline(file, line)) {
         // Skip comments and empty lines
@@ -493,6 +523,12 @@ bool DisplayConfigurationManager::loadFromFile(const std::string& path) {
             OutputConfiguration* out = getOutputConfig(currentOutput);
             if (!out) continue;
             
+            if (sectionKeys.find(currentOutput) == sectionKeys.end()) {
+                sectionOrder.push_back(currentOutput);
+            }
+            SectionKeys& seen = sectionKeys[currentOutput];
+            if (key == "canvas_region") seen.canvasRegion = true;
+            
             if (key == "resolution") {
                 sscanf(value.c_str(), "%dx%d", &out->width, &out->height);
             } else if (key == "refresh") {
@@ -508,8 +544,45 @@ bool DisplayConfigurationManager::loadFromFile(const std::string& path) {
                        &out->blend.gamma);
             } else if (key == "enabled") {
                 out->enabled = (value == "true" || value == "1");
+            } else if (isOutputColorKey(key)) {
+                // Per-output color (programme phase 3). The key is matched exactly
+                // like every key above - no trimming, so an indented or spaced key
+                // is an unknown one (the engine's configparser reader strips keys:
+                // the two readers differ there). Only the value is stripped, of
+                // whitespace and the '\r' getline leaves on a CRLF line. A bad
+                // value is loud but never stops the load: a typo must not take
+                // the canvas down.
+                seen.color = true;
+                std::string detail;
+                const ColorKeyResult result = applyOutputColorKey(key, value, out->color, detail);
+                if (result != ColorKeyResult::Applied) {
+                    std::string text(stripConfigValue(value));
+                    if (result == ColorKeyResult::Clamped) {
+                        ++loadReport_.colorWarnings;
+                        LOG_WARNING << "OutputColor: " << currentOutput << " " << key << "=" << text
+                                    << " in " << path << ": " << detail;
+                    } else {
+                        ++loadReport_.colorErrors;
+                        LOG_ERROR << "OutputColor: " << currentOutput << " " << key << "=" << text
+                                  << " in " << path << ": " << detail;
+                    }
+                }
             }
         }
+    }
+    
+    // Color keys in a section with no canvas_region: a color-only override. The
+    // engine then cannot read the canvas (DisplayConfNotFoundError, the node
+    // engine's load fails) and the VC loses canvas_layout=custom. Name the procedure.
+    for (const auto& name : sectionOrder) {
+        const SectionKeys& seen = sectionKeys[name];
+        if (!seen.color || seen.canvasRegion) continue;
+        loadReport_.colorWithoutCanvasRegion.push_back(name);
+        LOG_WARNING << "OutputColor: [output:" << name << "] in " << path
+                    << " has color_* keys but no canvas_region — a color-only override"
+                    << " breaks the engine's canvas and the custom layout. Copy"
+                    << " /run/cuems/display.conf to /etc/cuems/display.conf while the"
+                    << " videocomposer is running, then add the color_* keys to that copy";
     }
     
     LOG_INFO << "DisplayConfigurationManager: Loaded configuration from " << path;

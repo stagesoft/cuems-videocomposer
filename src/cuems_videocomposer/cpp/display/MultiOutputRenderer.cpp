@@ -27,9 +27,11 @@
  */
 
 #include "MultiOutputRenderer.h"
+#include "OutputLutTexture.h"
 #include "../output/OutputSinkManager.h"
 #include "../layer/LayerManager.h"
 #include "../utils/Logger.h"
+#include "OutputSnapshot.h"
 
 #include <GL/glew.h>
 #include <GL/gl.h>
@@ -260,6 +262,24 @@ void MultiOutputRenderer::blitToOutputs(const std::vector<OutputSurface*>* onlyS
             }
         }
     }
+
+    // Delete the LUT textures whose last region copy went away since the last
+    // frame (OutputLutTexture's destructor only queues them). Once per frame,
+    // and only with the context current: without one the deletes would be
+    // silent no-ops, so the list is kept for the next frame instead.
+    if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
+        OutputLutTexture::drainDeferred(true);
+    }
+
+    if (OutputSnapshot::enabled()) {
+        size_t enabledOutputs = 0;
+        for (const auto& output : outputs_) {
+            if (output.surface && output.region.enabled) {
+                ++enabledOutputs;
+            }
+        }
+        OutputSnapshot::endPass(enabledOutputs);
+    }
 }
 
 void MultiOutputRenderer::blitToOutput(OutputState& output) {
@@ -284,7 +304,12 @@ void MultiOutputRenderer::blitToOutput(OutputState& output) {
         canvas_->getHeight(),
         output.region
     );
-    
+
+    if (OutputSnapshot::wanted(output.region.name)) {
+        OutputSnapshot::capture(output.region.name, output.region.physicalWidth,
+                                output.region.physicalHeight);
+    }
+
     // Swap buffers
     output.surface->swapBuffers();
 
@@ -354,6 +379,32 @@ int MultiOutputRenderer::findOutputByName(const std::string& name) const {
         }
     }
     return -1;
+}
+
+bool MultiOutputRenderer::setOutputColor(const std::string& name, const OutputColor& color,
+                                         const std::shared_ptr<OutputLutTexture>& lut,
+                                         const std::shared_ptr<ColorDrawState>& colorDraw) {
+    // Both copies, matched by region name (the owner's name), so the blit pass and
+    // whatever reads outputRegions_ agree. A replaced LUT drops its last reference
+    // here; its texture is deleted by the drain at the end of the next blit pass.
+    bool found = false;
+    for (auto& output : outputs_) {
+        if (output.region.name == name) {
+            output.region.color = color;
+            output.region.lut = lut;
+            output.region.colorDraw = colorDraw;
+            found = true;
+        }
+    }
+    for (auto& region : outputRegions_) {
+        if (region.name == name) {
+            region.color = color;
+            region.lut = lut;
+            region.colorDraw = colorDraw;
+            found = true;
+        }
+    }
+    return found;
 }
 
 } // namespace videocomposer

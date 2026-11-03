@@ -26,7 +26,10 @@
 #include "DRMBackend.h"
 #include "../OpenGLRenderer.h"
 #include "../DisplayConfigurationManager.h"
+#include "../OutputColorConfig.h"
+#include "../OutputLutTexture.h"
 #include "../StartupSplash.h"
+#include "../OutputSnapshot.h"
 #include "../../layer/LayerManager.h"
 #include "../../layer/VideoLayer.h"
 #include "../../osd/OSDManager.h"
@@ -57,9 +60,20 @@ namespace {
 // Single source of truth for the runtime display-config path
 // (consumed by openWindow() and initVirtualCanvas()).
 constexpr const char* kStartupDisplayConf = "/run/cuems/display.conf";
+
+// openWindow() failed: the app falls back to HeadlessDisplay, which never reads
+// display.conf and has no per-output color.
+constexpr const char* kNoBackendForColor =
+    "the DRM backend failed to open (the headless fallback has no per-output color)";
 }
 
 DRMBackend::DRMBackend() {
+    OutputSnapshot::installFromEnv();
+    if (CadenceStats::enabledFromEnv()) {
+        cadenceStats_ = std::make_unique<CadenceStats>();
+        LOG_INFO << "DRMBackend: CadenceStats enabled (VIDEOCOMPOSER_CADENCE_STATS) -- "
+                 << "coupled path only; one line per output and layer every 60 s";
+    }
     outputManager_ = std::make_unique<DRMOutputManager>();
     configManager_ = std::make_unique<DisplayConfigurationManager>();
 }
@@ -76,16 +90,14 @@ bool DRMBackend::openWindow() {
     
     LOG_INFO << "DRMBackend: Opening DRM display";
     
-    // Initialize DRM output manager
-    if (!outputManager_->init(devicePath_)) {
-        LOG_ERROR << "DRMBackend: Failed to initialize DRM output manager";
-        return false;
-    }
-    
     // Load the startup display config once, here, so its resolution_policy can inform
     // the global modeset below and its per-output/region data is reused by
     // initVirtualCanvas() without a second parse. Global-mode precedence:
     //   CLI --resolution  >  display.conf resolution_policy  >  prior (app config / default)
+    // Parsed before the DRM device is opened (it touches no device) so that every
+    // failure return below can still say which outputs had color configured: when
+    // openWindow() fails the app falls back to headless and this backend - the only
+    // reader of display.conf - is destroyed (per-output color, plan 2.6 r13).
     if (configManager_) {
         ResolutionPolicy priorPolicy = configManager_->getResolutionPolicy();
         if (configManager_->loadFromFile(kStartupDisplayConf)) {
@@ -99,6 +111,13 @@ bool DRMBackend::openWindow() {
         }
     }
 
+    // Initialize DRM output manager
+    if (!outputManager_->init(devicePath_)) {
+        LOG_ERROR << "DRMBackend: Failed to initialize DRM output manager";
+        logConfiguredColorUnsupported(kNoBackendForColor);
+        return false;
+    }
+    
     // Apply resolution mode before creating surfaces
     // This modifies the output dimensions in outputManager_
     if (configManager_) {
@@ -143,6 +162,7 @@ bool DRMBackend::openWindow() {
     if (outputs.empty()) {
         LOG_ERROR << "DRMBackend: No connected outputs found";
         outputManager_->cleanup();
+        logConfiguredColorUnsupported(kNoBackendForColor);
         return false;
     }
     
@@ -199,6 +219,7 @@ bool DRMBackend::openWindow() {
     if (surfaces_.empty()) {
         LOG_ERROR << "DRMBackend: No surfaces could be created";
         outputManager_->cleanup();
+        logConfiguredColorUnsupported(kNoBackendForColor);
         return false;
     }
     
@@ -257,6 +278,8 @@ bool DRMBackend::openWindow() {
         
         if (!useVirtualCanvas_) {
             // Legacy mode: single OpenGLRenderer
+            logConfiguredColorUnsupported(
+                "this display backend has no per-output color (DRM legacy mode, no virtual canvas)");
             renderer_ = std::make_unique<OpenGLRenderer>();
             if (!renderer_->init()) {
                 LOG_ERROR << "DRMBackend: Failed to initialize OpenGL renderer";
@@ -283,6 +306,9 @@ void DRMBackend::closeWindow() {
     }
     
     LOG_INFO << "DRMBackend: Closing";
+    if (cadenceStats_) {
+        cadenceStats_->logFinal();
+    }
     
 #ifdef HAVE_VAAPI_INTEROP
     if (vaDisplay_) {
@@ -291,10 +317,27 @@ void DRMBackend::closeWindow() {
     }
 #endif
     
-    // Cleanup renderers
+    // Cleanup renderers, with the GL context current: render() releases it
+    // after every frame, and a glDelete* with no context is a silent no-op.
+    // Order matters for per-output LUTs (programme phase 3): the last
+    // shared_ptr<OutputLutTexture> drops with outputRegions_ (the owner; the
+    // renderer holds copies), so the deferred-delete list is complete only
+    // after that clear, and it is drained before the context is released.
+    // Without a context the drain only empties the list (those names die with
+    // the context and must never be deleted in a later one).
+    DRMSurface* primary = getPrimarySurface();
+    if (primary) {
+        primary->makeCurrent();
+    }
+    const bool contextCurrent = primary && eglGetCurrentContext() != EGL_NO_CONTEXT;
     multiRenderer_.reset();
     renderer_.reset();
     outputRegions_.clear();
+    OutputLutTexture::endContext();
+    OutputLutTexture::drainDeferred(contextCurrent);
+    if (primary) {
+        primary->releaseCurrent();
+    }
     
     // Cleanup surfaces
     for (auto& [name, surface] : surfaces_) {
@@ -363,12 +406,21 @@ void DRMBackend::renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManag
 
     primary->releaseCurrent();
 
+    std::vector<CadenceStats::Sample> cadenceSamples;
+    if (cadenceStats_) {
+        cadenceSamples = collectCadenceSamples(layerManager);
+    }
+
     // Wait for all pending flips to complete first
     for (const auto& name : orderedSurfaceNames()) {
         auto& surface = surfaces_.at(name);
         if (surface->isFlipPending()) {
             surface->waitForFlip();
         }
+    }
+
+    if (cadenceStats_) {
+        stampCadenceFlips();
     }
 
     // Check if we can use atomic modesetting with planes
@@ -401,6 +453,54 @@ void DRMBackend::renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManag
         for (const auto& name : orderedSurfaceNames()) {
             surfaces_.at(name)->schedulePageFlip();
         }
+    }
+
+    if (cadenceStats_) {
+        for (const auto& name : orderedSurfaceNames()) {
+            cadencePending_[name] = cadenceSamples;
+        }
+    }
+}
+
+std::vector<CadenceStats::Sample> DRMBackend::collectCadenceSamples(LayerManager* layerManager) const {
+    std::vector<CadenceStats::Sample> samples;
+    if (!layerManager) {
+        return samples;
+    }
+    for (const VideoLayer* layer : layerManager->getLayers()) {
+        if (!layer || !layer->properties().visible) {
+            continue;
+        }
+        const int64_t frame = layer->getCurrentFrame();
+        if (frame < 0) {
+            continue;
+        }
+        samples.push_back({layer->getLayerId(), frame, layer->getFrameInfo().framerate});
+    }
+    return samples;
+}
+
+void DRMBackend::stampCadenceFlips() {
+    const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
+        const PresentationEntry info = surface->getPresentationTiming().getInfo();
+        if (!info.valid) {
+            continue;
+        }
+        auto stamped = cadenceStampedMsc_.find(name);
+        if (stamped != cadenceStampedMsc_.end() && stamped->second == info.msc) {
+            continue;  // no new flip on this surface since the last stamp
+        }
+        cadenceStampedMsc_[name] = info.msc;
+        auto pending = cadencePending_.find(name);
+        if (pending == cadencePending_.end()) {
+            continue;
+        }
+        cadenceStats_->onPresented(name, info.msc, surface->getOutputInfo().refreshRate,
+                                   pending->second, nowNs);
+        cadencePending_.erase(pending);
     }
 }
 
@@ -862,6 +962,12 @@ void DRMBackend::clearCurrent() {
 }
 
 OpenGLRenderer* DRMBackend::getRenderer() {
+    // Virtual Canvas mode has no renderer_ of its own: the canvas renderer is
+    // the one that draws, so master commands must reach it. Returning null here
+    // sent them to VideoComposerApplication's static dummy (1amfwm7fp88).
+    if (useVirtualCanvas_ && multiRenderer_) {
+        return multiRenderer_->getRenderer();
+    }
     return renderer_.get();
 }
 
@@ -1471,6 +1577,11 @@ bool DRMBackend::initVirtualCanvas() {
         }
     }
 
+    // outputRegions_ is final: per-output color goes onto it now, under every
+    // canvas_layout (blend= above only reaches a region under custom), so the
+    // configureOutputs() below hands the renderer regions that already carry it.
+    applyOutputColorFromConfig();
+
     // Configure MultiOutputRenderer with surfaces and regions (matching order)
     std::vector<OutputSurface*> surfacePtrs;
     for (const auto& region : outputRegions_) {
@@ -1488,6 +1599,289 @@ bool DRMBackend::initVirtualCanvas() {
     computeIterationOrder();
 
     return true;
+}
+
+void DRMBackend::applyOutputColorFromConfig() {
+    if (!configManager_) {
+        return;
+    }
+
+    // A connector with color in display.conf but no region (declared, not
+    // connected, or renamed: a monitor moved to another port) gets nothing, as for
+    // every other per-output key - but color says so, once per section, because a
+    // calibration that silently stops applying is invisible on a projector until
+    // someone compares. enabled=false sections are skipped: that output is dark
+    // and has no region by design.
+    std::string connected;
+    for (const auto& region : outputRegions_) {
+        if (!connected.empty()) {
+            connected += ", ";
+        }
+        connected += region.name;
+    }
+    for (const auto& outConfig : configManager_->getConfiguration().outputs) {
+        if (!outConfig.hasColor() || !outConfig.enabled) {
+            continue;
+        }
+        const bool hasRegion = std::any_of(outputRegions_.begin(), outputRegions_.end(),
+            [&](const OutputRegion& r) { return r.name == outConfig.name; });
+        if (!hasRegion) {
+            LOG_WARNING << "OutputColor: [output:" << outConfig.name << "] has color_* keys"
+                        << " but no such output is connected — not applied (connected: "
+                        << (connected.empty() ? std::string("none") : connected) << ")";
+        }
+    }
+
+    if (configManager_->applyColorToRegions(outputRegions_) == 0) {
+        return;   // no color configured on any connected output
+    }
+
+    const bool programAvailable = multiRenderer_ && multiRenderer_->colorProgramAvailable();
+    const bool contextCurrent = eglGetCurrentContext() != EGL_NO_CONTEXT;
+
+    for (auto& region : outputRegions_) {
+        OutputColor& color = region.color;
+        if (!color.trimsActive() && !color.lutConfigured()) {
+            continue;
+        }
+
+        std::string lutNote;    // "(...)" after color_lut= on the INFO line
+        std::string lutError;   // reason for the NOT APPLIED line
+        std::size_t clamped = 0;
+        if (color.lutConfigured()) {
+            if (!programAvailable) {
+                lutNote = "not loaded";
+            } else if (!contextCurrent) {
+                color.lutStatus = LutStatus::Invalid;
+                lutNote = lutStatusName(color.lutStatus);
+                lutError = "no GL context current to upload it";
+            } else {
+                CubeLut cube;
+                const CubeLoadResult loaded = loadCubeLutFile(color.lutPath, cube);
+                if (!loaded.ok) {
+                    color.lutStatus = loaded.notFound ? LutStatus::Missing : LutStatus::Invalid;
+                    lutNote = lutStatusName(color.lutStatus);
+                    lutError = color.lutPath + ": " + loaded.error;
+                } else {
+                    std::string uploadError;
+                    auto texture = OutputLutTexture::create(cube, uploadError);
+                    if (!texture) {
+                        color.lutStatus = LutStatus::Invalid;
+                        lutNote = lutStatusName(color.lutStatus);
+                        lutError = color.lutPath + ": " + uploadError;
+                    } else {
+                        region.lut = std::move(texture);
+                        color.lutStatus = LutStatus::Ok;
+                        clamped = cube.clampedValues;
+                        std::ostringstream note;
+                        note << "ok, " << cube.size << "^3, parsed in "
+                             << std::lround(loaded.parseMs) << " ms";
+                        lutNote = note.str();
+                    }
+                }
+            }
+        }
+
+        // Paste-ready: the keys off their default, as display.conf takes them
+        std::ostringstream line;
+        line << "OutputColor: " << region.name << " " << colorConfigLine(color);
+        if (!lutNote.empty()) {
+            line << " (" << lutNote << ")";
+        }
+        LOG_INFO << line.str();
+
+        if (!programAvailable) {
+            LOG_ERROR << "OutputColor: " << region.name
+                      << " color configured but the color program is unavailable"
+                      << " — running without color";
+            continue;
+        }
+        if (!lutError.empty()) {
+            LOG_ERROR << "OutputColor: " << region.name << " color_lut=" << color.lutValue
+                      << " NOT APPLIED: " << lutError << " — output runs with trims only";
+        }
+        if (clamped > 0) {
+            LOG_WARNING << "OutputColor: " << region.name << " color_lut=" << color.lutValue
+                        << ": " << clamped << " data value(s) outside [0, 1] clamped"
+                        << " (an HDR-authored LUT? the outputs are SDR)";
+        }
+    }
+}
+
+void DRMBackend::logConfiguredColorUnsupported(const char* why) const {
+    if (!configManager_) {
+        return;
+    }
+    for (const auto& outConfig : configManager_->getConfiguration().outputs) {
+        if (!outConfig.hasColor() || !outConfig.enabled) {
+            continue;   // enabled=false: the output stays dark anyway
+        }
+        LOG_ERROR << "OutputColor: " << outConfig.name << " color configured but " << why
+                  << " — running without color";
+    }
+}
+
+// ===== Hot per-output color (display/color, programme phase 3 plan 2.6) =====
+//
+// Single owner (M1): every call below writes outputRegions_ first and then pushes
+// the same color, LUT and draw state to the renderer's two copies without a
+// reconfigure. configureOutputRegion, configureOutputBlend and setOutputMode (and
+// through it setResolutionMode / loadConfiguration) rebuild the renderer from
+// outputRegions_ wholesale, so a color set here survives them. The handler has
+// already checked the show lock; these run on the main (render) thread, between
+// frames, like every OSC command.
+
+OutputColorStatus DRMBackend::findColorRegion(const std::string& outputName, OutputRegion*& region) {
+    region = nullptr;
+    if (!useVirtualCanvas_ || !multiRenderer_) {
+        return OutputColorStatus::Unsupported;   // legacy mode: no output blit pass
+    }
+    for (auto& r : outputRegions_) {
+        if (r.name == outputName) {
+            region = &r;
+            return OutputColorStatus::Applied;
+        }
+    }
+    return OutputColorStatus::UnknownOutput;
+}
+
+void DRMBackend::pushOutputColor(const OutputRegion& region) {
+    // S5 (feat/output-color-contract): mark the contract snapshot dirty here
+    // (contractDirty_ = true): every hot color change passes through this push.
+    multiRenderer_->setOutputColor(region.name, region.color, region.lut, region.colorDraw);
+}
+
+OutputColorStatus DRMBackend::configureOutputColor(const std::string& outputName,
+                                                   const OutputColor& trims) {
+    OutputRegion* region = nullptr;
+    const OutputColorStatus found = findColorRegion(outputName, region);
+    if (found != OutputColorStatus::Applied) {
+        return found;
+    }
+
+    // The handler clamps; this refuses whatever still is not storable as given,
+    // before anything changes.
+    OutputColor next = region->color;   // keeps the LUT fields
+    for (const auto& spec : kColorTrimSpecs) {
+        const float value = trims.get(spec.trim);
+        if (!std::isfinite(value) || !next.set(spec.trim, value)) {
+            return OutputColorStatus::BadValue;
+        }
+    }
+
+    region->color = next;
+    // A new color: the one-shot draw check runs again on its first draw
+    region->colorDraw = std::make_shared<ColorDrawState>();
+    pushOutputColor(*region);
+    return multiRenderer_->colorProgramAvailable() ? OutputColorStatus::Applied
+                                                   : OutputColorStatus::ProgramUnavailable;
+}
+
+OutputColorStatus DRMBackend::configureOutputLut(const std::string& outputName,
+                                                 const std::string& resolvedPath,
+                                                 const std::string& displayValue,
+                                                 OutputLutLoadInfo& info) {
+    info = OutputLutLoadInfo{};
+    OutputRegion* region = nullptr;
+    const OutputColorStatus found = findColorRegion(outputName, region);
+    if (found != OutputColorStatus::Applied) {
+        return found;
+    }
+
+    if (!multiRenderer_->colorProgramAvailable()) {
+        // As at start: stored on the owner, not loaded (nothing could draw it)
+        region->color.lutPath = resolvedPath;
+        region->color.lutValue = displayValue;
+        region->color.lutStatus = LutStatus::None;
+        region->lut.reset();
+        region->colorDraw = std::make_shared<ColorDrawState>();
+        pushOutputColor(*region);
+        return OutputColorStatus::ProgramUnavailable;
+    }
+
+    // Context current before any GL call, as configureOutputBlend does: render()
+    // releases it after every frame.
+    makeCurrent();
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
+        info.error = "no GL context current to upload it";
+        return OutputColorStatus::LutFailed;
+    }
+
+    // Parsed here, on the render thread: tens of ms once (80 ms for 65^3 on an N97),
+    // only possible with no project loaded. The previous LUT stays until the new
+    // one is uploaded.
+    CubeLut cube;
+    const CubeLoadResult loaded = loadCubeLutFile(resolvedPath, cube);
+    info.parseMs = loaded.parseMs;
+    if (!loaded.ok) {
+        info.error = resolvedPath + ": " + loaded.error;
+        return OutputColorStatus::LutFailed;
+    }
+    std::string uploadError;
+    auto texture = OutputLutTexture::create(cube, uploadError);
+    if (!texture) {
+        info.error = resolvedPath + ": " + uploadError;
+        return OutputColorStatus::LutFailed;
+    }
+    info.size = cube.size;
+    info.clampedValues = cube.clampedValues;
+
+    region->lut = std::move(texture);   // the old texture is queued for delete with its last copy
+    region->color.lutPath = resolvedPath;
+    region->color.lutValue = displayValue;
+    region->color.lutStatus = LutStatus::Ok;
+    region->colorDraw = std::make_shared<ColorDrawState>();
+    pushOutputColor(*region);
+    return OutputColorStatus::Applied;
+}
+
+OutputColorStatus DRMBackend::clearOutputLut(const std::string& outputName) {
+    OutputRegion* region = nullptr;
+    const OutputColorStatus found = findColorRegion(outputName, region);
+    if (found != OutputColorStatus::Applied) {
+        return found;
+    }
+    region->lut.reset();
+    region->color.lutPath.clear();
+    region->color.lutValue.clear();
+    region->color.lutStatus = LutStatus::None;
+    region->colorDraw = std::make_shared<ColorDrawState>();
+    pushOutputColor(*region);
+    return OutputColorStatus::Applied;
+}
+
+OutputColorStatus DRMBackend::resetOutputColor(const std::string& outputName) {
+    OutputRegion* region = nullptr;
+    const OutputColorStatus found = findColorRegion(outputName, region);
+    if (found != OutputColorStatus::Applied) {
+        return found;
+    }
+    region->color.resetTrims();
+    region->lut.reset();
+    region->color.lutPath.clear();
+    region->color.lutValue.clear();
+    region->color.lutStatus = LutStatus::None;
+    region->colorDraw = std::make_shared<ColorDrawState>();
+    pushOutputColor(*region);
+    return OutputColorStatus::Applied;
+}
+
+OutputColorStatus DRMBackend::getOutputColors(std::vector<OutputColorReport>& out) const {
+    out.clear();
+    if (!useVirtualCanvas_ || !multiRenderer_) {
+        return OutputColorStatus::Unsupported;
+    }
+    const bool programAvailable = multiRenderer_->colorProgramAvailable();
+    for (const auto& region : outputRegions_) {
+        OutputColorReport report;
+        report.name = region.name;
+        report.color = region.color;
+        // The draw state is shared with the renderer's copies, so a failed first
+        // draw (set there) shows here.
+        report.applied = programAvailable && !(region.colorDraw && region.colorDraw->failed);
+        out.push_back(std::move(report));
+    }
+    return OutputColorStatus::Applied;
 }
 
 std::vector<std::string> DRMBackend::getSortedOutputNames() const {
@@ -1633,6 +2027,11 @@ void DRMBackend::buildOutputRegions() {
 }
 
 
+// NOTE (per-output color, programme phase 3): no caller today. It rebuilds every
+// region from scratch, so wiring it up as-is would silently drop each output's
+// color, LUT and draw state (OutputRegion::color/lut/colorDraw), which only
+// survive because every live rebuild copies outputRegions_ wholesale. Carry them
+// over from the old regions before calling this from anywhere.
 void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overlap) {
     outputRegions_.clear();
     
@@ -1712,6 +2111,11 @@ void DRMBackend::autoConfigureOutputs(const std::string& arrangement, int overla
     computeIterationOrder();
 }
 
+// NOTE (per-output color, programme phase 3): no caller today. `r = region`
+// replaces the owner's region wholesale, so a caller passing a region it built
+// itself would silently drop that output's color, LUT and draw state
+// (OutputRegion::color/lut/colorDraw). Start from a copy of the current region
+// before wiring this up.
 bool DRMBackend::configureOutputRegion(const std::string& outputName, const OutputRegion& region) {
     // Find the output
     for (auto& r : outputRegions_) {

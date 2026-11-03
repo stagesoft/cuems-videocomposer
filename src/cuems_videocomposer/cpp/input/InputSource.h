@@ -88,6 +88,30 @@ public:
     virtual FrameInfo getFrameInfo() const = 0;
 
     /**
+     * The layer's frame rate as a rational, r_frame_rate (num / den fps):
+     * the rate the loop period arithmetic of a looping cue uses (869ejxng3
+     * section 4.4; the engine computes its frame count on the same rate).
+     * False when the source has no such rate (live sources, mocks).
+     */
+    virtual bool getFrameRateRational(int64_t& num, int64_t& den) const {
+        (void)num;
+        (void)den;
+        return false;
+    }
+
+    /**
+     * This source's own count of the video stream's frames, for the loop
+     * period only to log and compare with the engine's count (869ejxng3
+     * section 4.4, I10): round(stream duration x r_frame_rate) where the
+     * stream has a duration, else the index count; -1 when unknown.
+     * `rule` names which ("stream" or "index").
+     */
+    virtual int64_t realFrames(const char** rule = nullptr) const {
+        if (rule) *rule = "none";
+        return -1;
+    }
+
+    /**
      * Get the current frame number (last frame read)
      * @return Current frame number, or -1 if not available
      */

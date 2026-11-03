@@ -27,6 +27,7 @@
 #include "../layer/VideoLayer.h"
 #include "ShaderProgram.h"
 #include "MasterProperties.h"
+#include "ColorMatrix.h"
 #include <vector>
 #include <map>
 #include <cstdint>
@@ -143,6 +144,12 @@ private:
     
     // Master layer properties (for composite output)
     MasterProperties masterProperties_;
+    bool masterTransformWarned_ = false;  // core profile: transforms are ignored, said once
+
+    // Whether compositeLayers() takes the master FBO path. In a core profile
+    // (DRM) only master color can be drawn: the transforms live on the
+    // fixed-function path, which draws nothing there.
+    bool masterPassActive();
     
     // FBO for off-screen rendering (used when master transforms are active)
     GLuint masterFBO_;              // Framebuffer Object
@@ -190,6 +197,7 @@ private:
                                     const LayerProperties::ColorAdjustment& colorAdjust);
     void setMasterColorCorrectionUniforms(ShaderProgram* shader,
                                           const MasterProperties::ColorAdjustment& colorAdjust);
+    void setColorMatrixUniforms(ShaderProgram* shader, const ColorMatrix& cm);
 };
 
 } // namespace videocomposer
