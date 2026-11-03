@@ -57,11 +57,21 @@ cuems-videocomposer (0.1.2-12) unstable; urgency=medium
     shader compiles on both; frame cadence with color equal to the cadence
     without it at 25/29.97/30@60, 29.97/25@50 and 3x60 fps layers; by eye
     on .111 and the test controller (2026-10-28 .. 11-02).
+  * Test aids, both OFF unless their variable is set (PR #12, PR #14):
+    - CadenceStats: VIDEOCOMPOSER_CADENCE_STATS=1 logs one line per output
+      and layer every 60 s with the presented-frame cadence in vsyncs
+      (holds histogram, outside-pattern holds, skips, steps back, wraps,
+      discontinuities); coupled pacing path only.
+    - OutputSnapshot: VIDEOCOMPOSER_SNAPSHOT_DIR=<dir> makes kill -USR2
+      write one post-blit PPM per output into <dir>. Each round stalls
+      the render loop (~50-90 ms at 2x4K, one MTC snap): never on a show.
+    Used by the phase-3 and 869ejxng3 rig rounds to check the shipped deb
+    (identity picture per output, cadence at loop wraps).
   * Install together with the rest of the 869ejxng3 batch: cuems-engine
     0.1.0rc6-7, cuems-audioplayer 0.0.3-15, cuems-utils 0.1.0rc18,
     cuems-editor 0.1.0rc1-8; the whole cluster takes it at once.
 
- -- Ion Reguera <ion@stagelab.coop>  Tue, 03 Nov 2026 00:26:29 +0100
+ -- Ion Reguera <ion@stagelab.coop>  Tue, 03 Nov 2026 01:30:26 +0100
 
 cuems-videocomposer (0.1.2-11) unstable; urgency=high
 
