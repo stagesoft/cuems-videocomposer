@@ -331,13 +331,22 @@ int FramerateConverterSyncSource::cadenceTakeCorrection(int n, int64_t msc, bool
     if (p == 0) {
         return n;
     }
+    if (!integerN_) {
+        // Non-integer ratio (Bresenham, drop regime): the correction waits for the hold it can change without leaving
+        // A = {floor r, ceil r} (execution amendment E12): a -1 turns the next ceil(r) hold into floor(r), a +1 the
+        // next floor(r) into ceil(r). 25p@60: a 3 becomes a 2, never a 2 a 1 (bench row n3: five 1-holds in 18 min
+        // with the first rule); 30p@50: a 1 becomes a 2, never a 2 a 3; drop regime: a +1 shows a frame that would
+        // have been dropped. At most two holds of delay.
+        const int lo = static_cast<int>(std::floor(r_));
+        if ((p < 0 && n != lo + 1) || (p > 0 && n != lo)) {
+            return n;
+        }
+    }
     if (p < 0) {
         if (integerN_ == 1) {
             skip = true;                  // content at the display rate: the inherent event (K3)
-        } else if (n >= 2 || (drop_ && n >= 1)) {
-            n -= 1;
         } else {
-            return n;                     // deferred: a 1 inside a Bresenham pattern (30p@50, 50p@60)
+            n -= 1;
         }
         ++cadenceCounters_.corrMinus;
         if (skip) {

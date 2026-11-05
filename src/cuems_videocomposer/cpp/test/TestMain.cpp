@@ -76,6 +76,8 @@ extern bool test_Cadence_p_DropRegime_60at50_and_60at30();
 extern bool test_Cadence_r_TickJumpAndInvalidTicks();
 extern bool test_Cadence_v_DeferredShorten_30at50_NoSkip();
 extern bool test_Cadence_x_LongHold_1at60_NoPairs();
+extern bool test_Cadence_y_CorrInsideA_25at60_ThreeBecomesTwo();
+extern bool test_Cadence_z_CorrInsideA_30at50_OneBecomesTwo();
 extern bool test_Cadence_l_NoTick_FallsBackToLegacyPath();
 extern bool test_Cadence_q_FrozenTick_WarnsAndFallsBack();
 extern bool test_Cadence_t_BandStability_NoSpuriousCorrections();
@@ -337,6 +339,8 @@ int main() {
     TestFramework::instance().addTest("Cadence_r_TickJumpAndInvalidTicks", test_Cadence_r_TickJumpAndInvalidTicks);
     TestFramework::instance().addTest("Cadence_v_DeferredShorten_30at50_NoSkip", test_Cadence_v_DeferredShorten_30at50_NoSkip);
     TestFramework::instance().addTest("Cadence_x_LongHold_1at60_NoPairs", test_Cadence_x_LongHold_1at60_NoPairs);
+    TestFramework::instance().addTest("Cadence_y_CorrInsideA_25at60_ThreeBecomesTwo", test_Cadence_y_CorrInsideA_25at60_ThreeBecomesTwo);
+    TestFramework::instance().addTest("Cadence_z_CorrInsideA_30at50_OneBecomesTwo", test_Cadence_z_CorrInsideA_30at50_OneBecomesTwo);
     TestFramework::instance().addTest("Cadence_l_NoTick_FallsBackToLegacyPath", test_Cadence_l_NoTick_FallsBackToLegacyPath);
     TestFramework::instance().addTest("Cadence_q_FrozenTick_WarnsAndFallsBack", test_Cadence_q_FrozenTick_WarnsAndFallsBack);
     TestFramework::instance().addTest("Cadence_t_BandStability_NoSpuriousCorrections", test_Cadence_t_BandStability_NoSpuriousCorrections);

@@ -266,6 +266,9 @@ bool test_Cadence_p_DropRegime_60at50_and_60at30()              { return replayF
 bool test_Cadence_r_TickJumpAndInvalidTicks()                   { return replayFixture("r_TickJump"); }
 bool test_Cadence_v_DeferredShorten_30at50_NoSkip()             { return replayFixture("v_DeferredShorten"); }
 bool test_Cadence_x_LongHold_1at60_NoPairs()                    { return replayFixture("x_LongHold"); }
+// E12: at a non-integer ratio a correction never leaves A = {floor r, ceil r} (red on the first rule)
+bool test_Cadence_y_CorrInsideA_25at60_ThreeBecomesTwo()       { return replayFixture("y_CorrInsideA"); }
+bool test_Cadence_z_CorrInsideA_30at50_OneBecomesTwo()         { return replayFixture("z_CorrInsideA"); }
 
 // ---- harness-only rows ------------------------------------------------------------------------------------------------
 

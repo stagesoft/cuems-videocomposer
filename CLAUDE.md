@@ -111,7 +111,7 @@ fixtures in `cuems-RELATIONS/baselines/test3-saltitos-20261104/model/` (the C++ 
   grid anchored once on the smooth MTC clock (`getTimeMsAt(ust of tgt)`, advanced once per tick for every layer).
   The phase against the clock is low-passed over 16 vblanks; outside ±0.60 of a hold one **correction** shortens
   (`corr-`) or lengthens (`corr+`) a single hold by one vsync, at least 30 vsyncs apart. A panel off nominal needs
-  them (test3: 77 ppm, one per ~128 s at 30p/60): that is the physical pulldown, not jitter. A stall is caught up at
+  them (test3: 79 ppm, one every ~215 s at 30p/60): that is the physical pulldown, not jitter. A stall is caught up at
   once (one 3,1 event, `stall`); a jump ≥ 2 frames re-anchors.
 - **Logs.** INFO at start per layer: `cadence: path=tick now=ioctl` and `cadence: layer=c<id> fps 30, vsync 16.6667 ms,
   r 2 -> hold 2 (exact) H=0.6 filter=16`. With `VIDEOCOMPOSER_CADENCE_STATS=1` also `cadence-event layer=c<id>
