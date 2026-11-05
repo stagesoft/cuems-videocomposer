@@ -69,6 +69,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 
 // The Debian package version, passed by debian/rules (see CMakeLists.txt).
@@ -551,13 +552,18 @@ void VideoComposerApplication::updateLayers() {
             if (now.msc >= 0 || tick.msc >= 0) {
                 const int64_t atNs = now.msc >= 0 ? now.ustNs : tick.ustNs;
                 const double clockAtNow = globalSyncSource_->getTimeMsAt(atNs);
-                if (cadenceTraceEnabled())
-                LOG_INFO << "cadence-poll tick=" << tick.msc << " now=" << now.msc
-                         << " prev_landing=" << now.prevLanding
-                         << " target=" << presentationTarget(now, tick, kPipelineDepth)
-                         << " poll_offset_us=" << ((now.sampledAtNs - atNs) / 1000)
-                         << " clock_at_now_ms=" << clockAtNow
-                         << (now.fromIoctl ? "" : " now_from=tick");
+                if (cadenceTraceEnabled()) {
+                    // Fixed 3 decimals: the stream default (6 significant digits) rounds the clock to 1 ms past
+                    // 100 s of MTC and to 10 ms past 1000 s, which buries the residual this line exists to measure.
+                    char clockMs[32];
+                    std::snprintf(clockMs, sizeof clockMs, "%.3f", clockAtNow);
+                    LOG_INFO << "cadence-poll tick=" << tick.msc << " now=" << now.msc
+                             << " prev_landing=" << now.prevLanding
+                             << " target=" << presentationTarget(now, tick, kPipelineDepth)
+                             << " poll_offset_us=" << ((now.sampledAtNs - atNs) / 1000)
+                             << " clock_at_now_ms=" << clockMs
+                             << (now.fromIoctl ? "" : " now_from=tick");
+                }
             }
         }
     }
