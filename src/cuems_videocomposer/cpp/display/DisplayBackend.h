@@ -100,6 +100,12 @@ public:
     virtual void swapBuffers() {}
 
     /**
+     * Sample the pacing CRTC's current vblank for the cadence engine (plan 1amfwm7gpz7 §5.1), once per
+     * updateLayers() before the layers poll. Default no-op: no tick, the smoother keeps its legacy path.
+     */
+    virtual void samplePresentNow() {}
+
+    /**
      * Resize window
      * @param width New width
      * @param height New height

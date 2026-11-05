@@ -40,6 +40,7 @@
 #ifdef HAVE_NDI_SDK
 #include "input/NDIVideoInput.h"
 #endif
+#include "sync/PresentTick.h"
 #include "sync/MIDISyncSource.h"
 #include "sync/FramerateConverterSyncSource.h"
 #include "sync/MtcReceiverMIDIDriver.h"  // MtcReceiver::resetWrapOffset() in resetAll()
@@ -537,6 +538,30 @@ void VideoComposerApplication::updateLayers() {
         return;
     }
     
+    // Cadence engine (plan 1amfwm7gpz7 §5.1): the pacing CRTC's current vblank, once per poll, before the layers.
+    // The smooth MTC clock is advanced here once per tick whenever a tick exists (memoised: the layers reuse the
+    // value), so it is warm when a layer starts following: with the released code the first getTimeMs() of a
+    // follow snapped the clock and reset its rate (MIDISyncSource.cpp, the not-running/first branch), 3-8 ms late
+    // on an operator GO whose /mtcfollow 1 comes only ~L before the start (869feynrj F3/D9).
+    if (displayBackend_) {
+        displayBackend_->samplePresentNow();
+        if (globalSyncSource_ && globalSyncSource_->isConnected()) {
+            const VblankNow now = currentVblank();
+            const PresentTick tick = currentPresentTick();
+            if (now.msc >= 0 || tick.msc >= 0) {
+                const int64_t atNs = now.msc >= 0 ? now.ustNs : tick.ustNs;
+                const double clockAtNow = globalSyncSource_->getTimeMsAt(atNs);
+                if (cadenceTraceEnabled())
+                LOG_INFO << "cadence-poll tick=" << tick.msc << " now=" << now.msc
+                         << " prev_landing=" << now.prevLanding
+                         << " target=" << presentationTarget(now, tick, kPipelineDepth)
+                         << " poll_offset_us=" << ((now.sampledAtNs - atNs) / 1000)
+                         << " clock_at_now_ms=" << clockAtNow
+                         << (now.fromIoctl ? "" : " now_from=tick");
+            }
+        }
+    }
+
         layerManager_->updateAll();
         
     // Update OSD with sync source timecode (like xjadeo: osd_smpte_ts = dispFrame - ts_offset)

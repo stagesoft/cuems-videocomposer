@@ -314,96 +314,102 @@ long MIDISyncSource::getTimeMs() const {
 #endif
 }
 
-long MIDISyncSource::getTimeMsFollowing() const {
-#ifdef HAVE_MTCRECEIVER
-    long baseMtcMs = MtcReceiver::mtcHead.load();
-    bool isRunning = MtcReceiver::isTimecodeRunning.load();
+namespace {
+// The rate-correcting extrapolation of the quarter-frame head (the comments below are the ones this state carried
+// when it lived as static locals of getTimeMsFollowing()). One instance: the render thread is the only caller.
+//
+// MtcReceiver::mtcHead advances in ~10ms discrete steps (2 MIDI quarter-
+// frames at 25 fps).  Position-correcting PLLs (errorUs/20) introduce
+// ~500µs per-vsync jitter that pushes frame boundary crossings to wrong
+// vsyncs when the vsync phase aligns with frame boundaries.
+//
+// Solution: rate-correcting extrapolation.  Advance a µs counter at a
+// continuously adjusted rate so the output is perfectly smooth (zero
+// position jitter) while the rate slowly tracks the MTC source clock
+// (eliminating long-term drift).
+//
+// The rate is the ratio of MTC advance to wall-clock advance over windows
+// of at least 500 ms (never a single head step, see below), clamped to
+// ±5 % and fed into an exponential moving average (α=0.05 per window,
+// τ ≈ 10 s). The position nudge further down tracks anything faster.
+//
+// Rate samples are accumulated over a window, never taken from a single
+// head step: the head moves in quarter-frame quanta (10 ms at 25 fps) and
+// the render loop polls at whatever cadence the display backend wakes it.
+// step/elapsed over one step is then noise -- at 60 Hz the 10 ms step seen
+// across a 16.6 ms poll reads 0.6 or 1.2, and with per-surface pacing a step
+// seen across a 1 ms sibling wake reads 10 -- and the EMA drifts, after
+// which the smooth clock overtakes or lags the head and is hard-snapped
+// (the +11 ms snaps 0.1.2-6 logged at 2x4K30, the -11 ms ones of 0.1.2-9).
+// Over >= 500 ms the quantisation is <= 2 %, whatever the poll cadence.
+// MTC runs at crystal rate, so the sample is also clamped: anything outside
+// +-5 % is measurement, not clock. The position nudge below tracks the rest.
+struct SmoothClock {
+    long long smoothUs   = -1;
+    long long lastWcUs   =  0;
+    double    rate       = 1.0;   // MTC µs per wall µs
+    long      prevMtcMs  = -1;
+    long long prevMtcWcUs = 0;    // wall time when mtcHead last changed
+    long      accStepMs    = 0;
+    long long accElapsedUs = 0;
+    bool      pinned     = false; // the not-running branch: the clock sits on the head, no extrapolation
+    // getTimeMsAt() memo: one advance per distinct instant (plan 1amfwm7gpz7 §5.2 rule 2)
+    int64_t   memoNs     = -1;
+    double    memoValue  = 0.0;
+};
+SmoothClock s_clock;
+constexpr long long kRateWindowUs = 500000;
+constexpr double    kRateClamp    = 0.05;
 
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    long long nowUs = static_cast<long long>(now.tv_sec) * 1000000LL
-                    + now.tv_nsec / 1000LL;
-
-    // MtcReceiver::mtcHead advances in ~10ms discrete steps (2 MIDI quarter-
-    // frames at 25 fps).  Position-correcting PLLs (errorUs/20) introduce
-    // ~500µs per-vsync jitter that pushes frame boundary crossings to wrong
-    // vsyncs when the vsync phase aligns with frame boundaries.
-    //
-    // Solution: rate-correcting extrapolation.  Advance a µs counter at a
-    // continuously adjusted rate so the output is perfectly smooth (zero
-    // position jitter) while the rate slowly tracks the MTC source clock
-    // (eliminating long-term drift).
-    //
-    // The rate is the ratio of MTC advance to wall-clock advance over windows
-    // of at least 500 ms (never a single head step, see below), clamped to
-    // ±5 % and fed into an exponential moving average (α=0.05 per window,
-    // τ ≈ 10 s). The position nudge further down tracks anything faster.
-    //
-    // Static locals are safe: called only from the single-threaded render loop.
-    static long long s_smoothUs  = -1;
-    static long long s_lastWcUs  =  0;
-    static double    s_rate      = 1.0;  // MTC µs per wall µs
-    static long      s_prevMtcMs = -1;
-    static long long s_prevMtcWcUs = 0;  // wall time when mtcHead last changed
-    // Rate samples are accumulated over a window, never taken from a single
-    // head step: the head moves in quarter-frame quanta (10 ms at 25 fps) and
-    // the render loop polls at whatever cadence the display backend wakes it.
-    // step/elapsed over one step is then noise -- at 60 Hz the 10 ms step seen
-    // across a 16.6 ms poll reads 0.6 or 1.2, and with per-surface pacing a step
-    // seen across a 1 ms sibling wake reads 10 -- and the EMA drifts, after
-    // which the smooth clock overtakes or lags the head and is hard-snapped
-    // (the +11 ms snaps 0.1.2-6 logged at 2x4K30, the -11 ms ones of 0.1.2-9).
-    // Over >= 500 ms the quantisation is <= 2 %, whatever the poll cadence.
-    // MTC runs at crystal rate, so the sample is also clamped: anything outside
-    // +-5 % is measurement, not clock. The position nudge below tracks the rest.
-    static long      s_accStepMs    = 0;
-    static long long s_accElapsedUs = 0;
-    constexpr long long kRateWindowUs = 500000;
-    constexpr double    kRateClamp    = 0.05;
-
-    if (!isRunning || s_smoothUs < 0) {
-        s_smoothUs   = static_cast<long long>(baseMtcMs) * 1000LL;
-        s_lastWcUs   = nowUs;
-        s_rate       = 1.0;
-        s_prevMtcMs  = baseMtcMs;
-        s_prevMtcWcUs = nowUs;
-        s_accStepMs = 0;
-        s_accElapsedUs = 0;
-        return baseMtcMs + displayLatencyMs_.load();
+/// One state advance at wall time nowUs with the head baseMtcMs. Returns true when the clock is pinned.
+bool advanceSmoothClock(long baseMtcMs, bool isRunning, long long nowUs) {
+    SmoothClock& c = s_clock;
+    c.memoNs = -1;
+    if (!isRunning || c.smoothUs < 0) {
+        c.smoothUs   = static_cast<long long>(baseMtcMs) * 1000LL;
+        c.lastWcUs   = nowUs;
+        c.rate       = 1.0;
+        c.prevMtcMs  = baseMtcMs;
+        c.prevMtcWcUs = nowUs;
+        c.accStepMs = 0;
+        c.accElapsedUs = 0;
+        c.pinned = true;
+        return true;
     }
+    c.pinned = false;
 
     // Detect mtcHead change → update rate estimate
     bool justSnapped = false;
-    if (baseMtcMs != s_prevMtcMs) {
-        long long wcElapsedUs = nowUs - s_prevMtcWcUs;
-        long mtcStepMs = baseMtcMs - s_prevMtcMs;
+    if (baseMtcMs != c.prevMtcMs) {
+        long long wcElapsedUs = nowUs - c.prevMtcWcUs;
+        long mtcStepMs = baseMtcMs - c.prevMtcMs;
 
         // Only accumulate forward, reasonable steps; sample the ratio once the
         // window is long enough for the quarter-frame quantisation to vanish.
         if (wcElapsedUs > 250000) {
             // The head stood still for a quarter second while running: an MTC
             // glitch, not a rate. Drop the window rather than average it in.
-            s_accStepMs = 0;
-            s_accElapsedUs = 0;
+            c.accStepMs = 0;
+            c.accElapsedUs = 0;
         } else if (mtcStepMs > 0 && mtcStepMs < 100 && wcElapsedUs > 1000) {
-            s_accStepMs    += mtcStepMs;
-            s_accElapsedUs += wcElapsedUs;
-            if (s_accElapsedUs >= kRateWindowUs) {
-                double measuredRate = (static_cast<double>(s_accStepMs) * 1000.0)
-                                    / static_cast<double>(s_accElapsedUs);
+            c.accStepMs    += mtcStepMs;
+            c.accElapsedUs += wcElapsedUs;
+            if (c.accElapsedUs >= kRateWindowUs) {
+                double measuredRate = (static_cast<double>(c.accStepMs) * 1000.0)
+                                    / static_cast<double>(c.accElapsedUs);
                 if (measuredRate > 1.0 + kRateClamp) measuredRate = 1.0 + kRateClamp;
                 if (measuredRate < 1.0 - kRateClamp) measuredRate = 1.0 - kRateClamp;
                 // Exponential moving average, α=0.05 over 500 ms windows → τ ≈ 10 s;
                 // the position nudge below handles anything faster.
-                s_rate = 0.95 * s_rate + 0.05 * measuredRate;
-                s_accStepMs    = 0;
-                s_accElapsedUs = 0;
+                c.rate = 0.95 * c.rate + 0.05 * measuredRate;
+                c.accStepMs    = 0;
+                c.accElapsedUs = 0;
             }
         }
 
         // Large jump (seek / cue change): snap and reset
         if (mtcStepMs > 200 || mtcStepMs < -10) {
-            s_smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
+            c.smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
             // Reset wall-clock anchor so the unconditional advance below
             // contributes 0 µs on this call. Without this, sparse callers
             // (e.g. 1 Hz instrumentation polls) re-add up to the 100 ms
@@ -411,36 +417,36 @@ long MIDISyncSource::getTimeMsFollowing() const {
             // justSnapped suppresses the anti-drift correction — yielding
             // a steady-state +100 ms bias visible to FramerateConverter
             // when video fps differs from MTC fps.
-            s_lastWcUs = nowUs;
-            s_rate = 1.0;
-            s_accStepMs = 0;
-            s_accElapsedUs = 0;
+            c.lastWcUs = nowUs;
+            c.rate = 1.0;
+            c.accStepMs = 0;
+            c.accElapsedUs = 0;
             justSnapped = true;
         }
 
-        s_prevMtcMs   = baseMtcMs;
-        s_prevMtcWcUs = nowUs;
+        c.prevMtcMs   = baseMtcMs;
+        c.prevMtcWcUs = nowUs;
     }
 
     // Advance by wall-clock delta × rate (smooth, drift-free)
-    long long wallDeltaUs = nowUs - s_lastWcUs;
-    s_lastWcUs = nowUs;
+    long long wallDeltaUs = nowUs - c.lastWcUs;
+    c.lastWcUs = nowUs;
     if (wallDeltaUs < 0)      wallDeltaUs = 0;
     if (wallDeltaUs > 100000) wallDeltaUs = 100000;
 
-    s_smoothUs += static_cast<long long>(
-        static_cast<double>(wallDeltaUs) * s_rate);
+    c.smoothUs += static_cast<long long>(
+        static_cast<double>(wallDeltaUs) * c.rate);
 
     // --- Layer 2: position anti-drift (mpv-style) ---
-    // After rate advance, nudge s_smoothUs toward baseMtcMs to prevent
+    // After rate advance, nudge smoothUs toward baseMtcMs to prevent
     // unbounded drift from rate EMA settling below 1.0.
-    // Skip on the same call where a large-jump snap fired — s_smoothUs
+    // Skip on the same call where a large-jump snap fired — smoothUs
     // was just set to baseMtcMs and the rate advance only added one
     // poll-interval; errorMs would be tiny or trigger a spurious snap.
     // justSnapped is intentionally local: same-call suppression is all
     // that's needed; on the next call errorMs will be small.
     if (!justSnapped) {
-        long long smoothMs = s_smoothUs / 1000LL;
+        long long smoothMs = c.smoothUs / 1000LL;
         long long errorMs  = static_cast<long long>(baseMtcMs) - smoothMs;
         constexpr long long SNAP_THRESHOLD_MS  = 10;
         constexpr int       CORRECTION_DIVISOR = 10;
@@ -450,18 +456,66 @@ long MIDISyncSource::getTimeMsFollowing() const {
             // post-fix it must fire only on genuine seeks (GO / loop / scrub).
             LOG_INFO << "MIDISync: anti-drift SNAP errorMs=" << errorMs
                      << " (base=" << baseMtcMs << " smooth=" << smoothMs << ")";
-            s_smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
-            s_rate = 1.0;
-            s_accStepMs = 0;
-            s_accElapsedUs = 0;
+            c.smoothUs = static_cast<long long>(baseMtcMs) * 1000LL;
+            c.rate = 1.0;
+            c.accStepMs = 0;
+            c.accElapsedUs = 0;
         } else if (errorMs != 0) {
-            s_smoothUs += (errorMs * 1000LL) / CORRECTION_DIVISOR;
+            c.smoothUs += (errorMs * 1000LL) / CORRECTION_DIVISOR;
         }
     }
+    return false;
+}
 
-    return static_cast<long>(s_smoothUs / 1000LL) + displayLatencyMs_.load();
+long long monotonicNowUs() {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return static_cast<long long>(now.tv_sec) * 1000000LL + now.tv_nsec / 1000LL;
+}
+} // namespace
+
+long MIDISyncSource::getTimeMsFollowing() const {
+#ifdef HAVE_MTCRECEIVER
+    const long baseMtcMs = MtcReceiver::mtcHead.load();
+    const bool isRunning = MtcReceiver::isTimecodeRunning.load();
+    const long long nowUs = monotonicNowUs();
+    if (advanceSmoothClock(baseMtcMs, isRunning, nowUs)) {
+        return baseMtcMs + displayLatencyMs_.load();
+    }
+    return static_cast<long>(s_clock.smoothUs / 1000LL) + displayLatencyMs_.load();
 #else
     return -1;
+#endif
+}
+
+double MIDISyncSource::getTimeMsAt(int64_t monotonicNs) const {
+#ifdef HAVE_MTCRECEIVER
+    if (livenessEnabled_ && hold_.held()) {
+        return static_cast<double>(frozenTimeMs_);   // D13: the value of the moment the hold began
+    }
+    SmoothClock& c = s_clock;
+    if (c.memoNs == monotonicNs && c.memoNs >= 0) {
+        return c.memoValue;                           // the other layers of this poll: no second advance
+    }
+    const long baseMtcMs = MtcReceiver::mtcHead.load();
+    const bool isRunning = MtcReceiver::isTimecodeRunning.load();
+    const long long nowUs = monotonicNowUs();
+    const bool pinned = advanceSmoothClock(baseMtcMs, isRunning, nowUs);
+    lastTimeMs_ = static_cast<long>(c.smoothUs / 1000LL) + displayLatencyMs_.load();   // as getTimeMs() keeps it
+    double valueMs;
+    if (pinned) {
+        valueMs = static_cast<double>(c.smoothUs) / 1000.0;                               // no extrapolation
+    } else {
+        const double tUs = static_cast<double>(monotonicNs) / 1000.0;
+        valueMs = (static_cast<double>(c.smoothUs) + c.rate * (tUs - static_cast<double>(c.lastWcUs))) / 1000.0;
+    }
+    valueMs += static_cast<double>(displayLatencyMs_.load());
+    c.memoNs = monotonicNs;
+    c.memoValue = valueMs;
+    return valueMs;
+#else
+    (void)monotonicNs;
+    return -1.0;
 #endif
 }
 
