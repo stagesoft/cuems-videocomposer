@@ -1,3 +1,35 @@
+cuems-videocomposer (0.1.2-13) unstable; urgency=medium
+
+  * Frame cadence on the vblank tick (1amfwm7gpz7, PR #24). The frame shown
+    at each vsync is chosen on the pacing output's vblank counter
+    (drmCrtcGetSequence) instead of a guessed minimum hold. At exact ratios
+    (30p on 60 Hz, 25p on 50 Hz) every frame holds 2 vsyncs: the 1/3-vsync
+    hold pairs of 0.1.2-12 (77-107 per layer per 9 min at 30p/60 on an
+    FP530, the La Llotja mini-jumps) are gone. Clock drift is corrected by a
+    single one-vsync hold (about one every 10 min at the fleet's ~26 ppm),
+    never by a pair; non-integer ratios keep their pattern (25p/60 =
+    2,3,2,3,2; a correction stays inside it); 60p on 50 Hz drops one frame
+    at a time instead of two together. The smooth MTC clock is one state,
+    advanced once per tick and read at the presentation vblank.
+  * Journal: "cadence: path=tick" and one "cadence: layer=c<id> fps .. r ..
+    -> hold N" line per layer at start. Test aids, off unless set, never on
+    a show: VIDEOCOMPOSER_CADENCE_STATS=1 adds the per-event and per-minute
+    lag lines; VIDEOCOMPOSER_CADENCE_TRACE=1 one poll and one flip line per
+    frame.
+  * Rollback without reinstalling: VIDEOCOMPOSER_CADENCE_LEGACY=1 in
+    /etc/cuems/videocomposer-flags.env, then restart the videocomposer and
+    the node engine: the 0.1.2-12 cadence code, verbatim. Per-surface
+    pacing, X11 and headless publish no tick and run that code too.
+  * Unchanged: one held vsync at a loop wrap (the decoder seek,
+    1amfwm7gq3x); a panel off nominal (1920x1200 "60" = 59.95 Hz) still
+    needs one single correction per beat (every ~20 s at 30p), by physics.
+  * Verified: 229/229 unit tests on an N97; bench rows on an FP530 and an
+    N97 against the executable reference model (cuems-RELATIONS
+    baselines/test3-saltitos-20261104); 30p/60 with MTC over the network
+    on test + test-node01. Same version on every box of a cluster.
+
+ -- Ion Reguera <ion@stagelab.coop>  Fri, 06 Nov 2026 19:03:08 +0100
+
 cuems-videocomposer (0.1.2-12) unstable; urgency=medium
 
   * Gapless MTC-locked loops (869ejxng3 + 1amfwm7e6cw, PR #22): a looping
