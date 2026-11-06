@@ -49,9 +49,9 @@ ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-previe
 ## Frame pacing (0.1.2-10): coupled by default, per-surface opt-in
 
 - **Default = coupled**: every output presents on the slowest CRTC's vblank, one atomic commit for all.
-  This is the model the cadence smoother in `FramerateConverterSyncSource` was written against
-  ("pollFrame is called once per vsync") and the one the stutter-free pulldown work (25/30 fps on
-  50/60 Hz, 4K at 30) was validated on.
+  This is the model the legacy cadence smoother in `FramerateConverterSyncSource` was written against
+  ("pollFrame is called once per vsync") and the one the vblank-tick engine below needs (it reads the
+  pacing CRTC's vblank, so it does not depend on the poll cadence).
 - **Per-surface pacing** (PR #8, 869emcrwa: each refresh-rate class flips on its own vblank) is
   **opt-in**: `VIDEOCOMPOSER_PER_SURFACE_PACING=1` in the service environment
   (`/etc/cuems/videocomposer-flags.env`). It shipped as the default in 0.1.2-9 and regressed playback:
@@ -86,6 +86,49 @@ ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-previe
   journal as root (`sudo journalctl -u cuems-videocomposer | grep CadenceStats`): cuems-admin is not
   in `systemd-journal` and sees nothing. First rig reading, test2 node01 Panera 2×4K30 2026-10-21:
   `holds{1:7186,2:7} outsideA=0 minority=7 expected=7.2` per output after 4 min.
+
+### The vblank-tick cadence engine (1amfwm7gpz7; coupled path)
+
+Replaces the time-based smoother of `FramerateConverterSyncSource::pollFrame` whenever the DRM backend publishes a
+vblank tick; the legacy smoother is kept verbatim behind "no tick". Design, model and measurements:
+`cuems-RELATIONS/Plans/2026-11-04-vc-cadence-exact-ratio-min-hold-1amfwm7gpz7.md`, executable reference model and
+fixtures in `cuems-RELATIONS/baselines/test3-saltitos-20261104/model/` (the C++ tests replay those fixtures:
+`test/fixtures/cadence/*.txt`, `TestFramerateConverter.cpp`).
+
+- **The tick** (`sync/PresentTick.h`): the last completed flip (msc, ust, period) of the pacing CRTC, published in
+  `DRMBackend::render()` right after the wait for pending flips. The pacing CRTC is the enabled output with the longest
+  vsync period; on a tie, the one whose flip completes last most often over the first 120 renders, then **frozen
+  until a mode change** (the CRTCs' sequence counters have unrelated bases: a per-frame choice mixes them).
+- **The current vblank** (`currentVblank()`, sampled once per `updateLayers()`): `drmCrtcGetSequence` on the pacing
+  CRTC (amdgpu and i915 both answer) and `prevLanding`, the vblank the previous submit lands on. The frame chosen now
+  is shown at `tgt = max(prevLanding, now) + 1` (two-deep loop: normally tick + 2). `prevLanding` = the sequence read
+  right after the commit + 1, + 1 more when the commit was issued past the driver's **flip deadline**, learnt in flight
+  from each submit's real depth (64 bins of the period, misclassification minimum; test3 amdgpu: made the next vblank
+  up to 6 ms into the 16.7 ms period, missed it from 9.4 ms). Without that term every decode stall (loop wrap) showed
+  3,2,1 instead of 3,1.
+- **The engine**: r = content period / vsync period; |r − round r| ≤ 0.02 snaps to an integer hold N (30p/60, 25p/50,
+  29.97p/60), else a Bresenham pattern (25p/60 = 2,3,2,3,2), r < 0.98 the drop regime. The frame for `tgt` follows a
+  grid anchored once on the smooth MTC clock (`getTimeMsAt(ust of tgt)`, advanced once per tick for every layer).
+  The phase against the clock is low-passed over 16 vblanks; outside ±0.60 of a hold one **correction** shortens
+  (`corr-`) or lengthens (`corr+`) a single hold by one vsync, at least 30 vsyncs apart. A panel off nominal needs
+  them (test3: 79 ppm, one every ~215 s at 30p/60): that is the physical pulldown, not jitter. A stall is caught up at
+  once (one 3,1 event, `stall`); a jump ≥ 2 frames re-anchors.
+- **Logs.** INFO at start per layer: `cadence: path=tick now=ioctl` and `cadence: layer=c<id> fps 30, vsync 16.6667 ms,
+  r 2 -> hold 2 (exact) H=0.6 filter=16`. With `VIDEOCOMPOSER_CADENCE_STATS=1` also `cadence-event layer=c<id>
+  kind=corr-|corr+|skip|stall|reanchor …` (≤ 20/s) and once a minute `cadence-lag layer=c<id> … corrections(-/+)=a/b
+  skips= drops= stalls= reanchors= phiMax= eps=` (cumulative; `eps` = clock drift against the grid over the last
+  60 s). `VIDEOCOMPOSER_CADENCE_TRACE=1` adds a `cadence-poll` and a `cadence-flip … late= depth=` line per frame
+  (debug only: ~4 lines per vsync). Healthy, 30p on 60 Hz with a looping clip: `holds{1}` = `corr-` + stalls,
+  `holds{3}` = `corr+` + stalls, stalls = loop wraps, `reanchors=0`, no `anti-drift SNAP` after the GO.
+  `cuems-RELATIONS/baselines/test3-saltitos-20261104/model/cadence_parse.py <journal>` judges a run against the
+  model's prediction.
+- **Kill switch**: `VIDEOCOMPOSER_CADENCE_LEGACY=1` in `/etc/cuems/videocomposer-flags.env`, then restart the VC with no
+  project loaded (and restart `cuems-node-engine`: it does not notice a VC restart, 869f8jn34). One INFO line says so;
+  every layer runs the legacy smoother. Per-surface pacing, `renderLegacy`, X11 and headless publish no tick and run
+  the legacy smoother too.
+- **Measured** (test3 FP530, 4 × 1080p 30p on 60 Hz): the mid-clip 1/3 pairs of the released smoother (42–62 per
+  minute per output) are gone; what is left is one 3,1 per loop wrap (the decode stall, 1amfwm7gq3x) and the
+  panel's correction every ~2 min.
 
 ## Resolution control
 

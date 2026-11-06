@@ -24,6 +24,8 @@
  */
 
 #include "DRMBackend.h"
+#include "../../sync/PresentTick.h"
+#include <xf86drm.h>
 #include "../OpenGLRenderer.h"
 #include "../DisplayConfigurationManager.h"
 #include "../OutputColorConfig.h"
@@ -423,6 +425,9 @@ void DRMBackend::renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManag
         stampCadenceFlips();
     }
 
+    // Cadence engine: the pacing CRTC's completed flip is the tick (plan 1amfwm7gpz7 §5.1).
+    publishTickAfterFlipWait();
+
     // Check if we can use atomic modesetting with planes
     bool useAtomic = outputManager_->supportsAtomic() && surfaces_.size() > 1;
     bool allHavePlanes = true;
@@ -460,7 +465,262 @@ void DRMBackend::renderVirtualCanvasCoupled(LayerManager* layerManager, OSDManag
             cadencePending_[name] = cadenceSamples;
         }
     }
+
+    // Cadence engine: the vblank this submit lands on, for the next poll's target (decision S, option (c)).
+    recordSubmitLanding();
 }
+
+DRMSurface* DRMBackend::choosePacingSurface() {
+    // The pacing surface is chosen ONCE per mode set (plan §5.1, review N8): the enabled surface with the longest
+    // vsync period; among equal periods, the one whose flip completes last most often over the first 120 renders
+    // (the coupled loop wakes on it). A per-frame choice would mix the CRTCs' sequence counters, which have
+    // unrelated bases (test3: ±78, ±148, ±220 vblanks between the four CRTCs), and corrupt the schedule.
+    DRMSurface* longest = nullptr;
+    int64_t longestPeriod = 0;
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
+        if (!surface) {
+            continue;
+        }
+        const int64_t period = surface->getPresentationTiming().getExpectedVsyncDuration();
+        if (period > 0 && (!longest || period > longestPeriod + 1000)) {
+            longest = surface.get();
+            longestPeriod = period;
+        }
+    }
+    if (!longest) {
+        return nullptr;
+    }
+    if (pacingFrozen_ && std::llabs(longestPeriod - pacingPeriodNs_) <= 1000) {
+        auto it = surfaces_.find(pacingSurfaceName_);
+        if (it != surfaces_.end() && it->second && it->second->getCrtcId() == pacingCrtcId_) {
+            return it->second.get();
+        }
+        pacingFrozen_ = false;             // the chosen surface is gone (hotplug): choose again
+    }
+    if (std::llabs(longestPeriod - pacingPeriodNs_) > 1000) {
+        pacingTally_.clear();              // a new period class (mode set): a fresh tally
+        pacingTallyRenders_ = 0;
+        pacingFrozen_ = false;
+        pacingPeriodNs_ = longestPeriod;
+    }
+    // tally: among the surfaces of the longest period, which one completed its flip last on this render
+    DRMSurface* latest = nullptr;
+    int64_t latestUst = -1;
+    for (const auto& name : orderedSurfaceNames()) {
+        auto& surface = surfaces_.at(name);
+        if (!surface) {
+            continue;
+        }
+        const PresentationTiming& pt = surface->getPresentationTiming();
+        if (std::llabs(pt.getExpectedVsyncDuration() - longestPeriod) > 1000) {
+            continue;
+        }
+        const PresentationEntry info = pt.getInfo();
+        if (info.valid && info.ust > latestUst) {
+            latestUst = info.ust;
+            latest = surface.get();
+        }
+    }
+    if (latest) {
+        pacingTally_[latest->getOutputInfo().name] += 1;
+        ++pacingTallyRenders_;
+    }
+    DRMSurface* chosen = longest;          // provisional while the tally runs: a stable choice, no flip-flop
+    if (pacingTallyRenders_ >= 120) {
+        std::string best;
+        int bestCount = -1;
+        for (const auto& kv : pacingTally_) {
+            if (kv.second > bestCount) {
+                best = kv.first;
+                bestCount = kv.second;
+            }
+        }
+        auto it = surfaces_.find(best);
+        if (it != surfaces_.end() && it->second) {
+            chosen = it->second.get();
+        }
+        pacingFrozen_ = true;
+    }
+    const std::string name = chosen->getOutputInfo().name;
+    if (name != pacingSurfaceName_ || chosen->getCrtcId() != pacingCrtcId_) {
+        pacingSurfaceName_ = name;
+        pacingCrtcId_ = chosen->getCrtcId();
+        prevLanding_ = -1;                 // the landing recorded on another CRTC's counter is meaningless here
+        LOG_INFO << "DRMBackend: cadence pacing surface = " << pacingSurfaceName_
+                 << " (crtc " << pacingCrtcId_ << ", vsync " << (longestPeriod / 1000000.0) << " ms"
+                 << (pacingFrozen_ ? ", chosen by the flip-order tally)" : ", provisional)");
+    }
+    return chosen;
+}
+
+void DRMBackend::publishTickAfterFlipWait() {
+    if (cadenceLegacyForced()) {
+        if (!cadenceLegacyLogged_) {
+            LOG_INFO << "DRMBackend: VIDEOCOMPOSER_CADENCE_LEGACY=1: no vblank tick, every layer on the legacy smoother";
+            cadenceLegacyLogged_ = true;
+        }
+        resetPresentTick();
+        return;
+    }
+    DRMSurface* pacing = choosePacingSurface();
+    if (!pacing) {
+        return;
+    }
+    const PresentationTiming& pt = pacing->getPresentationTiming();
+    const PresentationEntry info = pt.getInfo();
+    const int64_t period = pt.getExpectedVsyncDuration();
+    if (!info.valid || info.msc <= 0 || info.ust <= 0 || period <= 0) {
+        return;   // not a valid tick (after init()/reset(), an atomic-only driver without ust): the layer holds
+    }
+    PresentTick tick;
+    tick.msc = info.msc;
+    tick.ustNs = info.ust;
+    tick.periodNs = period;
+    publishPresentTick(tick);
+    flipPeriodUs_ = period / 1000;
+    // Learn the flip deadline from what the last submit really did: the vblanks between the sequence read right
+    // after it and its landing (1 = it made the next vblank, 2 = it missed it). Lateness against the target is not
+    // that sample: a target built on a wrong earlier landing is late with an on-time commit (runs step3d/3e).
+    int64_t depth = -1;
+    if (submitSeq_ >= 0 && submitCrtc_ == pacingCrtcId_) {
+        depth = info.msc - submitSeq_;
+        if (deadlineBinsPeriodUs_ != flipPeriodUs_) {
+            deadlineOnTime_.fill(0);
+            deadlineLate_.fill(0);
+            deadlineBinsPeriodUs_ = flipPeriodUs_;
+        }
+        if ((depth == 1 || depth == 2) && submitOffsetUs_ >= 0 && flipPeriodUs_ > 0) {
+            const int bin = static_cast<int>(std::min<int64_t>(kDeadlineBins - 1,
+                                                               submitOffsetUs_ * kDeadlineBins / flipPeriodUs_));
+            (depth == 1 ? deadlineOnTime_ : deadlineLate_)[bin]++;
+        }
+    }
+    if (cadenceTraceEnabled() && traceTargetPrevFrame_ >= 0) {
+        LOG_INFO << "cadence-flip landed=" << info.msc << " target=" << traceTargetPrevFrame_
+                 << " late=" << (info.msc - traceTargetPrevFrame_) << " ust=" << info.ust
+                 << " submit_offset_us=" << submitOffsetUs_ << " deadline_us=" << submitDeadlineUs_
+                 << " depth=" << depth;
+    }
+    submitSeq_ = -1;   // consumed: one sample per submit
+}
+
+int64_t DRMBackend::learntDeadlineUs(int64_t periodUs) const {
+    // Until a missed vblank has been seen: half a period, or just past the latest on-time bin if that is later.
+    // Then the bin boundary that misclassifies the fewest samples (on time above it + missed below it); a tie spans
+    // a range of boundaries and its middle is taken. On clean data that is the midpoint between the latest on-time
+    // and the earliest missed offset (test3 amdgpu: on time <= 6 ms, missed from 9.4 ms in 16.7 ms, runs step3d-f
+    // re-paired); a stray sample moves it only by its own weight. Bounded to [0.25, 0.9] of the period.
+    uint64_t onTotal = 0;
+    uint64_t lateTotal = 0;
+    int highestOnTime = -1;
+    for (int b = 0; b < kDeadlineBins; ++b) {
+        onTotal += deadlineOnTime_[b];
+        lateTotal += deadlineLate_[b];
+        if (deadlineOnTime_[b]) {
+            highestOnTime = b;
+        }
+    }
+    int64_t d;
+    if (lateTotal == 0 || onTotal == 0) {
+        d = std::max<int64_t>(periodUs / 2, (highestOnTime + 1) * periodUs / kDeadlineBins);
+    } else {
+        uint64_t onAbove = onTotal;   // boundary k: offsets in bins < k are judged on time
+        uint64_t lateBelow = 0;
+        uint64_t best = UINT64_MAX;
+        int bestLo = 0;
+        int bestHi = 0;
+        for (int k = 0; k <= kDeadlineBins; ++k) {
+            const uint64_t err = onAbove + lateBelow;
+            if (err < best) {
+                best = err;
+                bestLo = bestHi = k;
+            } else if (err == best) {
+                bestHi = k;
+            }
+            if (k < kDeadlineBins) {
+                onAbove -= deadlineOnTime_[k];
+                lateBelow += deadlineLate_[k];
+            }
+        }
+        d = static_cast<int64_t>(bestLo + bestHi) * periodUs / (2 * kDeadlineBins);
+    }
+    return std::min(std::max(d, periodUs / 4), periodUs * 9 / 10);
+}
+
+void DRMBackend::recordSubmitLanding() {
+    traceTargetPrevFrame_ = traceTargetThisFrame_;
+    submitSeq_ = -1;
+    if (cadenceLegacyForced() || pacingCrtcId_ == 0 || !crtcSequenceSupported_) {
+        prevLanding_ = -1;
+        return;
+    }
+    uint64_t seq = 0;
+    uint64_t ns = 0;
+    if (drmCrtcGetSequence(outputManager_->getFd(), pacingCrtcId_, &seq, &ns) != 0) {
+        crtcSequenceSupported_ = false;
+        prevLanding_ = -1;
+        LOG_WARNING << "DRMBackend: drmCrtcGetSequence unsupported on crtc " << pacingCrtcId_
+                    << " (errno " << errno << "): the cadence engine targets tick + depth (option b)";
+        return;
+    }
+    submitOffsetUs_ = (std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() - static_cast<int64_t>(ns)) / 1000;
+    submitSeq_ = static_cast<int64_t>(seq);
+    submitCrtc_ = pacingCrtcId_;
+    // A commit issued late in the vblank period misses the next vblank (test3 amdgpu: on time up to 6 ms into the
+    // 16.7 ms period, missed from 9.4 ms); the deadline is learnt from what the submits really did (learntDeadlineUs).
+    const int64_t periodUs = flipPeriodUs_ > 0 ? flipPeriodUs_ : 16667;
+    const int64_t deadlineUs = learntDeadlineUs(periodUs);
+    prevLanding_ = static_cast<int64_t>(seq) + 1 + (submitOffsetUs_ > deadlineUs ? 1 : 0);
+    submitDeadlineUs_ = deadlineUs;
+}
+
+void DRMBackend::samplePresentNow() {
+    if (cadenceLegacyForced() || !coupledPacing_ || pacingCrtcId_ == 0) {
+        return;   // no tick yet (first renders) or the legacy smoother by request: nothing to sample
+    }
+    const PresentTick tick = currentPresentTick();
+    VblankNow now;
+    now.sampledAtNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    uint64_t seq = 0;
+    uint64_t ns = 0;
+    if (crtcSequenceSupported_ && drmCrtcGetSequence(outputManager_->getFd(), pacingCrtcId_, &seq, &ns) == 0) {
+        now.msc = static_cast<int64_t>(seq);
+        now.ustNs = static_cast<int64_t>(ns);
+        // The previous submit's landing: known exactly once its flip event arrived (then it is the tick); while
+        // the flip is still pending it cannot land before the next vblank (run step3c: a submit that fell late in
+        // the period lands two vblanks after its sequence read, and the recorded seq + 1 was one short).
+        auto it = surfaces_.find(pacingSurfaceName_);
+        const bool pending = it != surfaces_.end() && it->second && it->second->isFlipPending();
+        if (pending) {
+            now.prevLanding = std::max(prevLanding_, now.msc + 1);
+        } else {
+            now.prevLanding = tick.msc >= 0 ? std::max(tick.msc, now.msc) + 0 : now.msc;
+            if (now.prevLanding < now.msc) {
+                now.prevLanding = now.msc;
+            }
+        }
+        now.fromIoctl = true;
+    } else {
+        if (crtcSequenceSupported_) {
+            crtcSequenceSupported_ = false;
+            LOG_WARNING << "DRMBackend: drmCrtcGetSequence unsupported on crtc " << pacingCrtcId_
+                        << " (errno " << errno << "): the cadence engine targets tick + depth (option b)";
+        }
+        if (tick.msc < 0) {
+            return;
+        }
+        now.msc = tick.msc;
+        now.ustNs = tick.ustNs;
+        now.prevLanding = tick.msc + 1;
+        now.fromIoctl = false;
+    }
+    publishVblankNow(now);
+    traceTargetThisFrame_ = presentationTarget(now, tick, kPipelineDepth);
+}
+
 
 std::vector<CadenceStats::Sample> DRMBackend::collectCadenceSamples(LayerManager* layerManager) const {
     std::vector<CadenceStats::Sample> samples;
