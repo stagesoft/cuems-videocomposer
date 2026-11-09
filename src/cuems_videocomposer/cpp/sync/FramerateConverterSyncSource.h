@@ -179,6 +179,12 @@ private:
     // Cached results from last pollFrame() — used by shared secondary layers
     int64_t lastSmoothedFrame_ = -1;  // last frame returned by pollFrame()
     bool    lastRolling_ = false;     // last rolling state from pollFrame()
+    double  lastClockMs_ = -1.0;      // the clock (ms) the last pollFrame() turned into a frame, at the presentation
+                                      // vblank on the tick path; before any offset phase (the start probe's reference)
+public:
+    /// The clock in ms that the last pollFrame() used (< 0: none yet). The start probe (1amfwm7h924) measures the
+    /// shown frame against it.
+    double lastClockMs() const { return lastClockMs_; }
 };
 
 } // namespace videocomposer

@@ -98,6 +98,7 @@ int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
                 // When framerates differ, compute video frame directly from
                 // the continuous millisecond time to avoid double-quantization.
                 long timeMs = wrappedSyncSource_->getTimeMs();
+                lastClockMs_ = static_cast<double>(timeMs);
                 if (timeMs >= 0) {
                     double seconds = (static_cast<double>(timeMs) + phaseMs_) / 1000.0;   // + the offset's phase (1amfwm7h924)
                     int64_t rawFrame = static_cast<int64_t>(std::floor(seconds * inputFps));
@@ -448,6 +449,7 @@ int64_t FramerateConverterSyncSource::tickPathPoll(double inputFps) {
     const int64_t excess = tgt - (now.msc + kPipelineDepth);
     // ---- rule 2: the clock at the presentation vblank
     const double posMs = wrappedSyncSource_->getTimeMsAt(now.ustNs + excess * tick.periodNs);
+    lastClockMs_ = posMs;
     if (posMs < 0.0) {
         return -1;                        // not following / no clock yet
     }

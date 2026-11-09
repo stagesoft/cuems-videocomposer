@@ -32,6 +32,7 @@
 #include "../../mtcreceiver/mtcreceiver.h"  // toLocalDay (day alignment)
 #endif
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <chrono>
 
@@ -225,6 +226,47 @@ void LayerPlayback::resolveEngineOffset() {
 #endif
 }
 
+void LayerPlayback::startProbe(int64_t frame) {
+    if (timeOffset_ != startProbeOffset_) {          // a new engine offset: a new start to measure
+        startProbeOffset_ = timeOffset_;
+        startProbeArmed_ = (timeOffset_ != 0);
+        startProbeN_ = 0;
+    }
+    if (!startProbeArmed_ || frame < 0 || timeScale_ != 1.0 || (isSharedLayer_ && !isDecodeDriver_)) {
+        return;
+    }
+    auto* c = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
+    const double src = c ? c->getSourceFramerate() : 0.0;
+    const double fps = c ? c->getFramerate() : 0.0;
+    const double clk = c ? c->lastClockMs() : -1.0;
+    if (src <= 0.0 || fps <= 0.0 || clk < 0.0) {
+        startProbeArmed_ = (c != nullptr);
+        return;
+    }
+    const double offMs = static_cast<double>(timeOffset_) * 1000.0 / src;
+    const double behind = clk + offMs - static_cast<double>(frame) * 1000.0 / fps;
+    if (startProbeN_ == 0) {
+        startProbeFirst_ = frame;
+        startProbeClock0_ = clk;
+        startProbeSum_ = 0.0;
+        startProbeMin_ = startProbeMax_ = behind;
+    }
+    startProbeSum_ += behind;
+    startProbeMin_ = std::min(startProbeMin_, behind);
+    startProbeMax_ = std::max(startProbeMax_, behind);
+    if (++startProbeN_ == 60) {
+        char line[320];
+        std::snprintf(line, sizeof line,
+                      "start-probe: layer %s fps %.3f offset %lld MTC frames (%.1f ms), first frame %lld at clock %.3f ms;"
+                      " shown frame behind the cue's start over 60 vsyncs: mean %.2f min %.2f max %.2f ms (frame %.2f ms)",
+                      engineOffset_.tag().c_str(), fps, static_cast<long long>(timeOffset_), offMs,
+                      static_cast<long long>(startProbeFirst_), startProbeClock0_, startProbeSum_ / 60.0,
+                      startProbeMin_, startProbeMax_, 1000.0 / fps);
+        LOG_INFO << line;
+        startProbeArmed_ = false;
+    }
+}
+
 void LayerPlayback::updateFromSyncSource() {
     if (!syncSource_ || !syncSource_->isConnected()) {
         // No sync source - manual playback or paused
@@ -382,6 +424,7 @@ void LayerPlayback::updateFromSyncSource() {
         // timeOffset_ arrives from the engine in MTC fps (always 25fps): its whole content frames, computed above
         // (EngineOffsetSplit.h; it used to be floored on its own, which made non-25p start late, 1amfwm7h924).
         int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + offsetSplit.frames;
+        startProbe(adjustedFrame);
 
         // The first position after an engine offset was placed: more than an
         // hour off the media means a wrong MTC day or an engine time far from now.
