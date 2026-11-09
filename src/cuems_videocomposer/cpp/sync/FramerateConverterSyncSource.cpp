@@ -430,7 +430,8 @@ int64_t FramerateConverterSyncSource::tickPathPoll(double inputFps) {
         integerN_ = (std::fabs(r_ - static_cast<double>(n)) <= kExactTol) ? static_cast<int>(n) : 0;
         drop_ = (r_ < kDropTol && integerN_ == 0);
         anchored_ = false;                // a change of fps or period re-anchors (research §D.2 rule 5)
-        LOG_INFO << "cadence: layer=c" << cadenceId_ << " fps " << inputFps << ", vsync " << (tick.periodNs / 1e6) << " ms, r " << r_
+        LOG_INFO << "cadence: layer=c" << cadenceId_ << " cue=" << (cueId_.empty() ? std::string("-") : cueId_)
+                 << " fps " << inputFps << ", vsync " << (tick.periodNs / 1e6) << " ms, r " << r_
                  << (integerN_ ? " -> hold " : (drop_ ? " -> drop regime (" : " -> bresenham ("))
                  << (integerN_ ? std::to_string(integerN_) + " (exact)" : std::to_string(r_) + ")")
                  << " H=" << kH << " filter=" << kLowpass;
