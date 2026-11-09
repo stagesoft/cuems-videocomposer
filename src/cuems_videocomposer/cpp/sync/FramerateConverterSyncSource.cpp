@@ -99,6 +99,7 @@ int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
                 // the continuous millisecond time to avoid double-quantization.
                 long timeMs = wrappedSyncSource_->getTimeMs();
                 lastClockMs_ = static_cast<double>(timeMs);
+                lastClockTick_ = false;    // the clock at the poll, not at the presentation vblank
                 if (timeMs >= 0) {
                     double seconds = (static_cast<double>(timeMs) + phaseMs_) / 1000.0;   // + the offset's phase (1amfwm7h924)
                     int64_t rawFrame = static_cast<int64_t>(std::floor(seconds * inputFps));
@@ -390,6 +391,8 @@ void FramerateConverterSyncSource::cadenceAnchor(double pos, int64_t msc) {
 }
 
 int64_t FramerateConverterSyncSource::tickPathPoll(double inputFps) {
+    lastClockMs_ = -1.0;              // set below at the presentation vblank; an early return leaves no clock
+    lastClockTick_ = true;
     const PresentTick tick = currentPresentTick();
     const VblankNow now = currentVblank();
     if (tick.msc < 0 || now.msc < 0 || !wrappedSyncSource_) {

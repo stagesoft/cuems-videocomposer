@@ -158,7 +158,13 @@ private:
 
     // Start probe (1amfwm7h924): once per engine offset, from the first vsync whose frame reaches the cue's start,
     // how far the shown frame is behind where the start puts the clock, averaged over 60 vsyncs; one INFO line.
-    void startProbe(int64_t frame);
+    // Only with VIDEOCOMPOSER_CADENCE_STATS=1.
+    // Re-arms when the offset value changes (a re-sent identical offset is not measured again); with an engine
+    // before rc6-7, which re-sends the offset on every loop pass, that is one line per pass.
+    void startProbe(int64_t frame, class FramerateConverterSyncSource* c, double srcFps, double fps);
+    void resetStartProbe();
+    int     startProbeSkipped_ = 0;
+    double  startProbeLastClock_ = 0.0;
     int64_t startProbeOffset_ = 0;
     bool    startProbeArmed_ = false;
     int     startProbeN_ = 0;

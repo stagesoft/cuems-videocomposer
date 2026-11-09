@@ -26,6 +26,7 @@
 #include "../sync/SyncSource.h"
 #include "../sync/FramerateConverterSyncSource.h"
 #include "../sync/EngineOffsetSplit.h"
+#include "../display/CadenceStats.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/VideoFileInput.h"
 #ifdef HAVE_MTCRECEIVER
@@ -33,6 +34,7 @@
 #endif
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <chrono>
 
@@ -70,6 +72,7 @@ void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
     frameOnGPU_ = false;
+    resetStartProbe();   // a new load: no window carries over (it re-arms on the cue's next offset)
 }
 
 void LayerPlayback::setInputSource(std::shared_ptr<InputSource> input, bool isShared, bool isDriver) {
@@ -81,6 +84,7 @@ void LayerPlayback::setInputSource(std::shared_ptr<InputSource> input, bool isSh
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
     frameOnGPU_ = false;
+    resetStartProbe();   // a new load: no window carries over (it re-arms on the cue's next offset)
 }
 
 void LayerPlayback::setSyncSource(std::unique_ptr<SyncSource> sync) {
@@ -226,44 +230,76 @@ void LayerPlayback::resolveEngineOffset() {
 #endif
 }
 
-void LayerPlayback::startProbe(int64_t frame) {
+void LayerPlayback::resetStartProbe() {
+    startProbeArmed_ = false;
+    startProbeN_ = 0;
+    startProbeSkipped_ = 0;
+}
+
+void LayerPlayback::startProbe(int64_t frame, FramerateConverterSyncSource* c, double srcFps, double fps) {
+    // An engineering line, not an operator one (one start scatters by about +-6 ms with the vsync grid; it means
+    // something averaged over many GOs): off unless the cadence diagnostics are on, as CadenceStats decides.
+    static const bool statsOn = CadenceStats::enabledFromEnv();
+    if (!statsOn) {
+        return;
+    }
     if (timeOffset_ != startProbeOffset_) {          // a new engine offset: a new start to measure
         startProbeOffset_ = timeOffset_;
+        resetStartProbe();
         startProbeArmed_ = (timeOffset_ != 0);
-        startProbeN_ = 0;
     }
-    if (!startProbeArmed_ || frame < 0 || timeScale_ != 1.0 || (isSharedLayer_ && !isDecodeDriver_)) {
+    if (!startProbeArmed_) {
         return;
     }
-    auto* c = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
-    const double src = c ? c->getSourceFramerate() : 0.0;
-    const double fps = c ? c->getFramerate() : 0.0;
-    const double clk = c ? c->lastClockMs() : -1.0;
-    if (src <= 0.0 || fps <= 0.0 || clk < 0.0) {
-        startProbeArmed_ = (c != nullptr);
+    // A shared secondary shows its driver's frame; one promoted to driver later would measure mid-cue. A time scale,
+    // no converter or no rates: nothing to measure against. All disarm until the next offset.
+    if ((isSharedLayer_ && !isDecodeDriver_) || timeScale_ != 1.0 || !c || srcFps <= 0.0 || fps <= 0.0) {
+        resetStartProbe();
         return;
     }
-    const double offMs = static_cast<double>(timeOffset_) * 1000.0 / src;
-    const double behind = clk + offMs - static_cast<double>(frame) * 1000.0 / fps;
+    if (frame < 0) {
+        return;                                      // before the cue's start (preload): wait
+    }
+    if (inputSource_) {
+        const int64_t total = inputSource_->getFrameInfo().totalFrames;
+        if (total > 0 && frame >= total) {           // past the media's end: the layer holds its last frame
+            resetStartProbe();
+            return;
+        }
+    }
+    if (!c->lastClockAtPresentation()) {
+        ++startProbeSkipped_;                        // legacy path or no clock this poll: another reference, skipped
+        return;
+    }
+    const double clk = c->lastClockMs();
+    const double frameMs = 1000.0 / fps;
+    if (startProbeN_ > 0 && clk - startProbeLastClock_ > 100.0) {
+        resetStartProbe();                           // a pause inside the window (follow off, MTC gap): no longer a start
+        return;
+    }
+    const double offMs = static_cast<double>(timeOffset_) * 1000.0 / srcFps;
+    const double behind = clk + offMs - static_cast<double>(frame) * frameMs;
     if (startProbeN_ == 0) {
         startProbeFirst_ = frame;
         startProbeClock0_ = clk;
         startProbeSum_ = 0.0;
         startProbeMin_ = startProbeMax_ = behind;
     }
+    startProbeLastClock_ = clk;
     startProbeSum_ += behind;
     startProbeMin_ = std::min(startProbeMin_, behind);
     startProbeMax_ = std::max(startProbeMax_, behind);
     if (++startProbeN_ == 60) {
-        char line[320];
+        char line[360];
         std::snprintf(line, sizeof line,
                       "start-probe: layer %s fps %.3f offset %lld MTC frames (%.1f ms), first frame %lld at clock %.3f ms;"
-                      " shown frame behind the cue's start over 60 vsyncs: mean %.2f min %.2f max %.2f ms (frame %.2f ms)",
+                      " chosen frame behind the cue's start over 60 vsyncs: mean %.2f min %.2f max %.2f ms"
+                      " (frame %.2f ms; %d legacy-path polls skipped)",
                       engineOffset_.tag().c_str(), fps, static_cast<long long>(timeOffset_), offMs,
                       static_cast<long long>(startProbeFirst_), startProbeClock0_, startProbeSum_ / 60.0,
-                      startProbeMin_, startProbeMax_, 1000.0 / fps);
+                      startProbeMin_, startProbeMax_, frameMs, startProbeSkipped_);
         LOG_INFO << line;
-        startProbeArmed_ = false;
+        resetStartProbe();
     }
 }
 
@@ -424,7 +460,8 @@ void LayerPlayback::updateFromSyncSource() {
         // timeOffset_ arrives from the engine in MTC fps (always 25fps): its whole content frames, computed above
         // (EngineOffsetSplit.h; it used to be floored on its own, which made non-25p start late, 1amfwm7h924).
         int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + offsetSplit.frames;
-        startProbe(adjustedFrame);
+        startProbe(adjustedFrame, converter, converter ? converter->getSourceFramerate() : 0.0,
+                   converter ? converter->getFramerate() : 0.0);
 
         // The first position after an engine offset was placed: more than an
         // hour off the media means a wrong MTC day or an engine time far from now.
