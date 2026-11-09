@@ -153,6 +153,7 @@ private:
 
     // Shared decoder flags (NOT derived from use_count — explicit)
     bool isSharedLayer_ = false;   // true when sharing an InputSource with other layers
+    int  phaseMismatchPolls_ = 0;  // a shared secondary whose offset phase differs from its driver's (1amfwm7h924)
     bool isDecodeDriver_ = false;  // true when this layer drives decode (calls readFrame/readFrameToTexture)
     int hwMissLogCount_ = 0;       // per-layer throttle for hardware queue-miss warnings
     

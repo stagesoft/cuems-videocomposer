@@ -99,7 +99,7 @@ int64_t FramerateConverterSyncSource::pollFrame(uint8_t* rolling) {
                 // the continuous millisecond time to avoid double-quantization.
                 long timeMs = wrappedSyncSource_->getTimeMs();
                 if (timeMs >= 0) {
-                    double seconds = static_cast<double>(timeMs) / 1000.0;
+                    double seconds = (static_cast<double>(timeMs) + phaseMs_) / 1000.0;   // + the offset's phase (1amfwm7h924)
                     int64_t rawFrame = static_cast<int64_t>(std::floor(seconds * inputFps));
 
                     // Vsync-aware cadence smoother.
@@ -169,6 +169,15 @@ cadence_done:
     if (rolling) lastRolling_ = (*rolling != 0);
 
     return syncFrame;
+}
+
+void FramerateConverterSyncSource::setPhaseMs(double ms) {
+    if (!std::isfinite(ms) || std::fabs(ms - phaseMs_) < 1e-6) {
+        return;
+    }
+    phaseMs_ = ms;
+    anchored_ = false;            // the next tick re-anchors, uncounted: the cue is placed anew, not corrected
+    cadenceDisplayFrame_ = -1;    // the legacy smoother takes the new position at its next poll
 }
 
 int64_t FramerateConverterSyncSource::getCurrentFrame() const {
@@ -442,7 +451,7 @@ int64_t FramerateConverterSyncSource::tickPathPoll(double inputFps) {
     if (posMs < 0.0) {
         return -1;                        // not following / no clock yet
     }
-    const double pos = posMs * inputFps / 1000.0;
+    const double pos = (posMs + phaseMs_) * inputFps / 1000.0;   // + the engine offset's sub-frame phase (1amfwm7h924)
     const int64_t msc = tgt;
     const bool gap = lastMsc_ >= 0 && msc - lastMsc_ > 1;
     if (gap) {

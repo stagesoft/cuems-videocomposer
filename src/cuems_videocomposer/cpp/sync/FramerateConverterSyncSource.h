@@ -97,6 +97,13 @@ public:
      */
     bool getCurrentRolling() const { return lastRolling_; }
 
+    /// The sub-frame phase of the layer's engine offset, in ms (1amfwm7h924, EngineOffsetSplit.h): added to the
+    /// clock before it becomes content frames, in the tick engine and in the legacy smoother. Set by the layer that
+    /// polls, before the poll. A change re-anchors the tick engine uncounted, as a change of fps does (the cue is
+    /// placed anew, which is not a correction), and restarts the legacy smoother. 0 for content at the MTC rate.
+    void setPhaseMs(double ms);
+    double getPhaseMs() const { return phaseMs_; }
+
     /// Cadence engine counters (plan 1amfwm7gpz7 §5.3, the lag line); tickPath = the vblank-tick engine chose the
     /// last frame (false = the legacy smoother).
     struct CadenceCounters {
@@ -121,6 +128,7 @@ private:
 
     CadenceCounters cadenceCounters_;
     bool cadenceCapture_ = false;
+    double phaseMs_ = 0.0;          // the engine offset's sub-frame remainder (setPhaseMs)
 
     // ---- the vblank-tick engine (plan 1amfwm7gpz7 §5.2; model: cuems-RELATIONS baselines/test3-saltitos-20261104/model/engine.py)
     int64_t tickPathPoll(double inputFps);          // < 0: the tick path does not apply (legacy smoother)

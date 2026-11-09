@@ -25,6 +25,7 @@
 #include "../utils/SMPTEUtils.h"
 #include "../sync/SyncSource.h"
 #include "../sync/FramerateConverterSyncSource.h"
+#include "../sync/EngineOffsetSplit.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/VideoFileInput.h"
 #ifdef HAVE_MTCRECEIVER
@@ -243,15 +244,45 @@ void LayerPlayback::updateFromSyncSource() {
     // NOTE: These were previously static variables shared across ALL layers (bug!)
     // Now they are instance variables, each layer has its own state
 
+    // The engine offset in content frames, exactly (1amfwm7h924): whole frames added below, the sub-frame
+    // remainder handed to the converter as a phase of its clock before it polls. Only the layer that polls sets it
+    // (a shared secondary reads the driver's frame, and carries the same cue offset). A time scale other than 1
+    // keeps the old whole-frame offset with no phase: the phase is in clock time, the scale is not.
+    auto* converter = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
+    EngineOffsetSplit offsetSplit;
+    offsetSplit.frames = timeOffset_;
+    if (converter) {
+        if (timeOffset_ != 0) {
+            offsetSplit = splitEngineOffset(timeOffset_, converter->getSourceFramerate(), converter->getFramerate());
+        }
+        if (timeScale_ != 1.0) {
+            offsetSplit.phaseMs = 0.0;
+        }
+        if (!(isSharedLayer_ && !isDecodeDriver_)) {
+            converter->setPhaseMs(offsetSplit.phaseMs);
+            phaseMismatchPolls_ = 0;
+        } else if (std::fabs(offsetSplit.phaseMs - converter->getPhaseMs()) > 1e-6) {
+            // A secondary shows the driver's frame, so the driver's phase. The engine sends one offset to every
+            // layer of a cue (run_cue.py), so a difference is only the moment between two of those sends; one that
+            // lasts means this layer can be up to one frame off its own offset. Said once, after ~0.5 s.
+            if (++phaseMismatchPolls_ == 30) {
+                LOG_WARNING << "offset phase: shared layer " << engineOffset_.tag() << " has offset " << timeOffset_
+                            << " (phase " << offsetSplit.phaseMs << " ms) but its decode driver's phase is "
+                            << converter->getPhaseMs() << " ms: up to one content frame off its own offset";
+            }
+        } else {
+            phaseMismatchPolls_ = 0;
+        }
+    }
+
     uint8_t rolling = 0;
     int64_t syncFrame;
     if (isSharedLayer_ && !isDecodeDriver_) {
         // Secondary shared layer: read cached smoothed frame from driver's last pollFrame()
         syncFrame = syncSource_->getCurrentFrame();
         // Read cached rolling state from driver's last pollFrame()
-        auto* frcSync = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
-        if (frcSync) {
-            rolling = frcSync->getCurrentRolling() ? 1 : 0;
+        if (converter) {
+            rolling = converter->getCurrentRolling() ? 1 : 0;
         }
     } else {
         // Driver or non-shared layer: advance the cadence smoother
@@ -347,20 +378,10 @@ void LayerPlayback::updateFromSyncSource() {
     // Process frame updates only if we have a valid frame
     if (syncFrame >= 0) {
         // Apply time-scaling: multiply by timescale, then add offset.
-        // syncFrame is already in video fps (converted by FramerateConverterSyncSource).
-        // timeOffset_ arrives from the engine in MTC fps (always 25fps), so convert
-        // it to video fps using the same ratio the sync source uses for frames.
-        int64_t convertedOffset = timeOffset_;
-        auto* converter = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
-        if (converter && timeOffset_ != 0) {
-            double srcFps = converter->getSourceFramerate();
-            double dstFps = converter->getFramerate();
-            if (srcFps > 0 && dstFps > 0 && std::abs(srcFps - dstFps) > 0.01) {
-                convertedOffset = static_cast<int64_t>(std::floor(
-                    static_cast<double>(timeOffset_) * dstFps / srcFps));
-            }
-        }
-        int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + convertedOffset;
+        // syncFrame is already in video fps (converted by FramerateConverterSyncSource, with the offset's phase).
+        // timeOffset_ arrives from the engine in MTC fps (always 25fps): its whole content frames, computed above
+        // (EngineOffsetSplit.h; it used to be floored on its own, which made non-25p start late, 1amfwm7h924).
+        int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + offsetSplit.frames;
 
         // The first position after an engine offset was placed: more than an
         // hour off the media means a wrong MTC day or an engine time far from now.

@@ -384,3 +384,125 @@ bool test_Cadence_u_FourLayers_OneClockAdvance_IdenticalChoices() {
     }
     return true;
 }
+
+// ---- the engine offset's phase (ClickUp 1amfwm7h924) ------------------------------------------------------------------
+
+#include "../sync/EngineOffsetSplit.h"
+
+/// The split is exact: whole frames + the phase on the clock give the frame of the cue's start, for every content
+/// rate and every offset; the old code (floor of the offset alone, added to the floored clock frame) is up to one
+/// frame late at 30p, never early, and exact at 25p.
+bool test_EngineOffset_Split_ExactForEveryRate_OldFloorWasLate() {
+    const double rates[] = {24.0, 24000.0 / 1001.0, 25.0, 30000.0 / 1001.0, 30.0, 50.0, 60.0};
+    int64_t oldLate30 = 0;
+    for (double fps : rates) {
+        for (int64_t off = 0; off >= -250; --off) {              // up to 10 s of cue start, in 25 fps MTC frames
+            const EngineOffsetSplit sp = splitEngineOffset(off, 25.0, fps);
+            TEST_ASSERT(sp.phaseMs >= 0.0);
+            TEST_ASSERT(sp.phaseMs < 1000.0 / fps + 1e-9);
+            if (fps == 25.0) {
+                TEST_ASSERT_EQ(sp.frames, off);
+                TEST_ASSERT(sp.phaseMs == 0.0);
+            }
+            for (int k = 0; k < 400; ++k) {                       // 0..4 s of clock, off the 1 ms grid
+                const double clockMs = 20000.0 + k * 10.0 + 0.37;
+                const int64_t want = static_cast<int64_t>(std::floor((clockMs + off * 40.0) * fps / 1000.0));
+                const int64_t got = static_cast<int64_t>(std::floor((clockMs + sp.phaseMs) * fps / 1000.0)) + sp.frames;
+                TEST_ASSERT_EQ(got, want);
+                if (fps == 30.0) {
+                    const int64_t old = static_cast<int64_t>(std::floor(clockMs * fps / 1000.0)) +
+                                        static_cast<int64_t>(std::floor(off * fps / 25.0));
+                    TEST_ASSERT(old <= want);                     // late or right, never early
+                    TEST_ASSERT(want - old <= 1);
+                    oldLate30 += want - old;
+                }
+            }
+        }
+    }
+    TEST_ASSERT(oldLate30 > 0);                                   // the defect existed: red on the old arithmetic
+    TEST_ASSERT_EQ(splitEngineOffset(-5, 25.0, 30.0).frames, static_cast<int64_t>(-6));   // 200 ms = 6 frames at 30p
+    TEST_ASSERT(splitEngineOffset(-5, 25.0, 30.0).phaseMs == 0.0);
+    TEST_ASSERT_EQ(splitEngineOffset(-1, 25.0, 30.0).frames, static_cast<int64_t>(-2));   // -40 ms = -2 + 26.7 ms
+    TEST_ASSERT(std::fabs(splitEngineOffset(-1, 25.0, 30.0).phaseMs - 80.0 / 3.0) < 1e-6);
+    TEST_ASSERT_EQ(splitEngineOffset(-7, 0.0, 30.0).frames, static_cast<int64_t>(-7));    // unknown rate: as given
+    return true;
+}
+
+/// Tick engine: a converter with phase φ chooses exactly the frames a converter with no phase chooses on a clock
+/// shifted by φ, through a whole 30p@60 run with 100 ppm drift (so it corrects), with the same corrections and no
+/// counted re-anchor.
+bool test_Cadence_Phase_EqualsShiftedClock_30at60() {
+    TickScope scope;
+    CadenceClock clockA, clockB;
+    CadenceInput input(30.0);
+    FramerateConverterSyncSource a(&clockA, &input), b(&clockB, &input);
+    const double phase = 80.0 / 3.0;                              // -1 MTC frame at 30p: the worst case, 26.7 ms
+    a.setPhaseMs(phase);
+    const int64_t P = 16666666;
+    const double Pms = 1000.0 / 60.0;
+    for (int64_t msc = 100; msc < 100 + 18000; ++msc) {
+        const double t = 10000.0 + (msc + 2) * Pms * (1.0 + 100e-6);
+        clockA.valueMs = t;
+        clockB.valueMs = t + phase;
+        publishForTarget(msc, P, true);
+        TEST_ASSERT_EQ(a.pollFrame(nullptr), b.pollFrame(nullptr));
+    }
+    const auto ca = a.getCadenceCounters(), cb = b.getCadenceCounters();
+    TEST_ASSERT(ca.tickPath);
+    TEST_ASSERT(ca.corrMinus >= 1);
+    TEST_ASSERT_EQ(ca.corrMinus, cb.corrMinus);
+    TEST_ASSERT_EQ(ca.corrPlus, cb.corrPlus);
+    TEST_ASSERT_EQ(ca.reanchors, static_cast<int64_t>(0));
+    return true;
+}
+
+/// A new phase while running (a new offset for the layer) re-anchors on the next tick without counting a re-anchor,
+/// and from that tick on the frames are exactly those of a converter that ran on the shifted clock all along; a
+/// converter with no phase shows other frames (so the test fails if setPhaseMs does nothing). Setting the same phase
+/// again changes nothing.
+bool test_Cadence_PhaseChange_ReanchorsUncounted() {
+    TickScope scope;
+    CadenceClock clockA, clockB, clockC;
+    CadenceInput input(30.0);
+    FramerateConverterSyncSource a(&clockA, &input), b(&clockB, &input), c(&clockC, &input);
+    const double phase = 80.0 / 3.0;                              // -1 MTC frame at 30p
+    const int64_t P = 16666666;
+    const double Pms = 1000.0 / 60.0;
+    int differsFromUnphased = 0;
+    for (int64_t msc = 100; msc < 1000; ++msc) {
+        if (msc == 400) {
+            a.setPhaseMs(phase);
+            a.setPhaseMs(phase);
+        }
+        const double t = 10000.0 + (msc + 2) * Pms + 5.0;
+        clockA.valueMs = t;
+        clockB.valueMs = t + phase;
+        clockC.valueMs = t;
+        publishForTarget(msc, P, true);
+        const int64_t fa = a.pollFrame(nullptr), fb = b.pollFrame(nullptr), fc = c.pollFrame(nullptr);
+        if (msc >= 400) {
+            TEST_ASSERT_EQ(fa, fb);
+            if (fa != fc) ++differsFromUnphased;
+        } else {
+            TEST_ASSERT_EQ(fa, fc);
+        }
+    }
+    TEST_ASSERT(differsFromUnphased > 0);
+    TEST_ASSERT_EQ(a.getCadenceCounters().reanchors, static_cast<int64_t>(0));
+    TEST_ASSERT(std::fabs(a.getPhaseMs() - phase) < 1e-9);
+    return true;
+}
+
+/// Legacy smoother (no tick): the phase moves the frame boundary by the same amount.
+bool test_Cadence_Phase_LegacyPath() {
+    TickScope scope;
+    CadenceClock clock;
+    CadenceInput input(30.0);
+    FramerateConverterSyncSource frc(&clock, &input);
+    clock.valueMs = 2010;                                         // 60.3 frames: 60 without phase
+    TEST_ASSERT_EQ(frc.pollFrame(nullptr), static_cast<int64_t>(60));
+    frc.setPhaseMs(25.0);                                         // 2035 ms = 61.05 frames
+    TEST_ASSERT_EQ(frc.pollFrame(nullptr), static_cast<int64_t>(61));
+    TEST_ASSERT_FALSE(frc.getCadenceCounters().tickPath);
+    return true;
+}
