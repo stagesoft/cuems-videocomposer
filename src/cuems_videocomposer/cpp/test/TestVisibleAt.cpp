@@ -61,18 +61,21 @@ namespace {
 class GateClock : public SyncSource {
 public:
     double valueMs = 0.0;
+    bool noFrame = false;                  // no MTC: the converter's poll gives syncFrame < 0
     bool connect(const char*) override { return true; }
     void disconnect() override {}
     bool isConnected() const override { return true; }
-    int64_t pollFrame(uint8_t* rolling) override { if (rolling) *rolling = 1; return 999; }
-    int64_t getCurrentFrame() const override { return 999; }
+    int64_t pollFrame(uint8_t* rolling) override { if (rolling) *rolling = noFrame ? 0 : 1; return noFrame ? -1 : 999; }
+    int64_t getCurrentFrame() const override { return noFrame ? -1 : 999; }
     const char* getName() const override { return "gate-clock"; }
     double getFramerate() const override { return 25.0; }
-    long getTimeMs() const override { return static_cast<long>(std::floor(valueMs)); }
-    double getTimeMsAt(int64_t) const override { return valueMs; }
+    long getTimeMs() const override { return noFrame ? -1 : static_cast<long>(std::floor(valueMs)); }
+    double getTimeMsAt(int64_t) const override { return noFrame ? -1.0 : valueMs; }
 };
 
-/// A file of `fps` and `total` frames; records the last frame loaded; `fail` = a decode miss.
+/// A file of `fps` and `total` frames; records the last frame loaded; `fail` = a decode miss. With `holdOnMiss` a miss
+/// reports success while the buffer keeps the previous frame (the async decode queue's hold, VideoFileInput /
+/// HAPVideoInput): `delivered` is what the pixels are.
 class GateInput : public InputSource {
 public:
     GateInput(double fps, int64_t total) : fps_(fps), total_(total) {}
@@ -80,11 +83,13 @@ public:
     void close() override {}
     bool seek(int64_t) override { return true; }
     bool readFrame(int64_t frameNumber, FrameBuffer&) override {
-        if (fail) return false;
+        if (fail) return holdOnMiss && delivered >= 0;
         last = frameNumber;
+        delivered = frameNumber;
         ++loads;
         return true;
     }
+    int64_t deliveredFrame(int64_t) const override { return delivered; }
     FrameInfo getFrameInfo() const override {
         FrameInfo info;
         info.width = 1920;
@@ -99,8 +104,10 @@ public:
     bool supportsDirectGPUTexture() const override { return false; }
     DecodeBackend getOptimalBackend() const override { return DecodeBackend::CPU_SOFTWARE; }
     int64_t last = -1;
+    int64_t delivered = -1;
     int64_t loads = 0;
     bool fail = false;
+    bool holdOnMiss = false;
 private:
     double fps_;
     int64_t total_;
@@ -116,6 +123,10 @@ struct Fixture {
     std::vector<int64_t> msc;
     std::vector<bool> valid;
     std::vector<int64_t> frames;
+    bool hasOffset = false;                // 'O' line (va_res_*): the engine offset and its split
+    int64_t offset = 0;
+    int64_t whole = 0;
+    double phaseMs = 0.0;
     bool loaded = false;
 };
 
@@ -153,6 +164,9 @@ Fixture loadFixture(const std::string& sub, const std::string& name) {
             double p; int64_t m; int v; int64_t fr;
             s >> p >> m >> v >> fr;
             f.pos.push_back(p); f.msc.push_back(m); f.valid.push_back(v != 0); f.frames.push_back(fr);
+        } else if (tag == 'O') {
+            s >> f.offset >> f.whole >> f.phaseMs;
+            f.hasOffset = true;
         }
     }
     f.loaded = !f.pos.empty();
@@ -205,7 +219,7 @@ struct Rig {
     bool visible() const { return layer->properties().visible; }
 };
 
-Rig makeRig(const Fixture& f, int64_t S, int64_t totalFrames, bool wrap) {
+Rig makeRigOffset(const Fixture& f, int64_t mtcOffset, int64_t totalFrames, bool wrap) {
     Rig r;
     r.fx = &f;
     r.clock = std::make_unique<GateClock>();
@@ -216,9 +230,13 @@ Rig makeRig(const Fixture& f, int64_t S, int64_t totalFrames, bool wrap) {
     r.layer->setSyncSource(std::make_unique<FramerateConverterSyncSource>(r.clock.get(), r.input));
     r.layer->setCueId("visible-at-test-cue");
     r.layer->setWraparound(wrap);
-    r.layer->setTimeOffset(mtcOffsetFor(f.fps, S));
+    r.layer->setTimeOffset(mtcOffset);
     r.layer->setMtcFollow(true);
     return r;
+}
+
+Rig makeRig(const Fixture& f, int64_t S, int64_t totalFrames, bool wrap) {
+    return makeRigOffset(f, mtcOffsetFor(f.fps, S), totalFrames, wrap);
 }
 
 /// The oracle: the first poll whose model frame reaches S (-1: none in the fixture).
@@ -610,6 +628,239 @@ bool test_VisibleAt_WithoutCommand_TodaysBehaviour() {
     return true;
 }
 
+// ---- review fixes (2026-11-10) ------------------------------------------------------------------------------------
+
+// X4: the five residues of a 30 fps start on the 25 fps MTC grid (1amfwm7h924's offset split: whole frames + a phase
+// the converter adds to its clock), at 60 and 50 Hz. Expectations: the model run on the phase-shifted clock
+// (gen_fixtures.py, va_res_*); the reveal is the first poll whose model frame + whole >= 0, showing frame 0.
+bool test_VisibleAt_Onset_30p_OffsetResidues() {
+    TickScope scope;
+    int residuesSeen[5] = {0, 0, 0, 0, 0};
+    for (const char* tag : {"30at60_", "30at50_"}) {
+        const int first = std::string(tag) == "30at60_" ? 290 : 310;
+        for (int n = first; n < first + 10; ++n) {
+            const Fixture f = loadFixture("visible_at", std::string("va_res_") + tag + std::to_string(n));
+            TEST_ASSERT(f.loaded);
+            TEST_ASSERT(f.hasOffset);
+            ++residuesSeen[(-f.offset) % 5];
+            int64_t onset = -1;
+            for (size_t i = 0; i < f.frames.size(); ++i) {
+                if (f.frames[i] + f.whole >= 0) { onset = static_cast<int64_t>(i); break; }
+            }
+            TEST_ASSERT(onset > 0);
+            Rig r = makeRigOffset(f, f.offset, 1000000000LL, false);
+            r.layer->setVisibleAt(true);
+            int64_t revealedAt = -1;
+            const size_t end = std::min(f.pos.size(), static_cast<size_t>(onset) + 6);
+            while (r.next < end) {
+                const size_t i = r.step();
+                if (revealedAt < 0 && r.visible()) {
+                    revealedAt = static_cast<int64_t>(i);
+                    TEST_ASSERT_EQ(r.layer->getCurrentFrame(), static_cast<int64_t>(0));
+                }
+                if (revealedAt >= 0) {
+                    TEST_ASSERT_EQ(r.layer->getCurrentFrame(), f.frames[i] + f.whole);   // the phased replay follows the model
+                }
+            }
+            if (revealedAt != onset) {
+                std::cerr << "  va_res_" << tag << n << " (phase " << f.phaseMs << " ms): revealed at poll " << revealedAt
+                          << ", model " << onset << "\n";
+            }
+            TEST_ASSERT_EQ(revealedAt, onset);
+        }
+    }
+    for (int k = 0; k < 5; ++k) TEST_ASSERT(residuesSeen[k] > 0);
+    return true;
+}
+
+// X1: a decode miss that reports success while holding the previous frame (the async queue's hold) does not reveal: on
+// a wrap layer the held frame is the file's tail. The next poll that delivers the chosen frame does.
+bool test_VisibleAt_HeldFrameOnMiss_DoesNotReveal() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    const int64_t S = f.frames[0] + 25;
+    const int64_t onset = oracleOnset(f, S);
+    Rig r = makeRig(f, S, 100, true);
+    r.input->holdOnMiss = true;
+    r.layer->setVisibleAt(true);
+    while (r.next < static_cast<size_t>(onset)) r.step();
+    const int64_t tail = r.input->delivered;
+    TEST_ASSERT(tail >= 50);
+    r.input->fail = true;
+    r.step();                                   // the onset poll: "loaded" (currentFrame 0), pixels still the tail
+    TEST_ASSERT_EQ(r.layer->getCurrentFrame(), static_cast<int64_t>(0));
+    TEST_ASSERT_EQ(r.input->delivered, tail);
+    TEST_ASSERT_FALSE(r.layer->playback().contentStarted());
+    TEST_ASSERT_FALSE(r.visible());
+    TEST_ASSERT_TRUE(r.layer->visibleAtPending());
+    // still held on the next poll (same frame 0 chosen, no new load attempted? the frame number did not change, so the
+    // layer does not reload): the gate keeps waiting until a frame is really delivered
+    r.input->fail = false;
+    size_t i = r.step();
+    while (!r.visible() && r.next < static_cast<size_t>(onset) + 6) i = r.step();
+    TEST_ASSERT_TRUE(r.visible());
+    TEST_ASSERT_EQ(r.input->delivered, r.layer->getCurrentFrame());
+    TEST_ASSERT_EQ(r.layer->getCurrentFrame(), f.frames[i] - S);
+    TEST_ASSERT(r.layer->getCurrentFrame() < 50);
+    return true;
+}
+
+// X1, shared decoder: a secondary layer shows the driver's cached frame. When the driver's decode holds the tail, the
+// secondary does not reveal either.
+bool test_VisibleAt_SharedSecondary_DriverHold_DoesNotReveal() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    const int64_t S = f.frames[0] + 25;
+    const int64_t onset = oracleOnset(f, S);
+    auto clock = std::make_unique<GateClock>();
+    auto input = std::make_shared<GateInput>(f.fps, 100);
+    input->holdOnMiss = true;
+    std::shared_ptr<SyncSource> sync = std::make_shared<FramerateConverterSyncSource>(clock.get(), input.get());
+    VideoLayer driver, secondary;
+    driver.playback().setInputSource(input, true, true);
+    driver.playback().setSyncSource(sync);
+    secondary.playback().setInputSource(input, true, false);
+    secondary.playback().setSyncSource(sync);
+    for (VideoLayer* l : {&driver, &secondary}) {
+        l->setCueId(l == &driver ? "drv" : "sec");
+        l->setWraparound(true);
+        l->setTimeOffset(-S);
+        l->setMtcFollow(true);
+        l->setVisibleAt(true);
+    }
+    auto step = [&](size_t i) {
+        clock->valueMs = f.pos[i] * 1000.0 / f.fps;
+        publishForTarget(f.msc[i], f.periodNs, f.valid[i]);
+        driver.update();                        // the driver first (update priority 0), as LayerManager orders them
+        secondary.update();
+    };
+    size_t i = 0;
+    for (; i < static_cast<size_t>(onset); ++i) step(i);
+    TEST_ASSERT_FALSE(driver.properties().visible);
+    TEST_ASSERT_FALSE(secondary.properties().visible);
+    input->fail = true;
+    step(i++);
+    TEST_ASSERT_FALSE(driver.properties().visible);
+    TEST_ASSERT_FALSE(secondary.properties().visible);
+    input->fail = false;
+    for (; i < static_cast<size_t>(onset) + 6 && !secondary.properties().visible; ++i) step(i);
+    TEST_ASSERT_TRUE(driver.properties().visible);
+    TEST_ASSERT_TRUE(secondary.properties().visible);
+    TEST_ASSERT(secondary.getCurrentFrame() < 50);
+    return true;
+}
+
+// S1/S4: a pending gate on a layer that has no sync frame (not following, or MTC gives none) cannot fire; the engine's
+// healer /visible 1 then shows the layer at once, as today (awaitingFrame), instead of being swallowed.
+bool test_VisibleAt_PendingNoMtcFollow_HealerFlips() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    const int64_t S = f.frames[0] + 25;
+    Rig r = makeRig(f, S, 1000000000LL, false);
+    r.layer->setMtcFollow(false);
+    r.layer->setVisibleAt(true);
+    while (r.next < static_cast<size_t>(oracleOnset(f, S)) + 10) {
+        r.step();
+        TEST_ASSERT_FALSE(r.visible());         // never fires: no poll
+    }
+    TEST_ASSERT_TRUE(r.layer->visibleAtPending());
+    r.layer->setVisible(true);                  // the healer
+    TEST_ASSERT_TRUE(r.visible());
+    TEST_ASSERT_TRUE(r.layer->properties().awaitingFrame);   // today's 0->1 semantics
+    TEST_ASSERT_FALSE(r.layer->visibleAtPending());
+    return true;
+}
+
+bool test_VisibleAt_PendingNoSyncFrame_HealerFlips() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    const int64_t S = f.frames[0] + 25;
+    Rig r = makeRig(f, S, 1000000000LL, false);
+    r.clock->noFrame = true;
+    r.layer->setVisibleAt(true);
+    for (int k = 0; k < 20; ++k) {
+        r.step();
+        TEST_ASSERT_FALSE(r.visible());
+        TEST_ASSERT_FALSE(r.layer->playback().hasContentFrame());
+    }
+    r.layer->setVisible(true);
+    TEST_ASSERT_TRUE(r.visible());
+    TEST_ASSERT_FALSE(r.layer->visibleAtPending());
+    return true;
+}
+
+// S1: a gate that stays pending longer than the bound says so, once per gate.
+bool test_VisibleAt_PendingTooLong_WarnsOnce() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    TEST_ASSERT_EQ(VideoLayer::kVisibleAtPendingWarnMs, static_cast<int64_t>(6000));
+    const int64_t S = f.frames[0] + 25;
+    Rig r = makeRig(f, S, 1000000000LL, false);
+    r.layer->setMtcFollow(false);
+    r.layer->setVisibleAtWarnAfterMsForTesting(0);
+    r.layer->setVisibleAt(true);
+    TEST_ASSERT_EQ(r.layer->visibleAtPendingWarnings(), 0);
+    r.step();
+    TEST_ASSERT_EQ(r.layer->visibleAtPendingWarnings(), 1);
+    r.step();
+    r.step();
+    TEST_ASSERT_EQ(r.layer->visibleAtPendingWarnings(), 1);  // once per gate
+    r.layer->setVisibleAt(false);
+    r.layer->setVisibleAt(true);                // a new gate may warn again
+    r.step();
+    TEST_ASSERT_EQ(r.layer->visibleAtPendingWarnings(), 2);
+    return true;
+}
+
+// S4: the gate reads the raw frame before the clamp: a layer parked at frame 0 by the clamp before its start has
+// currentFrame 0 but contentStarted() false and a negative contentFrame().
+bool test_VisibleAt_ContentFrameReadBeforeClamp() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    const int64_t S = f.frames[0] + 25;
+    const int64_t onset = oracleOnset(f, S);
+    Rig r = makeRig(f, S, 100, false);
+    while (r.next < static_cast<size_t>(onset)) {
+        r.step();
+        TEST_ASSERT_EQ(r.layer->getCurrentFrame(), static_cast<int64_t>(0));
+        TEST_ASSERT(r.layer->playback().contentFrame() < 0);
+        TEST_ASSERT_FALSE(r.layer->playback().contentStarted());
+    }
+    r.step();
+    TEST_ASSERT_TRUE(r.layer->playback().contentStarted());
+    TEST_ASSERT_EQ(r.layer->playback().contentFrame(), static_cast<int64_t>(0));
+    return true;
+}
+
+// S3: a layer shown by /visible 1 after a gate reveal and a hide is not the gate's any more: visible_at 0 leaves it.
+bool test_VisibleAt_RevealedFlagClearedByLaterShow() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    const int64_t S = f.frames[0] + 25;
+    const int64_t onset = oracleOnset(f, S);
+    Rig r = makeRig(f, S, 1000000000LL, false);
+    r.layer->setVisibleAt(true);
+    while (r.next <= static_cast<size_t>(onset)) r.step();
+    TEST_ASSERT_TRUE(r.visible());
+    r.layer->properties().visible = false;      // a hide that bypasses setVisible
+    r.layer->setVisible(true);                  // then a plain show
+    TEST_ASSERT_TRUE(r.layer->setVisibleAt(false) == VideoLayer::VisibleAtOutcome::Ignored);
+    TEST_ASSERT_TRUE(r.visible());
+    // and arming a new gate clears it too
+    r.layer->properties().visible = false;
+    TEST_ASSERT_TRUE(r.layer->setVisibleAt(true) == VideoLayer::VisibleAtOutcome::Armed);
+    TEST_ASSERT_TRUE(r.layer->setVisibleAt(false) == VideoLayer::VisibleAtOutcome::Dropped);
+    TEST_ASSERT_TRUE(r.layer->setVisibleAt(false) == VideoLayer::VisibleAtOutcome::Ignored);
+    return true;
+}
+
 // ---- the journal lines and the caps token ---------------------------------------------------------------------------
 
 bool test_VisibleAt_JournalContract() {
@@ -621,6 +872,13 @@ bool test_VisibleAt_JournalContract() {
                    std::string("layer abc_0 visible_at cancelled before the reveal"));
     TEST_ASSERT_EQ(journal::visibleAtCancelIgnored("abc_0"),
                    std::string("layer abc_0 visible_at 0 ignored: no reveal pending or done"));
+    TEST_ASSERT_EQ(journal::visibleAtDroppedByVisible0("abc_0"),
+                   std::string("layer abc_0 visible_at dropped by visible 0"));
+    TEST_ASSERT_EQ(journal::visibleAtHealerShows("abc_0"),
+                   std::string("layer abc_0 visible_at pending without an MTC position: visible 1 shows it now"));
+    TEST_ASSERT_EQ(journal::visibleAtPendingLong("abc_0", 6012, true, false),
+                   std::string("layer abc_0 visible_at pending for 6012 ms without a frame at content time >= 0"
+                               " (following 1, MTC position 0)"));
     return true;
 }
 

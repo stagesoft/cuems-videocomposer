@@ -304,6 +304,14 @@ extern bool test_VisibleAt_Visible0WhilePending_DropsTheGate();
 extern bool test_VisibleAt_WithoutCommand_TodaysBehaviour();
 extern bool test_VisibleAt_JournalContract();
 extern bool test_VisibleAt_CapsToken();
+extern bool test_VisibleAt_Onset_30p_OffsetResidues();
+extern bool test_VisibleAt_HeldFrameOnMiss_DoesNotReveal();
+extern bool test_VisibleAt_SharedSecondary_DriverHold_DoesNotReveal();
+extern bool test_VisibleAt_PendingNoMtcFollow_HealerFlips();
+extern bool test_VisibleAt_PendingNoSyncFrame_HealerFlips();
+extern bool test_VisibleAt_PendingTooLong_WarnsOnce();
+extern bool test_VisibleAt_ContentFrameReadBeforeClamp();
+extern bool test_VisibleAt_RevealedFlagClearedByLaterShow();
 extern bool test_MtcHold_FrozenHeadNeverHolds();
 extern bool test_MtcHold_RuleEdges();
 #if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
@@ -580,6 +588,14 @@ int main() {
     TestFramework::instance().addTest("VisibleAt_WithoutCommand_TodaysBehaviour", test_VisibleAt_WithoutCommand_TodaysBehaviour);
     TestFramework::instance().addTest("VisibleAt_JournalContract", test_VisibleAt_JournalContract);
     TestFramework::instance().addTest("VisibleAt_CapsToken", test_VisibleAt_CapsToken);
+    TestFramework::instance().addTest("VisibleAt_Onset_30p_OffsetResidues", test_VisibleAt_Onset_30p_OffsetResidues);
+    TestFramework::instance().addTest("VisibleAt_HeldFrameOnMiss_DoesNotReveal", test_VisibleAt_HeldFrameOnMiss_DoesNotReveal);
+    TestFramework::instance().addTest("VisibleAt_SharedSecondary_DriverHold_DoesNotReveal", test_VisibleAt_SharedSecondary_DriverHold_DoesNotReveal);
+    TestFramework::instance().addTest("VisibleAt_PendingNoMtcFollow_HealerFlips", test_VisibleAt_PendingNoMtcFollow_HealerFlips);
+    TestFramework::instance().addTest("VisibleAt_PendingNoSyncFrame_HealerFlips", test_VisibleAt_PendingNoSyncFrame_HealerFlips);
+    TestFramework::instance().addTest("VisibleAt_PendingTooLong_WarnsOnce", test_VisibleAt_PendingTooLong_WarnsOnce);
+    TestFramework::instance().addTest("VisibleAt_ContentFrameReadBeforeClamp", test_VisibleAt_ContentFrameReadBeforeClamp);
+    TestFramework::instance().addTest("VisibleAt_RevealedFlagClearedByLaterShow", test_VisibleAt_RevealedFlagClearedByLaterShow);
     TestFramework::instance().addTest("MtcHold_FrozenHeadNeverHolds", test_MtcHold_FrozenHeadNeverHolds);
     TestFramework::instance().addTest("MtcHold_RuleEdges", test_MtcHold_RuleEdges);
 #if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
