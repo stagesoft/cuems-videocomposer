@@ -179,9 +179,12 @@ number of vsyncs. Plan: `cuems-RELATIONS/Plans/2026-11-06-refresh-rule-and-warni
   cuems-common "display.conf authoring"), then restart the VC **and** `cuems-node-engine` with nothing loaded
   (869f8jn34). `findMode` takes the closest rate the sink offers, so a pin is a request, not a guarantee: read the
   journal.
-- **How visible a near miss is** (and so whether the layer-load line below is a WARNING or an INFO): **set from the
-  1amfwm7gpz7 eye test** (ClickUp 1amfwm7gzag; the Acer at ~4.8 s is its control). Until then
-  `cadence::kNearIntegerWarnIntervalS = 60` s is a build default, not a decision.
+- **How visible a near miss is** (and so whether the layer-load line below is a WARNING or an INFO): **decided
+  from the 1amfwm7gpz7 eye test (Ion, 2026-11-10): `cadence::kNearIntegerWarnIntervalS = 60` s.** On panels a
+  single-vsync correction was seen every 4.8 s (Acer 59.79 Hz) and every 16.2 s (LG at 59.94 Hz, 30p); at 60.000 Hz
+  (one every few minutes) it was not. A projector at 59.95 Hz hid it because it re-times the signal, so the
+  59.94/59.95 class (the 1920x1200 "60" trap) is a WARNING. Record: cuems-RELATIONS
+  `baselines/test3-saltitos-20261104/RESULTS.md`, "D2 of 1amfwm7gq3y, measured".
 
 Journal lines (grep `cadence: cue=`, `not available at`, `near-equal refresh`):
 

@@ -45,8 +45,9 @@ constexpr double kDropTol = 0.98;
 /// the correction it would cause is the crystal's, not the mode's (e.g. 29.97p on a 148.352 MHz "59.94" mode).
 constexpr double kExactRelTol = 10e-6;
 /// A near-integer ratio is a WARNING when its correction interval is shorter than this, INFO otherwise.
-/// Ion 2026-11-09 (plan §7 D2): the value is set from the eye test's verdicts on how visible a single-vsync
-/// correction is (the Acer 59.79 Hz control every ~4.8 s, a 59.95 Hz output every ~20 s); 60 s is the build default.
+/// D2, decided by Ion 2026-11-10 from the eye test: 60 s. A single-vsync correction was seen on panels every 4.8 s
+/// (Acer 59.79 Hz) and every 16.2 s (LG at 59.94 Hz, 30p), not at 60.000 Hz (one every few minutes). A projector at
+/// 59.95 Hz hid it (it re-times the signal), so the 59.94/59.95 class stays a WARNING.
 constexpr double kNearIntegerWarnIntervalS = 60.0;
 
 enum class Kind {
