@@ -118,6 +118,14 @@ public:
     virtual int64_t getCurrentFrame() const = 0;
 
     /**
+     * The frame whose pixels a successful read of `requested` left in the
+     * caller's buffer (869feynrj visible_at, review X1). A read that reports
+     * success while holding an older frame (an async decode-queue miss) says
+     * so here; by default a successful read delivered what was asked.
+     */
+    virtual int64_t deliveredFrame(int64_t requested) const { return requested; }
+
+    /**
      * Codec types supported by the system
      */
     enum class CodecType {

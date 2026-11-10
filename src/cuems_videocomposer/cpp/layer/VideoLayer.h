@@ -196,6 +196,15 @@ public:
     VisibleAtOutcome setVisibleAt(bool on);
     bool visibleAtPending() const { return visibleAtPending_; }
 
+    // A gate still pending this long logs one WARNING (journal::
+    // visibleAtPendingLong). The engine arms it at start - F (~0.1 s) and sets
+    // video layers up at most ~5 s before their start (run_videoCue's
+    // run-ahead), so past 6 s the start is not coming: /mtcfollow lost, MTC
+    // stopped, or the offset never placed.
+    static constexpr int64_t kVisibleAtPendingWarnMs = 6000;
+    void setVisibleAtWarnAfterMsForTesting(int64_t ms) { visibleAtWarnAfterMs_ = ms; }
+    int visibleAtPendingWarnings() const { return visibleAtPendingWarnings_; }
+
 private:
     struct OutputFitState {
         bool active = false;
@@ -216,6 +225,10 @@ private:
     bool visibleAtPending_ = false;
     bool revealedByGate_ = false;     // visible because the gate fired
     int64_t revealedAtMs_ = 0;        // steady clock, for the cancel line
+    int64_t visibleAtArmedMs_ = 0;    // steady clock, for the pending WARNING
+    bool visibleAtWarned_ = false;    // once per gate
+    int64_t visibleAtWarnAfterMs_ = kVisibleAtPendingWarnMs;
+    int visibleAtPendingWarnings_ = 0;
     std::string logTag() const;
 
     // Composed components

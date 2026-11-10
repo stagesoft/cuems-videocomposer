@@ -126,6 +126,7 @@ bool LayerPlayback::seek(int64_t frameNumber) {
 
 void LayerPlayback::update() {
     contentStarted_ = false;
+    contentFrame_ = INT64_MIN;
     if (!isReady()) {
         return;
     }
@@ -593,7 +594,10 @@ void LayerPlayback::updateFromSyncSource() {
                 }
             }
         }
-        contentStarted_ = contentFrame_ >= 0 && currentFrame_ == adjustedFrame;
+        // ...and its pixels are in the buffer: a decode miss may report success holding an older frame (X1)
+        contentStarted_ = contentFrame_ >= 0 && currentFrame_ == adjustedFrame &&
+                          inputSource_->deliveredFrame(adjustedFrame) == adjustedFrame &&
+                          (!(isSharedLayer_ && !isDecodeDriver_) || inputSource_->getCachedFrameNumber() == adjustedFrame);
     } else {
         // No valid sync frame yet (MTC not received or not rolling)
         // Show frame 0 as fallback so video is visible while waiting for MTC

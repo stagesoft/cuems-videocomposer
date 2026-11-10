@@ -219,6 +219,23 @@ inline std::string visibleAtCancelIgnored(const std::string& layerId) {
     return "layer " + layerId + " visible_at 0 ignored: no reveal pending or done";
 }
 
+inline std::string visibleAtDroppedByVisible0(const std::string& layerId) {
+    return "layer " + layerId + " visible_at dropped by visible 0";
+}
+
+// The engine's healer /visible 1 on a pending gate that cannot fire (no MTC
+// position: not following, no MTC, offset not placed): shown at once, as
+// before visible_at.
+inline std::string visibleAtHealerShows(const std::string& layerId) {
+    return "layer " + layerId + " visible_at pending without an MTC position: visible 1 shows it now";
+}
+
+inline std::string visibleAtPendingLong(const std::string& layerId, long long ms, bool following, bool position) {
+    return "layer " + layerId + " visible_at pending for " + std::to_string(ms) +
+           " ms without a frame at content time >= 0 (following " + (following ? "1" : "0") +
+           ", MTC position " + (position ? "1" : "0") + ")";
+}
+
 }  // namespace journal
 }  // namespace videocomposer
 

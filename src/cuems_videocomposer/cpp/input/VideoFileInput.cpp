@@ -290,6 +290,7 @@ bool VideoFileInput::open(const std::string& source) {
 
     ready_ = true;
     currentFrame_ = -1;
+    lastTransferredFrame_ = -1;
     
     // ------------------------------------------------------------------
     // Decode-path failure ladder
@@ -425,6 +426,7 @@ void VideoFileInput::close() {
     currentFile_.clear();
     ready_ = false;
     currentFrame_ = -1;
+    lastTransferredFrame_ = -1;
     frameInfo_ = {};
     
     // NOTE: Don't reset C globals here. In multi-layer scenarios,
@@ -1947,6 +1949,7 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
             // Got frame from queue - transfer to GPU texture
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
             if (transferHardwareFrameToGPU(queuedFrame, textureBuffer, true)) {  // skipSync: already synced by async queue
+                lastTransferredFrame_ = frameNumber;   // getFrame() matches the number exactly (869feynrj X1)
                 return true;
             }
             LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;
@@ -2289,6 +2292,7 @@ void VideoFileInput::cleanup() {
     lastDecodedHWFrame_ = -1;
     scanComplete_ = false;
     currentFrame_ = -1;
+    lastTransferredFrame_ = -1;
     useHardwareDecoding_ = false;
     hwDecoderType_ = HardwareDecoder::Type::NONE;
 }

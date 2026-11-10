@@ -77,6 +77,7 @@ void VideoLayer::setInputSource(std::unique_ptr<InputSource> input) {
     
     // Invalidate frame buffer cache
     frameBufferCacheValid_ = false;
+    revealedByGate_ = false;  // a re-armed layer is not the old reveal's (869feynrj S3)
 
     // The layer may already have been told to follow MTC before this source
     // existed; now that it does, the guard can decide.
@@ -149,6 +150,11 @@ void VideoLayer::update() {
         const long long ms = fps > 0.0
             ? std::llround(static_cast<double>(playback_.contentFrame()) * 1000.0 / fps) : 0;
         LOG_INFO << journal::visibleAtContent(logTag(), ms);
+    } else if (visibleAtPending_ && !visibleAtWarned_ && steadyMs() - visibleAtArmedMs_ >= visibleAtWarnAfterMs_) {
+        visibleAtWarned_ = true;
+        ++visibleAtPendingWarnings_;
+        LOG_WARNING << journal::visibleAtPendingLong(logTag(), steadyMs() - visibleAtArmedMs_,
+                                                     playback_.getMtcFollow(), playback_.hasContentFrame());
     }
 
     // Clear awaitingFrame once a fresh frame has been loaded after
@@ -527,20 +533,29 @@ std::string VideoLayer::logTag() const {
 void VideoLayer::setVisible(bool visible) {
     auto& props = display_.getProperties();
     if (visibleAtPending_) {
-        if (visible) {
+        if (visible && playback_.hasContentFrame()) {
             return;  // covered by the pending gate (N12)
         }
+        // A 1 on a gate that cannot fire (no MTC position: not following, no
+        // MTC, offset not placed) is the engine's healer: show it as before
+        // visible_at. A 0 drops the gate.
         visibleAtPending_ = false;
-        LOG_INFO << "layer " << logTag() << " visible_at dropped by visible 0";
+        if (visible) {
+            LOG_INFO << journal::visibleAtHealerShows(logTag());
+        } else {
+            LOG_INFO << journal::visibleAtDroppedByVisible0(logTag());
+        }
     }
     if (!visible) {
         revealedByGate_ = false;
     }
     // When transitioning 0→1, suppress rendering until a fresh frame
     // is loaded by updateFromSyncSource. This prevents a stale frame
-    // from previous playback from flashing on screen.
+    // from previous playback from flashing on screen. A plain show is
+    // not the gate's (S3).
     if (visible && !props.visible) {
         props.awaitingFrame = true;
+        revealedByGate_ = false;
     }
     props.visible = visible;
 }
@@ -552,6 +567,9 @@ VideoLayer::VisibleAtOutcome VideoLayer::setVisibleAt(bool on) {
             return VisibleAtOutcome::Unchanged;
         }
         visibleAtPending_ = true;
+        revealedByGate_ = false;
+        visibleAtArmedMs_ = steadyMs();
+        visibleAtWarned_ = false;
         props.awaitingFrame = false;
         return VisibleAtOutcome::Armed;
     }

@@ -81,6 +81,9 @@ public:
         return frameCount_ > 0 ? frameCount_ : -1;
     }
     int64_t getCurrentFrame() const override;
+    // 869feynrj X1: currentFrame_ moves only when a frame is decoded/uploaded
+    // (and on seek); an async miss holds the old texture and reports success.
+    int64_t deliveredFrame(int64_t) const override { return currentFrame_; }
     CodecType detectCodec() const override;
     bool supportsDirectGPUTexture() const override;
     DecodeBackend getOptimalBackend() const override;
