@@ -29,6 +29,17 @@ The engine→VC protocol is documented once in the cuems-RELATIONS CLAUDE.md ("V
 
 `LayerPlayback` clamps an overshooting media frame to `totalFrames-1` while `wraparound_` is false, and wraps (`% totalFrames`) once it's true. `wraparound_` is enabled by the engine's `/loop=1` — for infinite loops the engine now sends `/loop` **before** `/mtcfollow` (see field notes).
 
+### `visible_at`: the self-gated reveal (869feynrj, caps token `visible_at`)
+
+Plan `cuems-RELATIONS/Plans/2026-11-03-audio-first-pass-head-869feynrj.md` §4.6. `/videocomposer/layer/<id>/visible_at 1` keeps the layer invisible and makes it visible **in the `update()` whose poll gives a raw content frame ≥ 0** (offset applied, *before* the loop period and the clamp: after them a pre-start position is frame 0 or the file's tail) **with that frame loaded**. The flip and frame 0 thus go in one submission and land on the vblank the cadence engine picked for content time 0 (tgt of the two-deep loop); there is no second clock read. A decode miss on that poll defers the reveal to the poll that loads its frame (never the tail, never a stale frame). It never goes through `awaitingFrame` (that waits for a frame *change* and would show frame 1 on a layer parked at 0).
+
+- `visible_at 0`: drops a pending reveal, or hides a layer the gate already revealed (the engine's cancel is final, D5). Nothing pending or gate-revealed: ignored, logged.
+- `/visible 1` while the gate is pending is covered by it (no early flip, no `awaitingFrame`); after the reveal it changes nothing. `/visible 0` drops a pending gate. Without `visible_at`, `/visible` is unchanged.
+- Code: `VideoLayer::setVisibleAt` / `setVisible` and the gate in `VideoLayer::update()`; `LayerPlayback` only exposes `contentStarted()` / `contentFrame()`.
+- **Journal lines are a contract** (`remote/JournalContract.h`; the engine's rig rows grep them): `layer <id> visible at content <ms> ms` per reveal (0 = frame 0), `layer <id> visible_at cancelled after <ms> ms visible` (WARNING), `… visible_at cancelled before the reveal`, `… visible_at 0 ignored: no reveal pending or done`.
+- Limits: coupled pacing, one gate per layer (not per output). In the drop regime (content faster than the output) the cadence may never present frame 0; the reveal then shows frame 1 and logs its content time.
+- Tests: `test/TestVisibleAt.cpp` replays the model fixtures (`test/fixtures/cadence/`, plus 25/30 Hz outputs in `test/fixtures/visible_at/`, made by its `gen_fixtures.py` from the same model).
+
 ## NDI input and the montaje preview (from deb 0.1.2-7)
 
 ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-preview-montajes.md`. The operator tool lives on the controller (power-bridge `cuems-ndi-preview`, `/ndi/*`); the VC only provides these:
