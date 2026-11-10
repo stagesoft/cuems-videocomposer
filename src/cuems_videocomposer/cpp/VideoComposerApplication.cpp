@@ -45,6 +45,8 @@
 #include "sync/FramerateConverterSyncSource.h"
 #include "sync/MtcReceiverMIDIDriver.h"  // MtcReceiver::resetWrapOffset() in resetAll()
 #include "sync/DayAlign.h"
+#include "sync/CadenceAdvice.h"
+#include "sync/PresentTick.h"
 #include "layer/LayerManager.h"
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
@@ -71,6 +73,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 
 // The Debian package version, passed by debian/rules (see CMakeLists.txt).
 // Logged at startup so a tool reading the journal knows which build it talks to.
@@ -997,7 +1000,8 @@ std::unique_ptr<SyncSource> VideoComposerApplication::createLayerSyncSource(Inpu
     return std::make_unique<FramerateConverterSyncSource>(globalSyncSource_.get(), inputSource);
 }
 
-void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource) {
+void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource,
+                                                         const std::string& cueId, const std::string& filepath) {
     if (!layer || !inputSource) {
         return;
     }
@@ -1009,6 +1013,9 @@ void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std:
     // All layers share the same global MTC sync source, but each has its own framerate converter
     auto syncSource = createLayerSyncSource(layer->getInputSource());
     if (syncSource) {
+        if (auto* converter = dynamic_cast<FramerateConverterSyncSource*>(syncSource.get())) {
+            converter->setCueId(cueId);
+        }
         layer->setSyncSource(std::move(syncSource));
     }
     
@@ -1020,6 +1027,45 @@ void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std:
         props.height = info.height;
     }
 
+    logCadenceAdvice(layer, cueId, filepath);
+}
+
+void VideoComposerApplication::logCadenceAdvice(VideoLayer* layer, const std::string& cueId,
+                                                const std::string& filepath) {
+    if (!layer || !layer->getInputSource() || layer->getInputSource()->isLiveStream()) {
+        return;   // a live source has no file cadence to advise on
+    }
+    const double fps = layer->isReady() ? layer->getFrameInfo().framerate : 0.0;
+    // The period the cadence engine will pace this layer on: the pacing CRTC's tick (coupled DRM path). Without a
+    // tick (legacy smoother, per-surface pacing, X11, headless, or before the first flip) the slowest enabled
+    // output's mode, which is what paces a coupled commit.
+    int64_t periodNs = currentPresentTick().periodNs;
+    std::string source = "tick";
+    if (periodNs <= 0 && displayBackend_) {
+        double minHz = 0.0;
+        for (const auto& out : displayBackend_->getOutputs()) {
+            if (out.connected && out.enabled && out.refreshRate > 0.0 && (minHz <= 0.0 || out.refreshRate < minHz)) {
+                minHz = out.refreshRate;
+            }
+        }
+        if (minHz > 0.0) {
+            periodNs = static_cast<int64_t>(std::llround(1e9 / minHz));
+            source = "output mode";
+        }
+    }
+    const cadence::Advice advice = cadence::advise(fps, periodNs);
+    const std::string file = filepath.empty() ? std::string("-") : filepath.substr(filepath.find_last_of('/') + 1);
+    std::ostringstream line;
+    line << "cadence: cue=" << (cueId.empty() ? std::string("-") : cueId) << " file=" << file << " "
+         << advice.text;
+    if (advice.kind != cadence::Kind::Unknown) {
+        line << " [" << source << "]";
+    }
+    if (advice.warning) {
+        LOG_WARNING << line.str();
+    } else {
+        LOG_INFO << line.str();
+    }
 }
 
 bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, const std::string& filepath) {
@@ -1064,7 +1110,7 @@ bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, con
     
     VideoLayer* layerPtr = layerManager_->getLayerByCueId(cueId);
     if (layerPtr) {
-        setupLayerWithInputSource(layerPtr, std::move(inputSource));
+        setupLayerWithInputSource(layerPtr, std::move(inputSource), cueId, filepath);
     }
     
     LOG_INFO << "Created layer with file: " << filepath << " (cue ID: " << cueId << ")";
@@ -1186,7 +1232,7 @@ bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const
         return false;
     }
     
-    setupLayerWithInputSource(layer, std::move(inputSource));
+    setupLayerWithInputSource(layer, std::move(inputSource), cueId, filepath);
     
     LOG_INFO << "Loaded file into layer: " << filepath << " (cue ID: " << cueId << ")";
     return true;
@@ -1292,7 +1338,7 @@ void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, con
     }
 
     // Setup layer with the loaded input source
-    setupLayerWithInputSource(layer, std::move(inputSource));
+    setupLayerWithInputSource(layer, std::move(inputSource), cueId, filepath);
     LOG_INFO << journal::asyncLoadComplete(filepath, cueId);
 
     // Resolve pending shared layers waiting for this driver

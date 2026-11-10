@@ -24,6 +24,8 @@
  */
 
 #include "DRMOutputManager.h"
+#include <vector>
+#include <sstream>
 #include "../../utils/Logger.h"
 
 #include <fcntl.h>
@@ -799,6 +801,58 @@ bool DRMOutputManager::refreshOutputs() {
     return changed;
 }
 
+namespace {
+
+double modeHz(const drmModeModeInfo* m) {
+    return (m && m->htotal && m->vtotal)
+        ? static_cast<double>(m->clock) * 1000.0 / (static_cast<double>(m->htotal) * static_cast<double>(m->vtotal))
+        : 0.0;
+}
+
+/// A pinned refresh differs from the mode's by more than this = not honoured (plan 1amfwm7gq3y §4.3). Tight on
+/// purpose: `refresh=60` answered with 59.95 (1920x1200 CVT-RB) or 59.94 (a TV) is the trap the warning exists for,
+/// and `refresh=59.94` against a 59.9402 Hz mode (integer-kHz clock) must still pass.
+constexpr double kRefreshHonouredTolHz = 0.005;
+
+/// The plan's WARNING: the operator pinned a refresh the sink does not offer at that resolution; findMode() took the
+/// closest one without a word, and the cadence of every layer on that output follows the mode, not the request.
+void warnIfRefreshNotHonoured(const std::string& name, drmModeConnector* conn, double asked,
+                              const drmModeModeInfo* mode, const char* via) {
+    if (!conn || !mode || asked <= 0.0) {
+        return;
+    }
+    const double got = modeHz(mode);
+    if (std::abs(got - asked) <= kRefreshHonouredTolHz) {
+        return;
+    }
+    std::vector<double> rates;
+    for (int i = 0; i < conn->count_modes; ++i) {
+        const drmModeModeInfo* m = &conn->modes[i];
+        if (m->hdisplay != mode->hdisplay || m->vdisplay != mode->vdisplay) {
+            continue;
+        }
+        const double hz = modeHz(m);
+        if (hz > 0.0 && std::none_of(rates.begin(), rates.end(),
+                                     [hz](double r) { return std::abs(r - hz) < 0.0005; })) {
+            rates.push_back(hz);
+        }
+    }
+    std::sort(rates.begin(), rates.end());
+    std::ostringstream offer;
+    offer << std::fixed << std::setprecision(3);
+    for (size_t i = 0; i < rates.size(); ++i) {
+        offer << (i ? ", " : "") << rates[i];
+    }
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(3) << "display: [output:" << name << "] refresh=" << asked
+         << " not available at " << mode->hdisplay << "x" << mode->vdisplay << ": using " << mode->hdisplay << "x"
+         << mode->vdisplay << "@" << got << " Hz; the sink offers " << offer.str() << " Hz at that resolution ("
+         << via << ")";
+    LOG_WARNING << line.str();
+}
+
+}  // namespace
+
 drmModeModeInfo* DRMOutputManager::findMode(drmModeConnector* conn, 
                                             int width, int height, 
                                             double refreshRate) {
@@ -863,6 +917,7 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
     
     LOG_INFO << "  Found mode: " << mode->hdisplay << "x" << mode->vdisplay 
              << " clock=" << mode->clock;
+    warnIfRefreshNotHonoured(conn->info.name, conn->connector, refreshRate, mode, "/output/mode");
     
     // Clamp connector max bpc to 8 — our framebuffers are 8-bit (AR24), and
     // 12 bpc on Intel TC-port DP makes link training intermittently fail
@@ -1040,6 +1095,7 @@ bool DRMOutputManager::applyResolutionModeToOutput(int index) {
             }
             conn->currentMode = *requested;
             conn->hasCurrentMode = true;
+            warnIfRefreshNotHonoured(conn->info.name, conn->connector, ovr->refreshRate, requested, "display.conf");
 
             LOG_INFO << "DRMOutputManager: " << conn->info.name
                      << " configured from display.conf to "
@@ -1431,15 +1487,25 @@ void DRMOutputManager::harmonizeRefreshRates() {
         double oldRate = conn.info.refreshRate;
 
         conn.currentMode = *bestCommonModes[j];
-        conn.info.refreshRate = bestCommonRate;
+        // The matched mode's own rate, never the first output's (plan 1amfwm7gq3y §4.3, D4): the match is within
+        // 0.5 Hz, so a 59.94 Hz TV next to a 60.000 Hz panel used to be reported (and later checked) as 60.
+        const double newRate = modeHz(bestCommonModes[j]);
+        conn.info.refreshRate = newRate > 0.0 ? newRate : bestCommonRate;
 
-        if (std::abs(oldRate - bestCommonRate) > 0.5) {
+        if (std::abs(oldRate - conn.info.refreshRate) > 0.005) {
             LOG_INFO << "DRMOutputManager: " << conn.info.name
-                     << " refresh rate harmonized: " << oldRate << "Hz -> " << bestCommonRate << "Hz";
+                     << " refresh rate harmonized: " << oldRate << "Hz -> " << conn.info.refreshRate << "Hz";
         }
     }
 
-    LOG_INFO << "DRMOutputManager: All outputs harmonized to " << bestCommonRate << "Hz";
+    std::ostringstream perOutput;
+    perOutput << std::fixed << std::setprecision(3);
+    for (size_t j = 0; j < connectedIndices.size(); ++j) {
+        const auto& conn = connectors_[connectedIndices[j]];
+        perOutput << (j ? ", " : "") << conn.info.name << "=" << conn.info.refreshRate;
+    }
+    LOG_INFO << "DRMOutputManager: All outputs harmonized to " << bestCommonRate << "Hz (" << perOutput.str()
+             << " Hz)";
 }
 
 uint32_t DRMOutputManager::getCrtcId(int index) const {

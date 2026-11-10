@@ -121,7 +121,8 @@ fixtures in `cuems-RELATIONS/baselines/test3-saltitos-20261104/model/` (the C++ 
   (debug only: ~4 lines per vsync). Healthy, 30p on 60 Hz with a looping clip: `holds{1}` = `corr-` + stalls,
   `holds{3}` = `corr+` + stalls, stalls = loop wraps, `reanchors=0`, no `anti-drift SNAP` after the GO.
   `cuems-RELATIONS/baselines/test3-saltitos-20261104/model/cadence_parse.py <journal>` judges a run against the
-  model's prediction.
+  model's prediction. The rule-1 line carries `cue=<id>` after `layer=c<id>` (1amfwm7gq3y), so it joins the
+  layer-load advice line of the "Refresh rule" section below.
 - **Kill switch**: `VIDEOCOMPOSER_CADENCE_LEGACY=1` in `/etc/cuems/videocomposer-flags.env`, then restart the VC with no
   project loaded (and restart `cuems-node-engine`: it does not notice a VC restart, 869f8jn34). One INFO line says so;
   every layer runs the legacy smoother. Per-surface pacing, `renderLegacy`, X11 and headless publish no tick and run
@@ -152,6 +153,66 @@ Here `resolution=1920x1080` is the per-output exception: it pins a 4K panel to 1
 An earlier version of this example had indented keys and an inline comment. The VC ignored both of those keys.
 
 The patch lives in `cpp/display/drm/DRMBackend.cpp` (`openWindow`/`initializeVirtualCanvas`): load display.conf before the global modeset (unless `-r` was explicit); the per-output override block applies unconditionally. **Deploy gotcha:** `cuems-generate-display-conf` does NOT emit `resolution_policy=`, so a fresh node with no operator override falls back to the 1080p default.
+
+### Refresh rule: content fps against output Hz (1amfwm7gq3y)
+
+Smooth playback needs the output refresh to be a whole multiple of the content fps: each frame is then held the same
+number of vsyncs. Plan: `cuems-RELATIONS/Plans/2026-11-06-refresh-rule-and-warning-1amfwm7gq3y.md` (§4.1, rig rows in
+§5.1); sink lists from the manuals in `Plans/2026-11-04-vc-stutter-free-playback-research.md` §D.10.
+
+| content fps | exact | a regular pattern (visible judder) | near miss: one single-vsync step every … |
+|---|---|---|---|
+| 23.976 | 47.95 (rare on sinks) | 59.94 / 60 (2,3) | 24.000: ~42 s |
+| 24 | 48 (rare) | 60 / 59.94 / 59.95 (2,3) | — |
+| 25 | **50** | 60 / 59.94 / 59.95 (2,3,2,3,2) | — |
+| 29.97 | **59.94** (the 148.352 MHz CEA mode: exact) | 50 (1,2) | 60.000: ~17 s · 59.95: ~99 s |
+| 30 | **60.000** | 50 (1,2) | **59.94: ~17 s** (many TVs) · **59.95: ~20 s** (every 1920x1200 "60", CVT-RB) · 59.79 (the Acer V193HQV 1366x768): ~4.8 s |
+| 50 | 50 | 60 (1,2) | — |
+| 60 | 60.000 | 50 (drop regime: 1 frame in 6 never shown) | 59.94 / 59.95: a skipped frame every ~17–20 s |
+
+- **Every output of a node at the same rate.** Coupled pacing paces every output at the slowest CRTC, so a 59.94 output
+  next to 60.000 ones makes the 60 Hz ones repeat a vsync every ~17 s (DRMBackend says so at start, below). Until a
+  per-output engine exists this holds for the whole node, not only for overlapping outputs.
+- **The traps are the near misses**, because nothing announces them: "60" is 59.95 on every 1920x1200 CVT-RB mode
+  (Epson EB-L690: 1920x1200 **only** at 59.95; no 1080p25 on the EB-L690 / EB-815E) and 59.94 on many TVs.
+- **Pinning a rate**: `refresh=` per `[output:…]` in `/etc/cuems/display.conf` (the generator never writes it; see
+  cuems-common "display.conf authoring"), then restart the VC **and** `cuems-node-engine` with nothing loaded
+  (869f8jn34). `findMode` takes the closest rate the sink offers, so a pin is a request, not a guarantee: read the
+  journal.
+- **How visible a near miss is** (and so whether the layer-load line below is a WARNING or an INFO): **decided
+  from the 1amfwm7gpz7 eye test (Ion, 2026-11-10): `cadence::kNearIntegerWarnIntervalS = 60` s.** On panels a
+  single-vsync correction was seen every 4.8 s (Acer 59.79 Hz) and every 16.2 s (LG at 59.94 Hz, 30p); at 60.000 Hz
+  (one every few minutes) it was not. A projector at 59.95 Hz hid it because it re-times the signal, so the
+  59.94/59.95 class (the 1920x1200 "60" trap) is a WARNING. Record: cuems-RELATIONS
+  `baselines/test3-saltitos-20261104/RESULTS.md`, "D2 of 1amfwm7gq3y, measured".
+
+Journal lines (grep `cadence: cue=`, `not available at`, `near-equal refresh`):
+
+```
+cadence: cue=<id> file=<name> 30 fps on 60.000 Hz: ratio 2.0000 -> hold 2 (exact) [tick]                       INFO
+cadence: cue=<id> file=<name> 25 fps on 60.000 Hz: non-integer ratio 2.4000 -> 2,3 pulldown (a regular judder
+  by construction); exact would be 50.000 Hz [tick]                                                           WARNING
+cadence: cue=<id> file=<name> 29.97 fps on 60.000 Hz: near-integer ratio 2.0020 (the output runs 60.000 Hz, not
+  59.940): hold 2 with one single-vsync correction every ~17 s; use a 59.940 Hz mode or content at 30 fps (exact)
+                                                         WARNING below kNearIntegerWarnIntervalS, INFO above
+display: [output:HDMI-A-1] refresh=75.000 not available at 1920x1080: using 1920x1080@60.000 Hz; the sink offers
+  23.976, 24.000, 29.970, 30.000, 50.000, 59.934, 59.940, 60.000 Hz at that resolution (display.conf)       WARNING
+DRMBackend: near-equal refresh rates on enabled outputs (openWindow): HDMI-A-1=59.940Hz, HDMI-A-2=60.000Hz, …
+  -- one atomic commit paces them all at the slowest (59.940 Hz), so the faster outputs repeat one vsync every
+  ~17 s; give every output the same mode (same refresh= in display.conf)                                    WARNING
+```
+
+- **The layer-load line** (`cadence::advise`, `sync/CadenceAdvice.{h,cpp}`, a pure function; hooked in
+  `VideoComposerApplication::setupLayerWithInputSource` on every load path) is logged once per load, **before the
+  GO**, from the tick's period (`[tick]`) or, before the first render, the slowest enabled output's mode (`[output
+  mode]`). Live inputs (NDI) are skipped; an unknown fps logs `fps unknown: no cadence advice`. It changes nothing: the
+  cadence engine decides on its own at reveal. Exact = within 10 ppm (below the clocks' own drift). A standard content
+  rate is suggested only when it brings the corrections under the threshold (none helps on 59.79 Hz).
+- **`refresh= … not available`**: a pinned rate that differs from the chosen mode by more than 0.005 Hz (so `refresh=60`
+  on a 59.95-only sink is caught), from `setMode` and from `/videocomposer/output/mode`.
+- **`harmonizeRefreshRates()`** (outputs without a pin) gives each output its matched mode's own rate and lists the
+  rates in its summary; it returns early when the free outputs already agree within 0.5 Hz, so with identical sinks
+  it logs nothing at INFO.
 
 ## Per-output color (phase 3)
 

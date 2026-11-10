@@ -68,6 +68,8 @@ public:
      * @param inputSource New input source (can be nullptr)
      */
     void setInputSource(InputSource* inputSource) { inputSource_ = inputSource; }
+    /// The cue this converter paces (plan 1amfwm7gq3y §4.2): joins the rule-1 line at reveal to the layer-load line.
+    void setCueId(const std::string& cueId) { cueId_ = cueId; }
     
     /**
      * Get the underlying sync source's framerate (e.g. MTC 25fps) before conversion.
@@ -165,6 +167,7 @@ private:
     // a stable id per converter (one per layer and cue) for the event and lag lines: "layer=c<id>"
     static inline std::atomic<int> nextCadenceId_{0};
     const int cadenceId_ = ++nextCadenceId_;
+    std::string cueId_;               // the cue id, for the rule-1 line ("cue=<id>"); empty = not set
     int64_t eventsSecondMsc_ = -1;
     std::vector<std::pair<int64_t, std::string>> cadenceEvents_;
 
