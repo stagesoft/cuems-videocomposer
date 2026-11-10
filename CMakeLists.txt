@@ -1019,6 +1019,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestDayAlign.cpp
         src/cuems_videocomposer/cpp/test/TestLoopPeriod.cpp
         src/cuems_videocomposer/cpp/test/TestCadenceAdvice.cpp
+        src/cuems_videocomposer/cpp/test/TestVisibleAt.cpp
     )
     
     # C++ implementation files needed by tests
