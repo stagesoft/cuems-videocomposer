@@ -199,6 +199,26 @@ inline std::string fitOutputUnknown(const std::string& name, const std::vector<s
     return "fit_output: unknown output '" + name + "' (have: " + list + ")";
 }
 
+// --- visible_at (869feynrj, plan §4.6) --------------------------------------
+// The engine has no reply channel from the VC: its rig rows (R4, R6b) grep
+// these. `ms` = the content time of the frame revealed (0 = frame 0).
+
+inline std::string visibleAtContent(const std::string& layerId, long long ms) {
+    return "layer " + layerId + " visible at content " + std::to_string(ms) + " ms";
+}
+
+inline std::string visibleAtCancelledAfter(const std::string& layerId, long long ms) {
+    return "layer " + layerId + " visible_at cancelled after " + std::to_string(ms) + " ms visible";
+}
+
+inline std::string visibleAtCancelledBefore(const std::string& layerId) {
+    return "layer " + layerId + " visible_at cancelled before the reveal";
+}
+
+inline std::string visibleAtCancelIgnored(const std::string& layerId) {
+    return "layer " + layerId + " visible_at 0 ignored: no reveal pending or done";
+}
+
 }  // namespace journal
 }  // namespace videocomposer
 

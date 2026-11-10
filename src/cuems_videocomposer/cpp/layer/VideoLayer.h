@@ -175,6 +175,27 @@ public:
     void clearOutputFit() { outputFit_.active = false; }
     bool hasOutputFit() const { return outputFit_.active; }
 
+    /**
+     * /visible (the router's handler, moved here so the gate below sees it).
+     * Unchanged without visible_at: 0->1 sets awaitingFrame. With a visible_at
+     * gate pending, 1 is covered by the gate (no early flip, no awaitingFrame:
+     * it would skip frame 0) and 0 drops the gate.
+     */
+    void setVisible(bool visible);
+
+    /**
+     * /visible_at (869feynrj, plan §4.6). 1: stay invisible and become
+     * visible on the first presented frame whose content time is >= 0 (the
+     * first update whose poll gives a raw content frame >= 0 with that frame
+     * loaded), in that same update, so the flip rides the frame's
+     * submission. 0: drop a pending reveal, or hide a layer the gate already
+     * revealed (the engine's cancel is final, D5). Journal lines:
+     * journal::visibleAt*().
+     */
+    enum class VisibleAtOutcome { Armed, Unchanged, Dropped, Hidden, Ignored };
+    VisibleAtOutcome setVisibleAt(bool on);
+    bool visibleAtPending() const { return visibleAtPending_; }
+
 private:
     struct OutputFitState {
         bool active = false;
@@ -190,6 +211,12 @@ private:
     };
     OutputFitState outputFit_;
     void applyOutputFit(bool force);
+
+    // visible_at gate (869feynrj)
+    bool visibleAtPending_ = false;
+    bool revealedByGate_ = false;     // visible because the gate fired
+    int64_t revealedAtMs_ = 0;        // steady clock, for the cancel line
+    std::string logTag() const;
 
     // Composed components
     LayerPlayback playback_;

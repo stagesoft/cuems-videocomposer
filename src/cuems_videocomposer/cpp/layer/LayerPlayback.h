@@ -147,6 +147,12 @@ public:
     // Returns true if playback has ended, false otherwise
     bool checkPlaybackEnd() const;
 
+    // visible_at (869feynrj): this update's poll gave a raw content frame
+    // (offset applied, before the loop period and the clamp) >= 0, and the
+    // frame it chose is the one loaded. contentFrame() = that raw frame.
+    bool contentStarted() const { return contentStarted_; }
+    int64_t contentFrame() const { return contentFrame_; }
+
 private:
     std::shared_ptr<InputSource> inputSource_;
     std::shared_ptr<SyncSource> syncSource_;
@@ -212,6 +218,8 @@ private:
     bool loopNoFramesLogged_ = false;  // WARNING once: no frame count at all
     bool loopEndLogged_ = false;       // INFO once: a finite loop ended
     int64_t loopLastPass_ = -2;        // last pass seen (pass-boundary lines)
+    bool contentStarted_ = false;      // visible_at gate (869feynrj)
+    int64_t contentFrame_ = -1;
 
     // Internal methods
     void updateFromSyncSource();
