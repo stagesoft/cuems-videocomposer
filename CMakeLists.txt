@@ -642,6 +642,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/video/GPUTextureFrameBuffer.cpp
     src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
     src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
+    src/cuems_videocomposer/cpp/sync/PresentTick.cpp
     src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
     src/cuems_videocomposer/cpp/sync/MTCDecoder.cpp
     src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
@@ -1000,6 +1001,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestVideoLayer.cpp
         src/cuems_videocomposer/cpp/test/TestConfigurationManager.cpp
         src/cuems_videocomposer/cpp/test/TestIntegration.cpp
+        src/cuems_videocomposer/cpp/test/TestFramerateConverter.cpp
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
         src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
         src/cuems_videocomposer/cpp/test/TestOutputSnapshot.cpp
@@ -1030,6 +1032,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/sync/MTCDecoder.cpp
         src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
         src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
+        src/cuems_videocomposer/cpp/sync/PresentTick.cpp
         src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
         src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
         src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
@@ -1095,6 +1098,7 @@ if(BUILD_TESTS)
     endif()
     
     add_executable(cuems_videocomposer_test ${TEST_SOURCES} ${TEST_CPP_SOURCES} ${TEST_HAP_SOURCES} src/cuems_videocomposer/common.c)
+    target_compile_definitions(cuems_videocomposer_test PRIVATE VC_TEST_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/src/cuems_videocomposer/cpp/test/fixtures")
     target_include_directories(cuems_videocomposer_test PRIVATE
         src/cuems_videocomposer
         src/cuems_videocomposer/cpp

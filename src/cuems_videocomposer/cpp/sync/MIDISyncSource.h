@@ -110,6 +110,14 @@ public:
     long getTimeMs() const override;
 
     /**
+     * The smooth MTC clock evaluated at monotonicNs (plan 1amfwm7gpz7 §5.2 rule 2): runs the same state advance as
+     * getTimeMs() once per distinct instant (memoised, so every layer of a poll gets the same value), then
+     * extrapolates from "now" to the requested instant at the current rate. While the timecode is not running or
+     * the D13 hold is active the clock is pinned and the pinned value is returned as is, whatever the instant.
+     */
+    double getTimeMsAt(int64_t monotonicNs) const override;
+
+    /**
      * Set the display-pipeline latency compensation in ms. Values outside
      * [0, 200] are clamped. Thread-safe (atomic).
      */

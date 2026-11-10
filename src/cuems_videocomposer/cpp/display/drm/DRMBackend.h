@@ -46,6 +46,7 @@
 #include "../CadenceStats.h"
 #include <vector>
 #include <map>
+#include <array>
 #include <memory>
 #include <chrono>
 
@@ -217,6 +218,9 @@ public:
      * Get primary surface (first output)
      */
     DRMSurface* getPrimarySurface();
+
+    /// Cadence engine (plan 1amfwm7gpz7 §5.1): drmCrtcGetSequence on the pacing CRTC, published as VblankNow.
+    void samplePresentNow() override;
 
     /**
      * Get all surfaces (for startup splash: render logo on each output)
@@ -392,6 +396,35 @@ private:
     // cadence work lands -- see cuems-RELATIONS Plans/2026-10-20-vc-per-surface-
     // pacing-stutter-review.md. VIDEOCOMPOSER_COUPLED_PACING=1 still forces coupled.
     bool coupledPacing_ = true;
+
+    // Cadence engine tick (plan 1amfwm7gpz7 §5.1): the pacing surface is the enabled surface with the longest
+    // vsync period; on a tie, the one whose flip completed last (the coupled loop wakes on it).
+    std::string pacingSurfaceName_;
+    uint32_t pacingCrtcId_ = 0;
+    bool pacingFrozen_ = false;            // chosen once per mode set: a per-frame choice mixes CRTC counters
+    int pacingTallyRenders_ = 0;
+    std::map<std::string, int> pacingTally_;
+    int64_t pacingPeriodNs_ = 0;
+    bool crtcSequenceSupported_ = true;    // drmCrtcGetSequence answered; else VblankNow derives from the tick
+    bool cadenceLegacyLogged_ = false;
+    int64_t prevLanding_ = -1;             // the vblank the last submit lands on (sequence at submit + 1)
+    int64_t traceTargetThisFrame_ = -1;    // VIDEOCOMPOSER_CADENCE_TRACE bookkeeping
+    int64_t submitSeq_ = -1;               // the pacing CRTC's sequence read right after the last submit (-1: none)
+    uint32_t submitCrtc_ = 0;              // the CRTC that sequence was read on
+    int64_t submitOffsetUs_ = 0;           // that submit's offset from the vblank `submitSeq_`
+    int64_t submitDeadlineUs_ = 0;         // the deadline that submit was judged against (trace)
+    int64_t flipPeriodUs_ = 0;
+    // Learnt flip deadline (§5.1): the submit offsets, in 64 bins of the period, of the flips that landed one vblank
+    // after their submit (made the next vblank) and two (missed it); reset when the period changes.
+    static constexpr int kDeadlineBins = 64;
+    std::array<uint32_t, kDeadlineBins> deadlineOnTime_{};
+    std::array<uint32_t, kDeadlineBins> deadlineLate_{};
+    int64_t deadlineBinsPeriodUs_ = 0;
+    int64_t traceTargetPrevFrame_ = -1;
+    int64_t learntDeadlineUs(int64_t periodUs) const;
+    DRMSurface* choosePacingSurface();
+    void publishTickAfterFlipWait();
+    void recordSubmitLanding();
 
     // Last time the canvas was composited, to bound composites to the fastest
     // output's rate rather than the loop's iteration rate.
