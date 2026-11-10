@@ -82,6 +82,10 @@ extern bool test_Cadence_l_NoTick_FallsBackToLegacyPath();
 extern bool test_Cadence_q_FrozenTick_WarnsAndFallsBack();
 extern bool test_Cadence_t_BandStability_NoSpuriousCorrections();
 extern bool test_Cadence_u_FourLayers_OneClockAdvance_IdenticalChoices();
+extern bool test_EngineOffset_Split_ExactForEveryRate_OldFloorWasLate();
+extern bool test_Cadence_Phase_EqualsShiftedClock_30at60();
+extern bool test_Cadence_PhaseChange_ReanchorsUncounted();
+extern bool test_Cadence_Phase_LegacyPath();
 #ifdef HAVE_MTCRECEIVER
 extern bool test_Integration_MIDISyncSource_NoJumpSnapBias();
 extern bool test_Integration_MIDISyncSource_RateWindowImmuneToPollCadence();
@@ -345,6 +349,10 @@ int main() {
     TestFramework::instance().addTest("Cadence_q_FrozenTick_WarnsAndFallsBack", test_Cadence_q_FrozenTick_WarnsAndFallsBack);
     TestFramework::instance().addTest("Cadence_t_BandStability_NoSpuriousCorrections", test_Cadence_t_BandStability_NoSpuriousCorrections);
     TestFramework::instance().addTest("Cadence_u_FourLayers_OneClockAdvance_IdenticalChoices", test_Cadence_u_FourLayers_OneClockAdvance_IdenticalChoices);
+    TestFramework::instance().addTest("EngineOffset_Split_ExactForEveryRate_OldFloorWasLate", test_EngineOffset_Split_ExactForEveryRate_OldFloorWasLate);
+    TestFramework::instance().addTest("Cadence_Phase_EqualsShiftedClock_30at60", test_Cadence_Phase_EqualsShiftedClock_30at60);
+    TestFramework::instance().addTest("Cadence_PhaseChange_ReanchorsUncounted", test_Cadence_PhaseChange_ReanchorsUncounted);
+    TestFramework::instance().addTest("Cadence_Phase_LegacyPath", test_Cadence_Phase_LegacyPath);
 #ifdef HAVE_MTCRECEIVER
     TestFramework::instance().addTest("Integration_MIDISyncSource_NoJumpSnapBias", test_Integration_MIDISyncSource_NoJumpSnapBias);
     TestFramework::instance().addTest("Integration_MIDISyncSource_RateWindowImmuneToPollCadence", test_Integration_MIDISyncSource_RateWindowImmuneToPollCadence);

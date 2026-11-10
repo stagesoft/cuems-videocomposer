@@ -153,7 +153,23 @@ private:
 
     // Shared decoder flags (NOT derived from use_count — explicit)
     bool isSharedLayer_ = false;   // true when sharing an InputSource with other layers
+    int  phaseMismatchPolls_ = 0;  // a shared secondary whose offset phase differs from its driver's (1amfwm7h924)
     bool isDecodeDriver_ = false;  // true when this layer drives decode (calls readFrame/readFrameToTexture)
+
+    // Start probe (1amfwm7h924): once per engine offset, from the first vsync whose frame reaches the cue's start,
+    // how far the shown frame is behind where the start puts the clock, averaged over 60 vsyncs; one INFO line.
+    // Only with VIDEOCOMPOSER_CADENCE_STATS=1.
+    // Re-arms when the offset value changes (a re-sent identical offset is not measured again); with an engine
+    // before rc6-7, which re-sends the offset on every loop pass, that is one line per pass.
+    void startProbe(int64_t frame, class FramerateConverterSyncSource* c, double srcFps, double fps);
+    void resetStartProbe();
+    int     startProbeSkipped_ = 0;
+    double  startProbeLastClock_ = 0.0;
+    int64_t startProbeOffset_ = 0;
+    bool    startProbeArmed_ = false;
+    int     startProbeN_ = 0;
+    int64_t startProbeFirst_ = 0;
+    double  startProbeClock0_ = 0.0, startProbeSum_ = 0.0, startProbeMin_ = 0.0, startProbeMax_ = 0.0;
     int hwMissLogCount_ = 0;       // per-layer throttle for hardware queue-miss warnings
     
     // Playback state
