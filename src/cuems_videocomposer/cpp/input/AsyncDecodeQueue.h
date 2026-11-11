@@ -218,12 +218,17 @@ public:
     /**
      * Request a frame by number
      * If frame is in queue, returns immediately.
-     * If not, waits briefly then returns nullptr (caller should use previous frame).
+     * If not, waits up to maxWaitMs, then returns the closest EARLIER queued
+     * frame, or nullptr when there is none (caller should hold its previous frame).
      * @param frameNumber Requested frame number
+     * @param returnedFrame Set to the number of the frame actually returned
+     *        (frameNumber on a hit, an earlier number on the fallback, -1 with
+     *        nullptr). A caller that records what it shows must use this, never
+     *        frameNumber (1amfwm7hk6j; the visible_at delivered-frame gate).
      * @param maxWaitMs Maximum time to wait if frame not ready (0 = no wait)
      * @return AVFrame pointer (caller must NOT free) or nullptr
      */
-    AVFrame* getFrame(int64_t frameNumber, int maxWaitMs = 0);
+    AVFrame* getFrame(int64_t frameNumber, int64_t& returnedFrame, int maxWaitMs = 0);
 
     /**
      * Seek to a new position (flushes queue)

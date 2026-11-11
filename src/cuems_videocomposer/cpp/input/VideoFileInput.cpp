@@ -1996,13 +1996,18 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         // the next vsync - the queue keeps cold-starting in the background
         // either way.
         const int waitMs = textureBuffer.isValid() ? 5 : 20;
-        AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, waitMs);
+        int64_t queuedNumber = -1;
+        AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, queuedNumber, waitMs);
 
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
             if (transferHardwareFrameToGPU(queuedFrame, textureBuffer, true)) {  // skipSync: already synced by async queue
-                lastTransferredFrame_ = frameNumber;   // getFrame() matches the number exactly (869feynrj X1)
+                // The frame really transferred: getFrame() falls back to the closest
+                // EARLIER queued frame on a miss, so this can be < frameNumber, and the
+                // visible_at gate must not take it for the requested one (869feynrj X1,
+                // 1amfwm7hk6j).
+                lastTransferredFrame_ = queuedNumber;
                 return true;
             }
             LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;
