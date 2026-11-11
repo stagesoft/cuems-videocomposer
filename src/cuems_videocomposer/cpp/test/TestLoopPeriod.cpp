@@ -564,12 +564,14 @@ bool test_CapsFile_WrittenAndUnlinked() {
     const long pid = static_cast<long>(getpid());
     TEST_ASSERT_TRUE(capsfile::write(path, pid, capsfile::tokens(), err));
     std::ifstream f(path);
-    std::string l1, l2, l3;
+    std::string l1, l2, l3, l4;
     std::getline(f, l1);
     std::getline(f, l2);
+    std::getline(f, l3);
     TEST_ASSERT_EQ(l1, "pid=" + std::to_string(pid));
     TEST_ASSERT_EQ(l2, std::string("loop_period"));
-    TEST_ASSERT_FALSE(static_cast<bool>(std::getline(f, l3)));
+    TEST_ASSERT_EQ(l3, std::string("visible_at"));   // 869feynrj step 1b
+    TEST_ASSERT_FALSE(static_cast<bool>(std::getline(f, l4)));
     TEST_ASSERT_EQ(capsfile::readPid(path), pid);
     TEST_ASSERT_FALSE(capsfile::removeIfOurs(path, pid + 1));   // a newer instance's file stays
     TEST_ASSERT_EQ(access(path.c_str(), F_OK), 0);

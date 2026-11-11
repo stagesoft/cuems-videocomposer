@@ -43,8 +43,9 @@ namespace capsfile {
 constexpr const char* DEFAULT_PATH = "/run/cuems/videocomposer.caps";
 
 // The tokens of this build. `loop_period`: /layer/<id>/loop/period and the
-// passes-aware wrap of section 4.4.
-inline std::vector<std::string> tokens() { return {"loop_period"}; }
+// passes-aware wrap of section 4.4. `visible_at`: /layer/<id>/visible_at, the
+// self-gated reveal (869feynrj, plan §4.6).
+inline std::vector<std::string> tokens() { return {"loop_period", "visible_at"}; }
 
 inline std::string render(long pid, const std::vector<std::string>& toks) {
     std::ostringstream o;

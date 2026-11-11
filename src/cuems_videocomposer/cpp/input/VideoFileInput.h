@@ -97,6 +97,11 @@ public:
         return frameCount_ > 0 ? frameCount_ : -1;
     }
     int64_t getCurrentFrame() const override;
+    // 869feynrj X1: on the hardware (async queue) path a miss holds the old
+    // texture and still reports success; this is the frame really transferred.
+    int64_t deliveredFrame(int64_t requested) const override {
+        return useHardwareDecoding_ ? lastTransferredFrame_ : requested;
+    }
     CodecType detectCodec() const override;
     bool supportsDirectGPUTexture() const override;
     DecodeBackend getOptimalBackend() const override;
@@ -310,6 +315,7 @@ private:
     std::string currentFile_;
     bool ignoreStartOffset_;
     int64_t currentFrame_;
+    int64_t lastTransferredFrame_ = -1;  // hardware path: the frame in the caller's texture (869feynrj X1)
 
     // Internal state
     bool ready_;

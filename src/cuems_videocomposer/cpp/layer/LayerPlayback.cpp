@@ -125,6 +125,8 @@ bool LayerPlayback::seek(int64_t frameNumber) {
 }
 
 void LayerPlayback::update() {
+    contentStarted_ = false;
+    contentFrame_ = INT64_MIN;
     if (!isReady()) {
         return;
     }
@@ -462,6 +464,7 @@ void LayerPlayback::updateFromSyncSource() {
         int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + offsetSplit.frames;
         startProbe(adjustedFrame, converter, converter ? converter->getSourceFramerate() : 0.0,
                    converter ? converter->getFramerate() : 0.0);
+        contentFrame_ = adjustedFrame;  // raw, for the visible_at gate (869feynrj)
 
         // The first position after an engine offset was placed: more than an
         // hour off the media means a wrong MTC day or an engine time far from now.
@@ -591,6 +594,10 @@ void LayerPlayback::updateFromSyncSource() {
                 }
             }
         }
+        // ...and its pixels are in the buffer: a decode miss may report success holding an older frame (X1)
+        contentStarted_ = contentFrame_ >= 0 && currentFrame_ == adjustedFrame &&
+                          inputSource_->deliveredFrame(adjustedFrame) == adjustedFrame &&
+                          (!(isSharedLayer_ && !isDecodeDriver_) || inputSource_->getCachedFrameNumber() == adjustedFrame);
     } else {
         // No valid sync frame yet (MTC not received or not rolling)
         // Show frame 0 as fallback so video is visible while waiting for MTC

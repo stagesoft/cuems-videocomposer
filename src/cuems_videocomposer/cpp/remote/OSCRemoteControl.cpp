@@ -104,6 +104,7 @@ bool OSCRemoteControl::initialize(int port) {
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/position", "ff", handleOSCMessage, userData_);  // Float position (smooth)
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/opacity", "f", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/visible", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/visible_at", "i", handleOSCMessage, userData_);  // 869feynrj
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/zorder", "i", handleOSCMessage, userData_);
     
     // New file loading commands

@@ -199,6 +199,43 @@ inline std::string fitOutputUnknown(const std::string& name, const std::vector<s
     return "fit_output: unknown output '" + name + "' (have: " + list + ")";
 }
 
+// --- visible_at (869feynrj, plan §4.6) --------------------------------------
+// The engine has no reply channel from the VC: its rig rows (R4, R6b) grep
+// these. `ms` = the content time of the frame revealed (0 = frame 0).
+
+inline std::string visibleAtContent(const std::string& layerId, long long ms) {
+    return "layer " + layerId + " visible at content " + std::to_string(ms) + " ms";
+}
+
+inline std::string visibleAtCancelledAfter(const std::string& layerId, long long ms) {
+    return "layer " + layerId + " visible_at cancelled after " + std::to_string(ms) + " ms visible";
+}
+
+inline std::string visibleAtCancelledBefore(const std::string& layerId) {
+    return "layer " + layerId + " visible_at cancelled before the reveal";
+}
+
+inline std::string visibleAtCancelIgnored(const std::string& layerId) {
+    return "layer " + layerId + " visible_at 0 ignored: no reveal pending or done";
+}
+
+inline std::string visibleAtDroppedByVisible0(const std::string& layerId) {
+    return "layer " + layerId + " visible_at dropped by visible 0";
+}
+
+// The engine's healer /visible 1 on a pending gate that cannot fire (no MTC
+// position: not following, no MTC, offset not placed): shown at once, as
+// before visible_at.
+inline std::string visibleAtHealerShows(const std::string& layerId) {
+    return "layer " + layerId + " visible_at pending without an MTC position: visible 1 shows it now";
+}
+
+inline std::string visibleAtPendingLong(const std::string& layerId, long long ms, bool following, bool position) {
+    return "layer " + layerId + " visible_at pending for " + std::to_string(ms) +
+           " ms without a frame at content time >= 0 (following " + (following ? "1" : "0") +
+           ", MTC position " + (position ? "1" : "0") + ")";
+}
+
 }  // namespace journal
 }  // namespace videocomposer
 

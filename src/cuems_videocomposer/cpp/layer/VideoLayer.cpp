@@ -28,9 +28,17 @@
 #include "../guard/HangGuard.h"
 #include "../remote/JournalContract.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace videocomposer {
+
+namespace {
+int64_t steadyMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+} // namespace
 
 VideoLayer::VideoLayer()
     : layerId_(-1)
@@ -69,6 +77,7 @@ void VideoLayer::setInputSource(std::unique_ptr<InputSource> input) {
     
     // Invalidate frame buffer cache
     frameBufferCacheValid_ = false;
+    revealedByGate_ = false;  // a re-armed layer is not the old reveal's (869feynrj S3)
 
     // The layer may already have been told to follow MTC before this source
     // existed; now that it does, the guard can decide.
@@ -125,6 +134,27 @@ void VideoLayer::update() {
 
     if (outputFit_.active) {
         applyOutputFit(false);
+    }
+
+    // visible_at (869feynrj): the first update whose poll gave a raw content
+    // frame >= 0, with that frame loaded, flips visibility here, before the
+    // render of this iteration: the frame and the flip go in one submission.
+    if (visibleAtPending_ && playback_.contentStarted()) {
+        auto& props = display_.getProperties();
+        visibleAtPending_ = false;
+        revealedByGate_ = true;
+        revealedAtMs_ = steadyMs();
+        props.visible = true;
+        props.awaitingFrame = false;
+        const double fps = playback_.getFrameInfo().framerate;
+        const long long ms = fps > 0.0
+            ? std::llround(static_cast<double>(playback_.contentFrame()) * 1000.0 / fps) : 0;
+        LOG_INFO << journal::visibleAtContent(logTag(), ms);
+    } else if (visibleAtPending_ && !visibleAtWarned_ && steadyMs() - visibleAtArmedMs_ >= visibleAtWarnAfterMs_) {
+        visibleAtWarned_ = true;
+        ++visibleAtPendingWarnings_;
+        LOG_WARNING << journal::visibleAtPendingLong(logTag(), steadyMs() - visibleAtArmedMs_,
+                                                     playback_.getMtcFollow(), playback_.hasContentFrame());
     }
 
     // Clear awaitingFrame once a fresh frame has been loaded after
@@ -496,5 +526,66 @@ bool VideoLayer::isFrameOnGPU() const {
     return display_.isFrameOnGPU();
 }
 
-} // namespace videocomposer
+std::string VideoLayer::logTag() const {
+    return cueId_.empty() ? std::to_string(layerId_) : cueId_;
+}
 
+void VideoLayer::setVisible(bool visible) {
+    auto& props = display_.getProperties();
+    if (visibleAtPending_) {
+        if (visible && playback_.hasContentFrame()) {
+            return;  // covered by the pending gate (N12)
+        }
+        // A 1 on a gate that cannot fire (no MTC position: not following, no
+        // MTC, offset not placed) is the engine's healer: show it as before
+        // visible_at. A 0 drops the gate.
+        visibleAtPending_ = false;
+        if (visible) {
+            LOG_INFO << journal::visibleAtHealerShows(logTag());
+        } else {
+            LOG_INFO << journal::visibleAtDroppedByVisible0(logTag());
+        }
+    }
+    if (!visible) {
+        revealedByGate_ = false;
+    }
+    // When transitioning 0→1, suppress rendering until a fresh frame
+    // is loaded by updateFromSyncSource. This prevents a stale frame
+    // from previous playback from flashing on screen. A plain show is
+    // not the gate's (S3).
+    if (visible && !props.visible) {
+        props.awaitingFrame = true;
+        revealedByGate_ = false;
+    }
+    props.visible = visible;
+}
+
+VideoLayer::VisibleAtOutcome VideoLayer::setVisibleAt(bool on) {
+    auto& props = display_.getProperties();
+    if (on) {
+        if (visibleAtPending_ || props.visible) {
+            return VisibleAtOutcome::Unchanged;
+        }
+        visibleAtPending_ = true;
+        revealedByGate_ = false;
+        visibleAtArmedMs_ = steadyMs();
+        visibleAtWarned_ = false;
+        props.awaitingFrame = false;
+        return VisibleAtOutcome::Armed;
+    }
+    if (visibleAtPending_) {
+        visibleAtPending_ = false;
+        LOG_INFO << journal::visibleAtCancelledBefore(logTag());
+        return VisibleAtOutcome::Dropped;
+    }
+    if (revealedByGate_ && props.visible) {
+        revealedByGate_ = false;
+        props.visible = false;
+        LOG_WARNING << journal::visibleAtCancelledAfter(logTag(), steadyMs() - revealedAtMs_);
+        return VisibleAtOutcome::Hidden;
+    }
+    LOG_INFO << journal::visibleAtCancelIgnored(logTag());
+    return VisibleAtOutcome::Ignored;
+}
+
+} // namespace videocomposer
