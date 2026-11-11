@@ -286,6 +286,7 @@ extern bool test_Prime_LoaderPrimesFrameZeroPixels();
 extern bool test_Prime_FirstFollowUpdateDoesNotSeek();
 extern bool test_Prime_FailedPrimeResetsAndNextReadIsFrameZero();
 extern bool test_Prime_IndexOnlyIsNotPrimed();
+extern bool test_DecodeQueue_GetFrameReportsReturnedFrame();
 extern bool test_VisibleAt_Onset_30at60();
 extern bool test_VisibleAt_Onset_25at50();
 extern bool test_VisibleAt_Onset_25at60();
@@ -573,6 +574,7 @@ int main() {
     TestFramework::instance().addTest("Prime_FirstFollowUpdateDoesNotSeek", test_Prime_FirstFollowUpdateDoesNotSeek);
     TestFramework::instance().addTest("Prime_FailedPrimeResetsAndNextReadIsFrameZero", test_Prime_FailedPrimeResetsAndNextReadIsFrameZero);
     TestFramework::instance().addTest("Prime_IndexOnlyIsNotPrimed", test_Prime_IndexOnlyIsNotPrimed);
+    TestFramework::instance().addTest("DecodeQueue_GetFrameReportsReturnedFrame", test_DecodeQueue_GetFrameReportsReturnedFrame);
     TestFramework::instance().addTest("CapsFile_WrittenAndUnlinked", test_CapsFile_WrittenAndUnlinked);
     TestFramework::instance().addTest("VisibleAt_Onset_30at60", test_VisibleAt_Onset_30at60);
     TestFramework::instance().addTest("VisibleAt_Onset_25at50", test_VisibleAt_Onset_25at50);

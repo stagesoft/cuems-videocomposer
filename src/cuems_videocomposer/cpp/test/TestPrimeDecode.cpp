@@ -26,8 +26,12 @@
 // readFrame()'s same-frame early return instead of a seek + pipeline fill.
 // Real files: a short prores_ks clip made with the ffmpeg CLI whose frame 0
 // is white and every other frame black; skipped without ffmpeg/prores_ks.
+//
+// Also scope item 2 of that plan (AC6): AsyncDecodeQueue::getFrame reports the
+// frame number it actually returns, which may be the closest earlier frame.
 
 #include "TestFramework.h"
+#include "../input/AsyncDecodeQueue.h"
 #include "../input/AsyncVideoLoader.h"
 #include "../input/InputSource.h"
 #include "../input/VideoFileInput.h"
@@ -301,6 +305,70 @@ bool test_Prime_IndexOnlyIsNotPrimed() {
         TEST_ASSERT_EQ(in.demuxSeekCount(), 0);
         TEST_ASSERT_EQ(in.getCurrentFrame(), -1);
         in.close();
+    }
+    removeDir(d);
+    return true;
+}
+
+// AC6 (scope item 2): getFrame() can return the closest earlier frame when the
+// requested one is not queued; it now reports which frame that is, so
+// readFrameToTexture records the frame really transferred in
+// lastTransferredFrame_ (the visible_at delivered-frame gate) instead of the
+// requested number. Reached here through the queue's software mode (no VAAPI
+// device): the same queue, frame numbering and fallback as the hardware path.
+// readFrameToTexture itself needs a VAAPI device; the h264 rig regression row
+// covers it.
+bool test_DecodeQueue_GetFrameReportsReturnedFrame() {
+    {
+        // nothing queued: no frame, number -1
+        AsyncDecodeQueue empty;
+        int64_t got = 7;
+        TEST_ASSERT_TRUE(empty.getFrame(5, got) == nullptr);
+        TEST_ASSERT_EQ(got, -1);
+    }
+    if (!haveProresEncoder()) {
+        std::cout << "(file part skipped: no ffmpeg/prores_ks) ";
+        return true;
+    }
+    const std::string d = primeTempDir();
+    TEST_ASSERT_FALSE(d.empty());
+    const std::string clip = makeWhiteZeroClip(d);
+    TEST_ASSERT_FALSE(clip.empty());
+
+    {
+        AsyncDecodeQueue q;
+        TEST_ASSERT_TRUE(q.open(clip, nullptr, 0, AsyncDecodeQueue::FILL_DEPTH_REDUCED));
+        TEST_ASSERT_FALSE(q.isHardwareDecoding());
+        // target 0, fill depth 4: the decode thread queues frames 0..3 and stops
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!(q.getQueueSize() == 4 && q.getNewestFrame() == 3) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        TEST_ASSERT_EQ(static_cast<int64_t>(q.getQueueSize()), 4);
+        TEST_ASSERT_EQ(q.getNewestFrame(), 3);
+
+        auto ptsOf = [](const AVFrame* f) {
+            return f->best_effort_timestamp != AV_NOPTS_VALUE ? f->best_effort_timestamp : f->pts;
+        };
+        int64_t got = -2;
+        AVFrame* f = q.getFrame(1, got);              // exact
+        TEST_ASSERT_TRUE(f != nullptr);
+        TEST_ASSERT_EQ(got, 1);
+        const int64_t p1 = ptsOf(f);
+        f = q.getFrame(2, got);                       // exact
+        TEST_ASSERT_TRUE(f != nullptr);
+        TEST_ASSERT_EQ(got, 2);
+        const int64_t step = ptsOf(f) - p1;
+        TEST_ASSERT_TRUE(step > 0);
+
+        // frame 6 is not queued (the queue is full at 0..3, target was 2):
+        // the closest earlier frame comes back, and is reported as such
+        f = q.getFrame(6, got);
+        TEST_ASSERT_TRUE(f != nullptr);
+        TEST_ASSERT_EQ(got, 3);
+        TEST_ASSERT_EQ((ptsOf(f) - p1) / step + 1, got);   // the number names the frame returned
+        q.close();
     }
     removeDir(d);
     return true;
