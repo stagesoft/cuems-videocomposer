@@ -36,6 +36,7 @@
 #include "../input/InputSource.h"
 #include "../layer/LayerDisplay.h"
 #include "../layer/LayerPlayback.h"
+#include "../layer/VideoLayer.h"
 #include "../sync/SyncSource.h"
 #include "../video/FrameBuffer.h"
 
@@ -43,6 +44,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <set>
 
 using namespace videocomposer;
 namespace cu = videocomposer::cpuupload;
@@ -365,5 +367,79 @@ bool test_CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite() {
     TEST_ASSERT_NE(g3, g2);
     TEST_ASSERT_TRUE(d.prepareFrame(&frame, nullptr, false, false));
     TEST_ASSERT_EQ(d.preparedGeneration(), g3);
+    return true;
+}
+
+// Review (1amfwm7hg3u): a shared secondary promoted to decode driver stops counting its driver's cache. The frame
+// generation must keep moving forward across the role change (and back): every new load is a new identity, never
+// one already seen (a value seen before could equal the recorded one and skip an upload with new pixels).
+bool test_CpuUpload_PlaybackFrameGenerationMonotonicAcrossPromotion() {
+    auto shared = std::make_shared<FileSource>();
+    LayerPlayback layer;
+    layer.setInputSource(std::shared_ptr<InputSource>(shared), true, false);
+    auto* clock = new FrameClock;
+    layer.setSyncSource(std::unique_ptr<SyncSource>(clock));
+    layer.setMtcFollow(true);
+
+    std::set<uint64_t> seen;
+    uint64_t last = layer.frameGeneration();
+    seen.insert(last);
+    FrameBuffer driverFrame = bgra(16, 8, 1);
+    for (int i = 0; i < 4; ++i) {                 // the old driver caches four frames
+        shared->setCachedFrame(100 + i, driverFrame);
+        const uint64_t g = layer.frameGeneration();
+        TEST_ASSERT_TRUE(g > last);
+        TEST_ASSERT_TRUE(seen.insert(g).second);
+        last = g;
+    }
+
+    layer.setDecodeDriver(true);                  // promoted: it decodes itself from now on
+    TEST_ASSERT_TRUE(layer.frameGeneration() >= last);
+    for (int i = 0; i < 6; ++i) {
+        clock->frame = 10 + i;
+        layer.update();
+        TEST_ASSERT_EQ(shared->loads, i + 1);
+        const uint64_t g = layer.frameGeneration();
+        TEST_ASSERT_TRUE(g > last);
+        TEST_ASSERT_TRUE(seen.insert(g).second);
+        last = g;
+    }
+
+    layer.setDecodeDriver(false);                 // and back to a secondary of another driver
+    TEST_ASSERT_TRUE(layer.frameGeneration() >= last);
+    for (int i = 0; i < 3; ++i) {
+        shared->setCachedFrame(200 + i, driverFrame);
+        const uint64_t g = layer.frameGeneration();
+        TEST_ASSERT_TRUE(g > last);
+        TEST_ASSERT_TRUE(seen.insert(g).second);
+        last = g;
+    }
+    return true;
+}
+
+// Review (1amfwm7hg3u): layer ids restart at 1 after a reset, and the renderer's texture cache is keyed by id. Two
+// layer objects whose counters are identical (same id, one load each, no frame yet) must still be different
+// identities, so a new project's first draw never reuses the previous project's texture.
+bool test_CpuUpload_LayerIncarnationDistinguishesLayers() {
+    VideoLayer oldLayer;
+    oldLayer.setLayerId(1);
+    oldLayer.setInputSource(std::unique_ptr<InputSource>(new FileSource));
+    VideoLayer newLayer;
+    newLayer.setLayerId(1);
+    newLayer.setInputSource(std::unique_ptr<InputSource>(new FileSource));
+
+    cu::Identity a = oldLayer.cpuUploadIdentity();
+    cu::Identity b = newLayer.cpuUploadIdentity();
+    a.textureGeneration = 7;                      // the surviving cache entry's texture
+    b.textureGeneration = 7;
+    TEST_ASSERT_EQ(a.sourceGeneration, b.sourceGeneration);
+    TEST_ASSERT_EQ(a.frameGeneration, b.frameGeneration);
+    TEST_ASSERT_EQ(a.preparedGeneration, b.preparedGeneration);
+    TEST_ASSERT_TRUE(a != b);
+
+    cu::Policy p;                                 // the policy of the cache entry for id 1
+    TEST_ASSERT_TRUE(uploadOk(p, a));
+    TEST_ASSERT_FALSE(p.needsUpload(a));
+    TEST_ASSERT_TRUE(p.needsUpload(b));
     return true;
 }

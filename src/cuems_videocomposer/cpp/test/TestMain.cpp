@@ -67,6 +67,8 @@ extern bool test_CpuUpload_PlaybackSourceGenerationBumpsOnSetInputSource();
 extern bool test_CpuUpload_PlaybackFrameGenerationBumpsOnEachLoad();
 extern bool test_CpuUpload_PlaybackSharedSecondaryFollowsDriverCache();
 extern bool test_CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite();
+extern bool test_CpuUpload_PlaybackFrameGenerationMonotonicAcrossPromotion();
+extern bool test_CpuUpload_LayerIncarnationDistinguishesLayers();
 
 extern bool test_Integration_LayerManagerWithMultipleLayers();
 extern bool test_Integration_VideoLayerTimeScaling();
@@ -390,6 +392,8 @@ int main() {
     TestFramework::instance().addTest("CpuUpload_PlaybackFrameGenerationBumpsOnEachLoad", test_CpuUpload_PlaybackFrameGenerationBumpsOnEachLoad);
     TestFramework::instance().addTest("CpuUpload_PlaybackSharedSecondaryFollowsDriverCache", test_CpuUpload_PlaybackSharedSecondaryFollowsDriverCache);
     TestFramework::instance().addTest("CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite", test_CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite);
+    TestFramework::instance().addTest("CpuUpload_PlaybackFrameGenerationMonotonicAcrossPromotion", test_CpuUpload_PlaybackFrameGenerationMonotonicAcrossPromotion);
+    TestFramework::instance().addTest("CpuUpload_LayerIncarnationDistinguishesLayers", test_CpuUpload_LayerIncarnationDistinguishesLayers);
     
     TestFramework::instance().addTest("Integration_LayerManagerWithMultipleLayers", test_Integration_LayerManagerWithMultipleLayers);
     TestFramework::instance().addTest("Integration_VideoLayerTimeScaling", test_Integration_VideoLayerTimeScaling);
