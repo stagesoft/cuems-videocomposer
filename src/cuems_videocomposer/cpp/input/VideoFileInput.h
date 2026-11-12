@@ -164,6 +164,35 @@ public:
     void setIndexOnly(bool indexOnly) { indexOnly_ = indexOnly; }
     bool getIndexOnly() const { return indexOnly_; }
 
+    /**
+     * Prime a software decode at load (1amfwm7hk6j): decode frame 0 once, on
+     * the loader's worker right after open(), and keep it (frame_, swsCtx_,
+     * currentFrame_ = 0). The first follow poll on the render thread then takes
+     * readFrame()'s same-frame early return (one colour conversion) instead of
+     * seek + decoder pipeline fill + scaler setup, and frames 1, 2, ... are
+     * sequential. Only for a software decode (codecCtx_ open, no async decode
+     * queue, not index-only); hardware, HAP and NDI never get here.
+     *
+     * Failure: one WARNING naming the file, and the decode state is reset
+     * (currentFrame_ = -1, lastDecodedPTS_/lastDecodedFrameNo_, codec flushed),
+     * because seek() has already set currentFrame_ and the next readFrame(0)
+     * would otherwise skip its seek and read on from where the failed decode
+     * left the stream. The load still succeeds; the first poll decodes as before.
+     */
+    enum class PrimeResult { NotTried, NotApplicable, Primed, Failed };
+    PrimeResult primeSoftwareDecode();
+    PrimeResult lastPrimeResult() const { return primeResult_; }
+
+    // Demuxer seeks made by seek()/readFrame() since open() (index passes not
+    // counted). Observability for the prime's tests.
+    int64_t demuxSeekCount() const { return demuxSeeks_; }
+
+#ifdef CUEMS_VC_TESTING
+    // Test seam: the next primeSoftwareDecode() (any instance) runs its decode
+    // and then reports it failed, leaving the state a real failure leaves.
+    static void failNextPrimeForTesting();
+#endif
+
     // Decode-path health (see InputSource::Health)
     Health getHealth() const override;
     std::string getHealthReason() const override;
@@ -316,6 +345,11 @@ private:
     bool ignoreStartOffset_;
     int64_t currentFrame_;
     int64_t lastTransferredFrame_ = -1;  // hardware path: the frame in the caller's texture (869feynrj X1)
+    PrimeResult primeResult_ = PrimeResult::NotTried;   // 1amfwm7hk6j
+    int64_t demuxSeeks_ = 0;
+#ifdef CUEMS_VC_TESTING
+    bool primeFailSeam_ = false;
+#endif
 
     // Internal state
     bool ready_;

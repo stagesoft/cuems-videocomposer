@@ -291,6 +291,8 @@ bool VideoFileInput::open(const std::string& source) {
     ready_ = true;
     currentFrame_ = -1;
     lastTransferredFrame_ = -1;
+    demuxSeeks_ = 0;
+    primeResult_ = PrimeResult::NotTried;
     
     // ------------------------------------------------------------------
     // Decode-path failure ladder
@@ -1409,6 +1411,7 @@ bool VideoFileInput::seekToFrame(int64_t frameNumber) {
     lastDecodedFrameNo_ = -1;
 
     if (needSeek) {
+        ++demuxSeeks_;
         bool seekResult;
         if (byteSeek_ && idx.seekpos > 0) {
             seekResult = mediaReader_.seek(idx.seekpos, videoStream_, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_BYTE);
@@ -1440,6 +1443,7 @@ bool VideoFileInput::seekByTimestamp(int64_t frameNumber) {
     double targetTime = (double)frameNumber / frameInfo_.framerate;
 
     // Seek to the target timestamp using MediaFileReader
+    ++demuxSeeks_;
     bool seekResult = mediaReader_.seekToTime(targetTime, videoStream_, AVSEEK_FLAG_BACKWARD);
     if (!seekResult) {
         return false;
@@ -1701,6 +1705,15 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     
     av_frame_free(&bestFrame);
 
+#ifdef CUEMS_VC_TESTING
+    if (primeFailSeam_) {
+        // Test seam (failNextPrimeForTesting): the decode above ran and consumed
+        // packets; report it failed, as a real failure after the seek would.
+        primeFailSeam_ = false;
+        frameFinished = false;
+    }
+#endif
+
     if (!frameFinished) {
         // Log detailed error information for debugging format-specific issues
         if (targetTimestamp >= 0) {
@@ -1772,6 +1785,46 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     currentFrame_ = frameNumber;
 
     return true;
+}
+
+#ifdef CUEMS_VC_TESTING
+namespace {
+std::atomic<bool> s_failNextPrime{false};
+}
+
+void VideoFileInput::failNextPrimeForTesting() {
+    s_failNextPrime.store(true);
+}
+#endif
+
+VideoFileInput::PrimeResult VideoFileInput::primeSoftwareDecode() {
+    if (!isReady() || useHardwareDecoding_ || !codecCtx_ || asyncDecodeQueue_ || indexOnly_) {
+        primeResult_ = PrimeResult::NotApplicable;
+        return primeResult_;
+    }
+#ifdef CUEMS_VC_TESTING
+    primeFailSeam_ = s_failNextPrime.exchange(false);
+#endif
+
+    // The BGRA copy is not kept: what the early return needs is frame_ (the
+    // decoded frame, ~8 MB at 1080p 4:2:2 10-bit, D2), swsCtx_ and currentFrame_.
+    FrameBuffer scratch;
+    if (readFrame(0, scratch)) {
+        primeResult_ = PrimeResult::Primed;
+        return primeResult_;
+    }
+
+    LOG_WARNING << "VideoFileInput: priming frame 0 failed for " << currentFile_
+                << "; the first follow poll decodes it on the render thread (late start)";
+    currentFrame_ = -1;
+    lastDecodedPTS_ = -1;
+    lastDecodedFrameNo_ = -1;
+    if (frame_) {
+        av_frame_unref(frame_);
+    }
+    avcodec_flush_buffers(codecCtx_);
+    primeResult_ = PrimeResult::Failed;
+    return primeResult_;
 }
 
 int64_t VideoFileInput::parsePTSFromFrame(AVFrame* frame) {
@@ -1943,13 +1996,18 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         // the next vsync - the queue keeps cold-starting in the background
         // either way.
         const int waitMs = textureBuffer.isValid() ? 5 : 20;
-        AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, waitMs);
+        int64_t queuedNumber = -1;
+        AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, queuedNumber, waitMs);
 
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
             if (transferHardwareFrameToGPU(queuedFrame, textureBuffer, true)) {  // skipSync: already synced by async queue
-                lastTransferredFrame_ = frameNumber;   // getFrame() matches the number exactly (869feynrj X1)
+                // The frame really transferred: getFrame() falls back to the closest
+                // EARLIER queued frame on a miss, so this can be < frameNumber, and the
+                // visible_at gate must not take it for the requested one (869feynrj X1,
+                // 1amfwm7hk6j).
+                lastTransferredFrame_ = queuedNumber;
                 return true;
             }
             LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;
