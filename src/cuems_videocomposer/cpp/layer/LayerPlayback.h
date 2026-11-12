@@ -159,8 +159,8 @@ public:
     // CPU upload identity (1amfwm7hg3u, display/CpuUploadPolicy.h). sourceGeneration moves on every
     // setInputSource; frameGeneration on every successful frame load, and for a shared secondary also on
     // every frame its driver caches (its buffer is a view of the driver's, rewritten in place).
-    uint64_t sourceGeneration() const { return 0; }  // stub (red), 1amfwm7hg3u commit 1
-    uint64_t frameGeneration() const { return 0; }   // stub (red), 1amfwm7hg3u commit 1
+    uint64_t sourceGeneration() const { return sourceGeneration_; }
+    uint64_t frameGeneration() const;
 
 private:
     std::shared_ptr<InputSource> inputSource_;
@@ -228,6 +228,8 @@ private:
     bool loopEndLogged_ = false;       // INFO once: a finite loop ended
     int64_t loopLastPass_ = -2;        // last pass seen (pass-boundary lines)
     bool contentStarted_ = false;      // visible_at gate (869feynrj)
+    uint64_t sourceGeneration_ = 0;    // CPU upload identity (1amfwm7hg3u): setInputSource
+    uint64_t loadGeneration_ = 0;      // CPU upload identity (1amfwm7hg3u): successful frame loads
     int64_t contentFrame_ = INT64_MIN;
 
     // Internal methods
@@ -242,7 +244,8 @@ private:
      * "the decode queue had nothing this vsync" rather than "decoding failed".
      */
     bool isHardwareDecodeLayer() const;
-    bool loadFrame(int64_t frameNumber);
+    bool loadFrame(int64_t frameNumber);       // loadFrameInto + the load generation
+    bool loadFrameInto(int64_t frameNumber);
     bool copyFromDriverCache(int64_t frameNumber);  // For shared secondary layers
 };
 

@@ -81,18 +81,15 @@ constexpr int64_t kWarnIntervalNs = 10LL * 1000 * 1000 * 1000;
 class Policy {
 public:
     // Does this draw upload? False only when the identity equals the one last recorded.
-    bool needsUpload(const Identity& draw) const { (void)draw; return false; }  // stub (red), 1amfwm7hg3u commit 1
+    bool needsUpload(const Identity& draw) const;
 
     // After the staging step of an upload of `draw`: which source glTexSubImage2D reads and whether the
     // identity is recorded. A failure (map/unmap) uploads directly, is not recorded and may warn (rate
     // limited by `nowNs`, a steady clock).
-    Decision finish(Staging staging, const Identity& draw, int64_t nowNs) {
-        (void)staging; (void)draw; (void)nowNs;
-        return Decision{};  // stub (red)
-    }
+    Decision finish(Staging staging, const Identity& draw, int64_t nowNs);
 
     // Drop the recorded identity: the next draw uploads.
-    void forget() {}  // stub (red)
+    void forget();
 
 private:
     bool have_ = false;
@@ -112,21 +109,16 @@ public:
     static constexpr int64_t kIntervalNs = 60LL * 1000 * 1000 * 1000;
 
     // One upload: `ms` from the PBO bind to the return of glTexSubImage2D; `direct` = from the CPU buffer.
-    void add(double ms, bool direct, int width, int height, int64_t nowNs) {
-        (void)ms; (void)direct; (void)width; (void)height; (void)nowNs;  // stub (red)
-    }
+    void add(double ms, bool direct, int width, int height, int64_t nowNs);
     // The periodic line when the window is >= kIntervalNs old; starts a new window.
-    bool takeLine(int layerId, int64_t nowNs, std::string& line) {
-        (void)layerId; (void)nowNs; (void)line;
-        return false;  // stub (red)
-    }
+    bool takeLine(int layerId, int64_t nowNs, std::string& line);
     // The line for what the current window holds (layer gone), if anything.
-    bool takeFinalLine(int layerId, std::string& line) {
-        (void)layerId; (void)line;
-        return false;  // stub (red)
-    }
+    bool takeFinalLine(int layerId, std::string& line);
 
 private:
+    std::string format(int layerId, bool isFinal) const;
+    void reset();
+
     std::vector<double> ms_;
     uint64_t direct_ = 0;
     int width_ = 0;

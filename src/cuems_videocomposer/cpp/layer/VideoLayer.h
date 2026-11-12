@@ -25,6 +25,7 @@
 #include "LayerProperties.h"
 #include "LayerPlayback.h"
 #include "LayerDisplay.h"
+#include "../display/CpuUploadPolicy.h"
 #include "OutputFit.h"
 #include "../input/InputSource.h"
 #include "../sync/SyncSource.h"
@@ -96,6 +97,10 @@ public:
     // Get prepared frame for rendering (returns const pointers - zero-copy)
     // Returns true if frame is on GPU, false if on CPU
     bool getPreparedFrame(const FrameBuffer*& cpuBuffer, const GPUTextureFrameBuffer*& gpuBuffer) const;
+
+    // What the prepared CPU frame is, for the renderer's upload decision (1amfwm7hg3u); the renderer fills
+    // in textureGeneration.
+    cpuupload::Identity cpuUploadIdentity() const;
     
     // Check if current frame is on GPU
     bool isFrameOnGPU() const;

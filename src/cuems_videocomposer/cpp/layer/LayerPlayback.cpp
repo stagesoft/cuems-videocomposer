@@ -72,6 +72,7 @@ void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
     frameOnGPU_ = false;
+    ++sourceGeneration_;
     resetStartProbe();   // a new load: no window carries over (it re-arms on the cue's next offset)
 }
 
@@ -84,6 +85,7 @@ void LayerPlayback::setInputSource(std::shared_ptr<InputSource> input, bool isSh
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
     frameOnGPU_ = false;
+    ++sourceGeneration_;
     resetStartProbe();   // a new load: no window carries over (it re-arms on the cue's next offset)
 }
 
@@ -750,7 +752,24 @@ bool LayerPlayback::isHardwareDecodeLayer() const {
            videoInput->getOptimalBackend() == InputSource::DecodeBackend::GPU_HARDWARE;
 }
 
+uint64_t LayerPlayback::frameGeneration() const {
+    // Both terms only grow, so their sum changes whenever either does.
+    const uint64_t driverCache =
+        (isSharedLayer_ && !isDecodeDriver_ && inputSource_) ? inputSource_->cacheGeneration() : 0;
+    return loadGeneration_ + driverCache;
+}
+
 bool LayerPlayback::loadFrame(int64_t frameNumber) {
+    // Every successful load may have written new pixels into the frame buffer, whatever its frame number
+    // (a seek back to the shown number reloads it): the CPU upload identity counts loads, not numbers.
+    const bool loaded = loadFrameInto(frameNumber);
+    if (loaded) {
+        ++loadGeneration_;
+    }
+    return loaded;
+}
+
+bool LayerPlayback::loadFrameInto(int64_t frameNumber) {
     if (!inputSource_ || !inputSource_->isReady()) {
         return false;
     }
