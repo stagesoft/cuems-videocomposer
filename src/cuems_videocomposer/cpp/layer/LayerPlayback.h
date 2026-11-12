@@ -156,6 +156,12 @@ public:
     int64_t contentFrame() const { return contentFrame_; }
     bool hasContentFrame() const { return contentFrame_ != INT64_MIN; }
 
+    // CPU upload identity (1amfwm7hg3u, display/CpuUploadPolicy.h). sourceGeneration moves on every
+    // setInputSource; frameGeneration on every successful frame load, and for a shared secondary also on
+    // every frame its driver caches (its buffer is a view of the driver's, rewritten in place).
+    uint64_t sourceGeneration() const { return 0; }  // stub (red), 1amfwm7hg3u commit 1
+    uint64_t frameGeneration() const { return 0; }   // stub (red), 1amfwm7hg3u commit 1
+
 private:
     std::shared_ptr<InputSource> inputSource_;
     std::shared_ptr<SyncSource> syncSource_;

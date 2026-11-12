@@ -73,6 +73,11 @@ public:
     void setFrameInfo(const FrameInfo& info) { frameInfo_ = info; }
     const FrameInfo& getFrameInfo() const { return frameInfo_; }
 
+    // CPU upload identity (1amfwm7hg3u, display/CpuUploadPolicy.h): moves on every prepareFrame that writes
+    // the prepared (crop/panorama) buffer, and when the CPU frame handed out switches from that buffer back
+    // to the source one, so a held frame whose prepared pixels change is uploaded again.
+    uint64_t preparedGeneration() const { return 0; }  // stub (red), 1amfwm7hg3u commit 1
+
 private:
     LayerProperties properties_;
     FrameInfo frameInfo_;

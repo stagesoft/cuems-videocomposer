@@ -52,6 +52,22 @@ extern bool test_DisplayBackend_ParserAcceptsValidForms();
 extern bool test_DisplayBackend_ParserRejectsBadValues();
 extern bool test_DisplayBackend_ExplicitDesktopFailureTriesNothingElse();
 
+// CPU upload same tick, once per layer (1amfwm7hg3u)
+extern bool test_CpuUpload_a_NewIdentityUploadsThisDraw();
+extern bool test_CpuUpload_b_SameIdentitySkips();
+extern bool test_CpuUpload_c_TextureRecreationForcesUpload();
+extern bool test_CpuUpload_d_NewSourceForcesUpload();
+extern bool test_CpuUpload_d_PreparedPixelsForceUpload();
+extern bool test_CpuUpload_e_MapFailedDirectNotRecorded();
+extern bool test_CpuUpload_e_UnmapFailedDirectNotRecorded();
+extern bool test_CpuUpload_e_NoPboDirectIsRecorded();
+extern bool test_CpuUpload_f_WarningOncePerLayerPer10s();
+extern bool test_CpuUpload_StatsLineEvery60s();
+extern bool test_CpuUpload_PlaybackSourceGenerationBumpsOnSetInputSource();
+extern bool test_CpuUpload_PlaybackFrameGenerationBumpsOnEachLoad();
+extern bool test_CpuUpload_PlaybackSharedSecondaryFollowsDriverCache();
+extern bool test_CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite();
+
 extern bool test_Integration_LayerManagerWithMultipleLayers();
 extern bool test_Integration_VideoLayerTimeScaling();
 extern bool test_Integration_LayerProperties();
@@ -360,6 +376,20 @@ int main() {
     TestFramework::instance().addTest("DisplayBackend_ParserAcceptsValidForms", test_DisplayBackend_ParserAcceptsValidForms);
     TestFramework::instance().addTest("DisplayBackend_ParserRejectsBadValues", test_DisplayBackend_ParserRejectsBadValues);
     TestFramework::instance().addTest("DisplayBackend_ExplicitDesktopFailureTriesNothingElse", test_DisplayBackend_ExplicitDesktopFailureTriesNothingElse);
+    TestFramework::instance().addTest("CpuUpload_a_NewIdentityUploadsThisDraw", test_CpuUpload_a_NewIdentityUploadsThisDraw);
+    TestFramework::instance().addTest("CpuUpload_b_SameIdentitySkips", test_CpuUpload_b_SameIdentitySkips);
+    TestFramework::instance().addTest("CpuUpload_c_TextureRecreationForcesUpload", test_CpuUpload_c_TextureRecreationForcesUpload);
+    TestFramework::instance().addTest("CpuUpload_d_NewSourceForcesUpload", test_CpuUpload_d_NewSourceForcesUpload);
+    TestFramework::instance().addTest("CpuUpload_d_PreparedPixelsForceUpload", test_CpuUpload_d_PreparedPixelsForceUpload);
+    TestFramework::instance().addTest("CpuUpload_e_MapFailedDirectNotRecorded", test_CpuUpload_e_MapFailedDirectNotRecorded);
+    TestFramework::instance().addTest("CpuUpload_e_UnmapFailedDirectNotRecorded", test_CpuUpload_e_UnmapFailedDirectNotRecorded);
+    TestFramework::instance().addTest("CpuUpload_e_NoPboDirectIsRecorded", test_CpuUpload_e_NoPboDirectIsRecorded);
+    TestFramework::instance().addTest("CpuUpload_f_WarningOncePerLayerPer10s", test_CpuUpload_f_WarningOncePerLayerPer10s);
+    TestFramework::instance().addTest("CpuUpload_StatsLineEvery60s", test_CpuUpload_StatsLineEvery60s);
+    TestFramework::instance().addTest("CpuUpload_PlaybackSourceGenerationBumpsOnSetInputSource", test_CpuUpload_PlaybackSourceGenerationBumpsOnSetInputSource);
+    TestFramework::instance().addTest("CpuUpload_PlaybackFrameGenerationBumpsOnEachLoad", test_CpuUpload_PlaybackFrameGenerationBumpsOnEachLoad);
+    TestFramework::instance().addTest("CpuUpload_PlaybackSharedSecondaryFollowsDriverCache", test_CpuUpload_PlaybackSharedSecondaryFollowsDriverCache);
+    TestFramework::instance().addTest("CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite", test_CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite);
     
     TestFramework::instance().addTest("Integration_LayerManagerWithMultipleLayers", test_Integration_LayerManagerWithMultipleLayers);
     TestFramework::instance().addTest("Integration_VideoLayerTimeScaling", test_Integration_VideoLayerTimeScaling);

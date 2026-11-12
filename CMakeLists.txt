@@ -1023,6 +1023,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestVisibleAt.cpp
         src/cuems_videocomposer/cpp/test/TestPrimeDecode.cpp
         src/cuems_videocomposer/cpp/test/TestDisplayBackend.cpp
+        src/cuems_videocomposer/cpp/test/TestCpuUpload.cpp
     )
     
     # C++ implementation files needed by tests
