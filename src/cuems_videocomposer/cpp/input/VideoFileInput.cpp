@@ -1537,6 +1537,13 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
     if (!packet) {
         return false;
     }
+    // 1amfwm7hrb9: freed on every return. 248b8d8 dropped the success-path
+    // free, and each decoded frame then leaked its compressed packet (about
+    // 8.3 MB/s on a 1080p30 ProRes layer; the VC degraded after ~7 min).
+    struct PacketGuard {
+        AVPacket*& pkt;
+        ~PacketGuard() { av_packet_free(&pkt); }
+    } packetGuard{packet};
 
     // Get target timestamp for the frame we want (like xjadeo)
     // Use frame_pts (actual PTS from packet) instead of calculated timestamp
@@ -1628,7 +1635,6 @@ bool VideoFileInput::readFrame(int64_t frameNumber, FrameBuffer& buffer) {
                 continue;
             } else {
                 av_frame_free(&bestFrame);
-                av_packet_free(&packet);
                 return false;
             }
         }
