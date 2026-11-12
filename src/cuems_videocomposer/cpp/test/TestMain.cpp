@@ -46,6 +46,11 @@ extern bool test_ConfigurationManager_Defaults();
 extern bool test_ConfigurationManager_SetGet();
 extern bool test_ConfigurationManager_Override();
 extern bool test_ConfigurationManager_NonExistent();
+extern bool test_DisplayBackend_SelectionIgnoresEnvironment();
+extern bool test_DisplayBackend_SelectionRejectsUnknownValues();
+extern bool test_DisplayBackend_ParserAcceptsValidForms();
+extern bool test_DisplayBackend_ParserRejectsBadValues();
+extern bool test_DisplayBackend_ExplicitDesktopFailureTriesNothingElse();
 
 extern bool test_Integration_LayerManagerWithMultipleLayers();
 extern bool test_Integration_VideoLayerTimeScaling();
@@ -350,6 +355,11 @@ int main() {
     TestFramework::instance().addTest("ConfigurationManager_SetGet", test_ConfigurationManager_SetGet);
     TestFramework::instance().addTest("ConfigurationManager_Override", test_ConfigurationManager_Override);
     TestFramework::instance().addTest("ConfigurationManager_NonExistent", test_ConfigurationManager_NonExistent);
+    TestFramework::instance().addTest("DisplayBackend_SelectionIgnoresEnvironment", test_DisplayBackend_SelectionIgnoresEnvironment);
+    TestFramework::instance().addTest("DisplayBackend_SelectionRejectsUnknownValues", test_DisplayBackend_SelectionRejectsUnknownValues);
+    TestFramework::instance().addTest("DisplayBackend_ParserAcceptsValidForms", test_DisplayBackend_ParserAcceptsValidForms);
+    TestFramework::instance().addTest("DisplayBackend_ParserRejectsBadValues", test_DisplayBackend_ParserRejectsBadValues);
+    TestFramework::instance().addTest("DisplayBackend_ExplicitDesktopFailureTriesNothingElse", test_DisplayBackend_ExplicitDesktopFailureTriesNothingElse);
     
     TestFramework::instance().addTest("Integration_LayerManagerWithMultipleLayers", test_Integration_LayerManagerWithMultipleLayers);
     TestFramework::instance().addTest("Integration_VideoLayerTimeScaling", test_Integration_VideoLayerTimeScaling);

@@ -20,6 +20,7 @@
  */
 
 #include "ConfigurationManager.h"
+#include "../display/DisplayBackendChoice.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -182,6 +183,31 @@ int ConfigurationManager::parseCommandLine(int argc, char** argv) {
             }
         } else if (arg == "--no-splash" || arg == "--nosplash") {
             setBool("no_splash", true);
+        } else if (arg == "--display-backend" || arg.rfind("--display-backend=", 0) == 0) {
+            // 1amfwm7hjze: DRM unless this asks for a desktop backend. The
+            // environment (DISPLAY, WAYLAND_DISPLAY) no longer chooses. A bad
+            // value stops the start here, like --hang-guard=<bad>: left to
+            // unrecognizedOptions_ it would only be WARNed about and the VC
+            // would come up on a backend the operator did not pick.
+            std::string value;
+            bool haveValue = false;
+            const size_t eq = arg.find('=');
+            if (eq != std::string::npos) {
+                value = arg.substr(eq + 1);
+                haveValue = true;
+            } else if (i + 1 < argc && argv[i + 1][0] != '-') {
+                value = argv[++i];
+                haveValue = true;
+            }
+            displaybackend::Kind kind;
+            if (!haveValue || !displaybackend::parse(value, kind)) {
+                std::cerr << "videocomposer: --display-backend"
+                          << (haveValue ? "=" + value + " is not a valid value" : std::string(" needs a value"))
+                          << " (expected one of: " << displaybackend::acceptedValues() << ")"
+                          << std::endl;
+                return 2;
+            }
+            setString("display_backend", displaybackend::name(kind));
         } else if (arg.rfind("--hang-guard", 0) == 0 || arg.rfind("--vc-profile", 0) == 0
                    || arg.rfind("--saturation-monitor", 0) == 0) {
             // Operator flags for the hang guard, delivered through
@@ -356,6 +382,11 @@ void ConfigurationManager::printUsage() const {
     printf("  --discover-ndi [SEC]  discover and list available NDI sources (optional timeout in seconds)\n");
 #endif
     printf("  --no-splash            disable startup logo splash\n");
+    printf("  --display-backend=drm|x11|wayland\n");
+    printf("                         display backend (default: drm, whatever DISPLAY or\n");
+    printf("                         WAYLAND_DISPLAY say). x11 and wayland are not maintained\n");
+    printf("                         and not for production; if the chosen one fails, the\n");
+    printf("                         start fails (no fallback to another backend)\n");
     printf("\n");
     printf("MIDI Sync:\n");
     printf("  The application uses ALSA Sequencer for MIDI Time Code (MTC) synchronization.\n");

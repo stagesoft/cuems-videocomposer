@@ -644,6 +644,7 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
     src/cuems_videocomposer/cpp/sync/PresentTick.cpp
     src/cuems_videocomposer/cpp/sync/CadenceAdvice.cpp
+    src/cuems_videocomposer/cpp/display/DisplayBackendChoice.cpp
     src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
     src/cuems_videocomposer/cpp/sync/MTCDecoder.cpp
     src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
@@ -1021,6 +1022,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestCadenceAdvice.cpp
         src/cuems_videocomposer/cpp/test/TestVisibleAt.cpp
         src/cuems_videocomposer/cpp/test/TestPrimeDecode.cpp
+        src/cuems_videocomposer/cpp/test/TestDisplayBackend.cpp
     )
     
     # C++ implementation files needed by tests
@@ -1038,6 +1040,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
         src/cuems_videocomposer/cpp/sync/PresentTick.cpp
         src/cuems_videocomposer/cpp/sync/CadenceAdvice.cpp
+        src/cuems_videocomposer/cpp/display/DisplayBackendChoice.cpp
         src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
         src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
         src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
