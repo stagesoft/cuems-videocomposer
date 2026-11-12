@@ -33,12 +33,18 @@
 #include "../../mtcreceiver/mtcreceiver.h"  // toLocalDay (day alignment)
 #endif
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <chrono>
 
 namespace videocomposer {
+
+uint64_t LayerPlayback::nextIncarnation() {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 LayerPlayback::LayerPlayback()
     : playing_(false)
@@ -65,9 +71,11 @@ LayerPlayback::~LayerPlayback() {
 
 void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
     pause();
+    foldDriverCache();
     inputSource_ = std::move(input);
     isSharedLayer_ = false;
     isDecodeDriver_ = false;
+    attachDriverCache();
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
@@ -78,9 +86,11 @@ void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
 
 void LayerPlayback::setInputSource(std::shared_ptr<InputSource> input, bool isShared, bool isDriver) {
     pause();
+    foldDriverCache();
     inputSource_ = std::move(input);
     isSharedLayer_ = isShared;
     isDecodeDriver_ = isDriver;
+    attachDriverCache();
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
@@ -753,10 +763,28 @@ bool LayerPlayback::isHardwareDecodeLayer() const {
 }
 
 uint64_t LayerPlayback::frameGeneration() const {
-    // Both terms only grow, so their sum changes whenever either does.
-    const uint64_t driverCache =
-        (isSharedLayer_ && !isDecodeDriver_ && inputSource_) ? inputSource_->cacheGeneration() : 0;
-    return loadGeneration_ + driverCache;
+    // Every term only grows, and a role or source change folds the live cache term into cacheBase_ instead
+    // of dropping it: the sum moves forward whenever a load or a driver's cached frame changes the pixels,
+    // and never returns to a value it had.
+    const uint64_t liveCache = readsDriverCache() ? inputSource_->cacheGeneration() - cacheAttach_ : 0;
+    return loadGeneration_ + cacheBase_ + liveCache;
+}
+
+void LayerPlayback::foldDriverCache() {
+    if (readsDriverCache()) {
+        cacheBase_ += inputSource_->cacheGeneration() - cacheAttach_;
+    }
+    cacheAttach_ = 0;
+}
+
+void LayerPlayback::attachDriverCache() {
+    cacheAttach_ = readsDriverCache() ? inputSource_->cacheGeneration() : 0;
+}
+
+void LayerPlayback::setDecodeDriver(bool v) {
+    foldDriverCache();
+    isDecodeDriver_ = v;
+    attachDriverCache();
 }
 
 bool LayerPlayback::loadFrame(int64_t frameNumber) {

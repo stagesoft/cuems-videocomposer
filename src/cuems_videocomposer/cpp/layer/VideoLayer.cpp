@@ -524,6 +524,7 @@ bool VideoLayer::getPreparedFrame(const FrameBuffer*& cpuBuffer, const GPUTextur
 
 cpuupload::Identity VideoLayer::cpuUploadIdentity() const {
     cpuupload::Identity id;
+    id.incarnation = playback_.incarnation();
     id.sourceGeneration = playback_.sourceGeneration();
     id.frameGeneration = playback_.frameGeneration();
     id.preparedGeneration = display_.preparedGeneration();

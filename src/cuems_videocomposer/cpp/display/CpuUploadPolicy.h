@@ -46,14 +46,18 @@ namespace cpuupload {
 //  - preparedGeneration: LayerDisplay::prepareFrame, every write of its prepared (crop/panorama) buffer and
 //    every switch from it back to the source buffer: a held frame whose panOffset changes is new pixels.
 //  - textureGeneration: OpenGLRenderer, every (re)creation of the layer's texture.
+//  - incarnation: process-unique per LayerPlayback object. Layer ids restart at 1 after a reset and the
+//    renderer's texture cache is keyed by id, so a new layer's counters alone could equal the old one's.
 struct Identity {
+    uint64_t incarnation = 0;
     uint64_t sourceGeneration = 0;
     uint64_t frameGeneration = 0;
     uint64_t preparedGeneration = 0;
     uint64_t textureGeneration = 0;
 
     bool operator==(const Identity& o) const {
-        return sourceGeneration == o.sourceGeneration && frameGeneration == o.frameGeneration &&
+        return incarnation == o.incarnation && sourceGeneration == o.sourceGeneration &&
+               frameGeneration == o.frameGeneration &&
                preparedGeneration == o.preparedGeneration && textureGeneration == o.textureGeneration;
     }
     bool operator!=(const Identity& o) const { return !(*this == o); }

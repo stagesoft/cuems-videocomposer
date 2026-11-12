@@ -68,7 +68,7 @@ public:
     // Shared decoder flags
     bool isSharedLayer() const { return isSharedLayer_; }
     bool isDecodeDriver() const { return isDecodeDriver_; }
-    void setDecodeDriver(bool v) { isDecodeDriver_ = v; }
+    void setDecodeDriver(bool v);
 
     // Playback control
     bool play();
@@ -161,6 +161,7 @@ public:
     // every frame its driver caches (its buffer is a view of the driver's, rewritten in place).
     uint64_t sourceGeneration() const { return sourceGeneration_; }
     uint64_t frameGeneration() const;
+    uint64_t incarnation() const { return incarnation_; }  // process-unique per object
 
 private:
     std::shared_ptr<InputSource> inputSource_;
@@ -230,6 +231,16 @@ private:
     bool contentStarted_ = false;      // visible_at gate (869feynrj)
     uint64_t sourceGeneration_ = 0;    // CPU upload identity (1amfwm7hg3u): setInputSource
     uint64_t loadGeneration_ = 0;      // CPU upload identity (1amfwm7hg3u): successful frame loads
+    // The driver-cache term of frameGeneration() while a shared secondary: the cache generation counted
+    // from cacheAttach_, plus cacheBase_, what earlier secondary periods counted. Folded into cacheBase_
+    // whenever the role or the source changes, so the sum never goes back (review, 1amfwm7hg3u).
+    uint64_t cacheBase_ = 0;
+    uint64_t cacheAttach_ = 0;
+    static uint64_t nextIncarnation();
+    uint64_t incarnation_ = nextIncarnation();  // CPU upload identity: unique per LayerPlayback in the process
+    bool readsDriverCache() const { return isSharedLayer_ && !isDecodeDriver_ && inputSource_ != nullptr; }
+    void foldDriverCache();            // before a role/source change
+    void attachDriverCache();          // after it
     int64_t contentFrame_ = INT64_MIN;
 
     // Internal methods
