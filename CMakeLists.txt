@@ -1022,6 +1022,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestCadenceAdvice.cpp
         src/cuems_videocomposer/cpp/test/TestVisibleAt.cpp
         src/cuems_videocomposer/cpp/test/TestPrimeDecode.cpp
+        src/cuems_videocomposer/cpp/test/TestSoftwareDecodeLeak.cpp
         src/cuems_videocomposer/cpp/test/TestDisplayBackend.cpp
     )
     
