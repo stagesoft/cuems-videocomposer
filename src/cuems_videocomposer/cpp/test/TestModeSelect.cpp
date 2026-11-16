@@ -107,3 +107,48 @@ bool test_ModeSelect_OutputInfoFindModePrefersProgressive() {
     const OutputMode* onlyI = info.findMode(1920, 1080, 30.0);
     return m && !m->interlaced && onlyI && onlyI->interlaced;
 }
+
+// --- the "refresh=<pin> not available" WARNING must agree with the selection (1amfwm7evfj merged with 1amfwm7gq3y)
+
+bool test_ModeSelect_OfferedRatesAreProgressiveOnly() {
+    // A bare refresh= never takes an interlaced mode, so its frame rate (1080i60 = 30) is not a rate on offer:
+    // listing it would send the operator back to the very pin that was refused.
+    const auto rates = offeredRefreshRates(vg248(), 1920, 1080);
+    return rates == std::vector<double>{24.0, 50.0, 60.0};
+}
+
+bool test_ModeSelect_OfferedRatesSortedOnePerRate() {
+    const std::vector<ModeView> modes = {
+        {1920, 1080, 60.000, false, true},
+        {1920, 1080, 59.940, false, false},
+        {1920, 1080, 60.0002, false, false},   // the same rate from a second timing
+        {1920, 1080, 50.000, false, false},
+        {1280, 720, 75.000, false, false},     // another size
+    };
+    const auto rates = offeredRefreshRates(modes, 1920, 1080);
+    return rates.size() == 3 && rates[0] == 50.0 && rates[1] == 59.94 && rates[2] == 60.0;
+}
+
+bool test_ModeSelect_PinNotHonouredWhenProgressiveRateDiffers() {
+    const double tol = 0.005;  // kRefreshHonouredTolHz
+    const ModeView p60{1920, 1080, 60.0, false, true};
+    const ModeView p5995{1920, 1200, 59.95, false, true};
+    const ModeView p5994{1920, 1080, 59.9402, false, false};
+    return refreshPinNotHonoured(30.0, false, p60, tol)        // refresh=30 answered with the native 60
+        && refreshPinNotHonoured(60.0, false, p5995, tol)      // the 1920x1200 "60"
+        && !refreshPinNotHonoured(59.94, false, p5994, tol)    // an integer-kHz clock
+        && !refreshPinNotHonoured(60.0, false, p60, tol)
+        && !refreshPinNotHonoured(0.0, false, p60, tol);       // no pin
+}
+
+bool test_ModeSelect_PinNotHonouredFollowsTheInterlacedRules() {
+    const double tol = 0.005;
+    const ModeView i60{1920, 1080, 30.0, true, false};   // 1080i60: frame rate 30, field rate 60
+    const ModeView p60{1920, 1080, 60.0, false, true};
+    // An interlaced choice has its own line (asked for: INFO; the only kind at that size: WARNING), and
+    // refresh=60i is matched against the field rate, not the frame rate.
+    return !refreshPinNotHonoured(60.0, true, i60, tol)
+        && !refreshPinNotHonoured(25.0, false, i60, tol)
+        // refresh=60i on a sink without it ends on a progressive mode: not what was asked, even at 60.000 Hz.
+        && refreshPinNotHonoured(60.0, true, p60, tol);
+}

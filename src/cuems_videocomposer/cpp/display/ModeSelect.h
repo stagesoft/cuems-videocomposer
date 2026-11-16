@@ -22,6 +22,7 @@
 #ifndef VIDEOCOMPOSER_MODESELECT_H
 #define VIDEOCOMPOSER_MODESELECT_H
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -122,6 +123,34 @@ inline ModePick pickModeForRefresh(const std::vector<ModeView>& modes, int width
         }
     }
     return pick;
+}
+
+/**
+ * The "refresh=<pin> not available" WARNING of the refresh rule (1amfwm7gq3y), as pure functions, so that what it
+ * says agrees with what pickModeForRefresh() does.
+ */
+
+/// The rates a mode list offers at a size, ascending, one entry per distinct rate (within 0.0005 Hz).
+inline std::vector<double> offeredRefreshRates(const std::vector<ModeView>& modes, int width, int height) {
+    std::vector<double> rates;
+    for (const auto& m : modes) {
+        if (m.width != width || m.height != height || m.frameHz <= 0.0) {
+            continue;
+        }
+        const double hz = m.frameHz;
+        if (std::none_of(rates.begin(), rates.end(), [hz](double r) { return std::abs(r - hz) < 0.0005; })) {
+            rates.push_back(hz);
+        }
+    }
+    std::sort(rates.begin(), rates.end());
+    return rates;
+}
+
+/// Whether the mode chosen for a pinned refresh= is not the rate that was asked for. `askedInterlaced` is the
+/// trailing "i" of refresh=<field rate>i.
+inline bool refreshPinNotHonoured(double askedHz, bool askedInterlaced, const ModeView& chosen, double toleranceHz) {
+    (void)askedInterlaced;
+    return askedHz > 0.0 && std::abs(chosen.frameHz - askedHz) > toleranceHz;
 }
 
 } // namespace videocomposer
