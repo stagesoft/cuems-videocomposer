@@ -176,7 +176,10 @@ not exist in progressive the native progressive mode of that size is used with a
 (`… 1920x1080@30 does not exist as a progressive mode on this monitor; using the native progressive …`); an
 interlaced mode is taken only with `refresh=<field rate>i` (e.g. `refresh=60i`, matched against the field rate that
 `modetest` shows) or when the size has no progressive mode at all (WARNING). Auto-selection and refresh
-harmonization skip interlaced modes too.
+harmonization skip interlaced modes too. `/videocomposer/display/mode` follows the same rule in its pre-check: a rate
+that exists only interlaced at a size with progressive modes is refused (`=== MODE NOT AVAILABLE ===`, the list marks
+the interlaced modes). At equal distance the first mode listed wins. The `i` of `refresh=60i` is found past a trailing
+space or the carriage return of a CRLF file.
 
 ### Refresh rule: content fps against output Hz (1amfwm7gq3y)
 

@@ -140,10 +140,20 @@ struct OutputInfo {
     const OutputMode* findMode(int w, int h, double refresh = 0.0) const {
         // Progressive first: an interlaced mode reports its frame rate (1080i60
         // reads 30 Hz), so a bare refresh would otherwise land on it (R11).
+        bool sizeHasProgressive = false;
         for (const auto& mode : modes) {
-            if (!mode.interlaced && mode.matches(w, h, refresh)) {
+            if (mode.interlaced || mode.width != w || mode.height != h) {
+                continue;
+            }
+            sizeHasProgressive = true;
+            if (mode.matches(w, h, refresh)) {
                 return &mode;
             }
+        }
+        if (sizeHasProgressive) {
+            // The rate does not exist in progressive at this size: not answered with an interlaced mode (the same
+            // rule as pickModeForRefresh). Interlaced only when the size has nothing else.
+            return nullptr;
         }
         for (const auto& mode : modes) {
             if (mode.interlaced && mode.matches(w, h, refresh)) {

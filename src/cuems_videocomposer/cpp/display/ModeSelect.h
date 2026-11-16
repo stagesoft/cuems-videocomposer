@@ -42,7 +42,9 @@ namespace videocomposer {
  *    of that size is used (preferred, else the highest rate) and the caller
  *    logs an ERROR naming both;
  *  - only when the size has no progressive mode at all is an interlaced one
- *    taken (the nearest, as before) with a WARNING.
+ *    taken (the nearest: by field rate for refresh=<n>i, by frame rate for a
+ *    bare refresh=) with a WARNING;
+ *  - at equal distance the first mode listed wins.
  */
 struct ModeView {
     int width = 0;
@@ -69,11 +71,14 @@ inline ModePick pickModeForRefresh(const std::vector<ModeView>& modes, int width
     auto sameSize = [&](const ModeView& m) { return m.width == width && m.height == height; };
 
     if (refresh > 0.0 && wantInterlaced) {
-        double best = kTolerance;
+        // Closest within the tolerance; at equal distance the first listed wins (the kernel lists the preferred
+        // timing first), as the selection did before this rule.
+        double best = 0.0;
         for (int i = 0; i < static_cast<int>(modes.size()); ++i) {
             const auto& m = modes[i];
-            if (sameSize(m) && m.interlaced && std::abs(fieldRateHz(m) - refresh) <= best) {
-                best = std::abs(fieldRateHz(m) - refresh);
+            const double d = std::abs(fieldRateHz(m) - refresh);
+            if (sameSize(m) && m.interlaced && d <= kTolerance && (pick.index < 0 || d < best)) {
+                best = d;
                 pick = {i, ModePick::Kind::Exact};
             }
         }
@@ -82,11 +87,12 @@ inline ModePick pickModeForRefresh(const std::vector<ModeView>& modes, int width
         }
     }
     if (refresh > 0.0 && !wantInterlaced) {
-        double best = kTolerance;
+        double best = 0.0;
         for (int i = 0; i < static_cast<int>(modes.size()); ++i) {
             const auto& m = modes[i];
-            if (sameSize(m) && !m.interlaced && std::abs(m.frameHz - refresh) <= best) {
-                best = std::abs(m.frameHz - refresh);
+            const double d = std::abs(m.frameHz - refresh);
+            if (sameSize(m) && !m.interlaced && d <= kTolerance && (pick.index < 0 || d < best)) {
+                best = d;
                 pick = {i, ModePick::Kind::Exact};
             }
         }
@@ -109,14 +115,16 @@ inline ModePick pickModeForRefresh(const std::vector<ModeView>& modes, int width
     if (nativeIdx >= 0) {
         return {nativeIdx, refresh > 0.0 ? ModePick::Kind::NativeProgressive : ModePick::Kind::Exact};
     }
-    // No progressive mode of that size: nearest interlaced (frame-rate distance, as before).
+    // No progressive mode of that size: the nearest interlaced one. refresh=<n>i is a field rate, a bare refresh=
+    // a frame rate (as before).
     double best = 1e9;
     for (int i = 0; i < static_cast<int>(modes.size()); ++i) {
         const auto& m = modes[i];
         if (!sameSize(m)) {
             continue;
         }
-        const double d = refresh > 0.0 ? std::abs(m.frameHz - refresh) : (m.preferred ? -1.0 : 0.0);
+        const double hz = wantInterlaced ? fieldRateHz(m) : m.frameHz;
+        const double d = refresh > 0.0 ? std::abs(hz - refresh) : (m.preferred ? -1.0 : 0.0);
         if (d < best) {
             best = d;
             pick = {i, ModePick::Kind::OnlyInterlaced};

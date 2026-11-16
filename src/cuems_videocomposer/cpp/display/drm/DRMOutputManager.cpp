@@ -26,6 +26,7 @@
 #include "DRMOutputManager.h"
 #include <vector>
 #include <sstream>
+#include <limits>
 #include "../ModeSelect.h"
 #include "../../utils/Logger.h"
 
@@ -879,8 +880,8 @@ drmModeModeInfo* DRMOutputManager::findMode(drmModeConnector* conn,
     const std::string who = logName.empty() ? std::string("output") : logName;
     if (pick.kind == ModePick::Kind::NativeProgressive) {
         LOG_ERROR << "DRMOutputManager: " << who << ": " << width << "x" << height << "@"
-                  << refreshRate << (wantInterlaced ? "i" : "")
-                  << " does not exist as a progressive mode on this monitor; using the native "
+                  << refreshRate << (wantInterlaced ? "i" : "") << " does not exist as "
+                  << (wantInterlaced ? "an interlaced" : "a progressive") << " mode on this monitor; using the native "
                   << "progressive " << chosen.width << "x" << chosen.height << "@" << chosen.frameHz
                   << "Hz instead (interlaced modes are used only when asked for, e.g. refresh=60i)";
     } else if (pick.kind == ModePick::Kind::OnlyInterlaced) {
@@ -906,7 +907,7 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
     
     LOG_INFO << "  Connector: " << conn->info.name << " crtcId=" << conn->crtcId;
     
-    drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate);
+    drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate, false, conn->info.name);
     if (!mode) {
         LOG_ERROR << "DRMOutputManager: Mode not found: " 
                   << width << "x" << height << "@" << refreshRate;
@@ -970,7 +971,7 @@ bool DRMOutputManager::prepareMode(int index, int width, int height, double refr
         return false;
     }
     
-    drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate);
+    drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate, false, conn->info.name);
     if (!mode) {
         LOG_WARNING << "=== MODE NOT AVAILABLE ===";
         LOG_WARNING << "  Output: " << conn->info.name;
@@ -1175,7 +1176,9 @@ const drmModeModeInfo* DRMOutputManager::findBestMode(const DRMConnector& connec
     }
     
     const drmModeModeInfo* bestMode = nullptr;
-    int bestScore = -1;
+    // Lowest possible: the interlaced penalty below makes a score negative, and a sink with interlaced modes only
+    // must still get one of them.
+    int bestScore = std::numeric_limits<int>::min();
     
     for (int i = 0; i < connector.connector->count_modes; ++i) {
         const drmModeModeInfo* mode = &connector.connector->modes[i];
