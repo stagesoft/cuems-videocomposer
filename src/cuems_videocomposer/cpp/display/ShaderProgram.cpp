@@ -227,6 +227,13 @@ void ShaderProgram::setUniform(const std::string& name, float x, float y, float 
     }
 }
 
+void ShaderProgram::setUniformMatrix3fv(const std::string& name, const float* matrix) {
+    GLint location = getUniformLocation(name);
+    if (location != -1) {
+        glUniformMatrix3fv(location, 1, GL_FALSE, matrix);
+    }
+}
+
 void ShaderProgram::setUniformMatrix4fv(const std::string& name, const float* matrix) {
     GLint location = getUniformLocation(name);
     if (location != -1) {

@@ -26,6 +26,7 @@
 #include "../input/HAPVideoInput.h"
 #include "../input/InputSource.h"
 #include "VideoShaders.h"
+#include "ColorMatrix.h"
 #include "HapShaders.h"
 #include <GL/glew.h>  // Must be included before GL/gl.h
 extern "C" {
@@ -35,6 +36,7 @@ extern "C" {
 #include "../../homography.h"
 }
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -148,6 +150,12 @@ bool OpenGLRenderer::init() {
     if (textureId_ == 0) {
         return false;
     }
+
+    cpuUploadStatsEnabled_ = cpuupload::statsEnabledFromEnv();
+    if (cpuUploadStatsEnabled_) {
+        LOG_INFO << "OpenGLRenderer: CpuUploadStats enabled (VIDEOCOMPOSER_CADENCE_STATS) -- "
+                 << "one line per CPU-uploaded layer every 60 s";
+    }
     
     // Initialize VBO/VAO for shader-based rendering
     if (!initQuadVBO()) {
@@ -181,6 +189,7 @@ void OpenGLRenderer::cleanup() {
     
     // Cleanup all cached layer textures and PBOs
     for (auto& pair : layerTextureCache_) {
+        flushCpuUploadStats(pair.first, pair.second);
         if (pair.second.textureId != 0) {
             glDeleteTextures(1, &pair.second.textureId);
         }
@@ -200,41 +209,90 @@ void OpenGLRenderer::cleanup() {
     initialized_ = false;
 }
 
-// PBO helper methods for async texture upload
-bool OpenGLRenderer::initLayerPBOs(LayerTextureCache& cache, int width, int height) {
+// The CPU upload's staging buffer (1amfwm7hg3u, D2 (a)): one PBO per layer. Its store is allocated by the
+// orphaning glBufferData of each upload, so nothing is sized here.
+bool OpenGLRenderer::initLayerPBO(LayerTextureCache& cache) {
     if (cache.pboInitialized) {
         return true;
     }
-    
-    // Calculate buffer size (BGRA = 4 bytes per pixel)
-    size_t bufferSize = static_cast<size_t>(width) * height * 4;
-    
-    glGenBuffers(2, cache.pbo);
-    if (cache.pbo[0] == 0 || cache.pbo[1] == 0) {
-        LOG_ERROR << "Failed to create PBOs for layer texture upload";
+    if (cache.pboFailed) {
         return false;
     }
-    
-    // Initialize both PBOs with empty storage
-    for (int i = 0; i < 2; i++) {
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cache.pbo[i]);
-        glBufferData(GL_PIXEL_UNPACK_BUFFER, bufferSize, nullptr, GL_STREAM_DRAW);
+    glGenBuffers(1, &cache.pbo);
+    if (cache.pbo == 0) {
+        LOG_ERROR << "Failed to create the PBO for layer texture upload: uploading directly from the CPU buffer";
+        cache.pboFailed = true;
+        return false;
     }
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    
-    cache.pboIndex = 0;
     cache.pboInitialized = true;
-    
-    LOG_DEBUG << "Initialized PBO double-buffering for layer (" << width << "x" << height << ")";
+    LOG_DEBUG << "Initialized the upload PBO for layer (" << cache.width << "x" << cache.height << ")";
     return true;
 }
 
 void OpenGLRenderer::cleanupLayerPBOs(LayerTextureCache& cache) {
     if (cache.pboInitialized) {
-        glDeleteBuffers(2, cache.pbo);
-        cache.pbo[0] = 0;
-        cache.pbo[1] = 0;
+        glDeleteBuffers(1, &cache.pbo);
+        cache.pbo = 0;
         cache.pboInitialized = false;
+    }
+}
+
+void OpenGLRenderer::uploadCpuFrame(int layerId, LayerTextureCache& cache, const FrameBuffer& frame,
+                                    const cpuupload::Identity& id) {
+    using Clock = std::chrono::steady_clock;
+    const int width = cache.width;
+    const int height = cache.height;
+    const size_t dataSize = static_cast<size_t>(width) * height * 4;  // BGRA
+    const Clock::time_point t0 = cpuUploadStatsEnabled_ ? Clock::now() : Clock::time_point();
+
+    // Stage THIS draw's frame: orphan the store (the GL keeps the old one alive for any pending read, so
+    // the write never waits on the GPU), map, copy, unmap. A NULL map or a GL_FALSE unmap leaves nothing
+    // usable in the PBO.
+    cpuupload::Staging staging = cpuupload::Staging::NoPbo;
+    if (initLayerPBO(cache)) {
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cache.pbo);
+        glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(dataSize), nullptr, GL_STREAM_DRAW);
+        void* ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, static_cast<GLsizeiptr>(dataSize),
+                                     GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+        if (!ptr) {
+            staging = cpuupload::Staging::MapFailed;
+        } else {
+            memcpy(ptr, frame.data(), dataSize);
+            staging = glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER) == GL_TRUE ? cpuupload::Staging::Ok
+                                                                       : cpuupload::Staging::UnmapFailed;
+        }
+    }
+
+    const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        Clock::now().time_since_epoch()).count();
+    const cpuupload::Decision d = cache.uploadPolicy.finish(staging, id, nowNs);
+    if (d.directFromCpu) {
+        // The data pointer is client memory only with no unpack buffer bound.
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, frame.data());
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);  // offset 0
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    }
+
+    if (d.warn) {
+        LOG_WARNING << "CPU upload: layer " << layerId << " staging buffer "
+                    << (staging == cpuupload::Staging::MapFailed ? "map failed" : "unmap returned GL_FALSE")
+                    << "; uploaded directly from the CPU buffer, the next draw retries the PBO"
+                    << (d.suppressed ? " (" + std::to_string(d.suppressed) + " more since the last warning)"
+                                     : std::string());
+    }
+
+    if (cpuUploadStatsEnabled_) {
+        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        cache.uploadStats.add(ms, d.directFromCpu, width, height, nowNs);
+    }
+}
+
+void OpenGLRenderer::flushCpuUploadStats(int layerId, LayerTextureCache& cache) {
+    std::string line;
+    if (cpuUploadStatsEnabled_ && cache.uploadStats.takeFinalLine(layerId, line)) {
+        LOG_INFO << line;
     }
 }
 
@@ -531,7 +589,7 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
 
     // Get properties reference (safe since everything runs in main thread)
     const LayerProperties& props = layer->properties();
-    if (!props.visible || props.awaitingFrame) {
+    if (!props.visible || props.awaitingFrame || props.tailBlank) {
         return false;
     }
 
@@ -602,10 +660,15 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 shaderTextureId = cacheIt->second.textureId;
                 cachePtr = &cacheIt->second;
             } else {
-                // Create new GL_TEXTURE_2D
+                // Create new GL_TEXTURE_2D. The upload record and stats stay with the layer; the new
+                // texture generation makes its first draw upload.
+                cpuupload::Policy carriedPolicy;
+                cpuupload::Stats carriedStats;
                 if (cacheIt != layerTextureCache_.end()) {
                     texturesToDelete_.push_back(cacheIt->second.textureId);
                     cleanupLayerPBOs(cacheIt->second);
+                    carriedPolicy = cacheIt->second.uploadPolicy;
+                    carriedStats = std::move(cacheIt->second.uploadStats);
                     layerTextureCache_.erase(cacheIt);
                 }
                 
@@ -622,49 +685,31 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 cache.textureId = shaderTextureId;
                 cache.width = layerTextureWidth;
                 cache.height = layerTextureHeight;
-                cache.pbo[0] = 0;
-                cache.pbo[1] = 0;
-                cache.pboIndex = 0;
-                cache.pboInitialized = false;
-                layerTextureCache_[layerId] = cache;
-                cachePtr = &layerTextureCache_[layerId];
+                cache.textureGeneration = ++textureGenerationCounter_;
+                cache.uploadPolicy = carriedPolicy;
+                cache.uploadStats = std::move(carriedStats);
+                cachePtr = &(layerTextureCache_[layerId] = std::move(cache));
             }
             
-            // Upload frame data using PBO double-buffering for async transfer
-            // This avoids blocking the render thread during CPU→GPU copy
+            // Upload THIS tick's frame, in this call (1amfwm7hg3u): the frame chosen in this tick reaches
+            // the texture in this tick, and the first draw after a show or a texture (re)creation is this
+            // frame, never the other buffer's leftovers. Once per identity: another surface drawing the
+            // layer in the same tick, or a held frame, reuses the texture (D3 (a)).
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, shaderTextureId);
-            
-            size_t dataSize = static_cast<size_t>(layerTextureWidth) * layerTextureHeight * 4;
-            
-            if (cachePtr && initLayerPBOs(*cachePtr, layerTextureWidth, layerTextureHeight)) {
-                // PBO path: async upload
-                int currentPBO = cachePtr->pboIndex;
-                int nextPBO = 1 - currentPBO;
-                
-                // Bind the "next" PBO for texture upload (data was copied last frame)
-                // On first frame, this will upload uninitialized data, but that's ok
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cachePtr->pbo[nextPBO]);
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
-                                GL_BGRA, GL_UNSIGNED_BYTE, nullptr);  // offset 0 in PBO
-                
-                // Now copy new frame data to "current" PBO (async DMA)
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cachePtr->pbo[currentPBO]);
-                // Use GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT for best performance
-                void* ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, dataSize,
-                                             GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
-                if (ptr) {
-                    memcpy(ptr, cpuBuffer->data(), dataSize);
-                    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+
+            cpuupload::Identity drawId = layer->cpuUploadIdentity();
+            drawId.textureGeneration = cachePtr->textureGeneration;
+            if (cachePtr->uploadPolicy.needsUpload(drawId)) {
+                uploadCpuFrame(layerId, *cachePtr, *cpuBuffer, drawId);
+            }
+            if (cpuUploadStatsEnabled_) {
+                std::string statsLine;
+                const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (cachePtr->uploadStats.takeLine(layerId, nowNs, statsLine)) {
+                    LOG_INFO << statsLine;
                 }
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-                
-                // Swap PBO index for next frame
-                cachePtr->pboIndex = nextPBO;
-            } else {
-                // Fallback: direct upload (no PBO)
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
-                            GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
             }
             
             // Apply blend mode
@@ -824,12 +869,23 @@ void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layer
     evictRemovedLayerTextures(layers);
 
     // Check if master transforms are active
-    bool useMasterFBO = masterProperties_.isActive();
+    bool useMasterFBO = masterPassActive();
+
+    // The target the caller bound: the window (0) on X11/Wayland, the virtual
+    // canvas FBO on DRM. The master pass must end there, not on 0: on DRM, 0 is
+    // the EGL back buffer that the per-output blit overwrites, so master color
+    // and transforms used to vanish (1amfwm7fp88).
+    GLint targetFBO = 0;
     
     if (useMasterFBO) {
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &targetFBO);
+
         // Initialize or resize FBO if needed
         if (!masterFBOInitialized_ || masterFBOWidth_ != viewportWidth_ || masterFBOHeight_ != viewportHeight_) {
-            if (!initMasterFBO(viewportWidth_, viewportHeight_)) {
+            const bool ok = initMasterFBO(viewportWidth_, viewportHeight_);
+            // initMasterFBO() leaves 0 bound, success or not
+            glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(targetFBO));
+            if (!ok) {
                 LOG_ERROR << "Failed to initialize master FBO, falling back to direct rendering";
                 useMasterFBO = false;
             }
@@ -855,11 +911,11 @@ void OpenGLRenderer::compositeLayers(const std::vector<const VideoLayer*>& layer
     }
     
     if (useMasterFBO && masterFBOInitialized_) {
-        // Unbind FBO, render to screen with master transforms
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        // Back to the caller's target, render the FBO there with master transforms
+        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(targetFBO));
         glViewport(0, 0, viewportWidth_, viewportHeight_);
         
-        // Clear screen
+        // Clear the target
         glClear(GL_COLOR_BUFFER_BIT);
         
         // Render FBO texture with master transforms
@@ -891,6 +947,7 @@ void OpenGLRenderer::evictRemovedLayerTextures(const std::vector<const VideoLaye
             ++it;
             continue;
         }
+        flushCpuUploadStats(layerId, it->second);
         if (it->second.textureId != 0) {
             texturesToDelete_.push_back(it->second.textureId);
         }
@@ -1634,6 +1691,25 @@ void OpenGLRenderer::cleanupMasterFBO() {
     masterFBOInitialized_ = false;
 }
 
+bool OpenGLRenderer::masterPassActive() {
+    const MasterProperties& props = masterProperties_;
+    if (!isCoreProfile_) {
+        return props.isActive();
+    }
+    MasterProperties transformsOnly = props;
+    transformsOnly.colorAdjust.reset();
+    if (transformsOnly.isActive()) {
+        if (!masterTransformWarned_) {
+            LOG_WARNING << "Master position/scale/rotation/opacity/corners are not supported on this"
+                           " display backend (core profile) and are ignored; master color still applies";
+            masterTransformWarned_ = true;
+        }
+    } else {
+        masterTransformWarned_ = false;
+    }
+    return props.colorAdjust.isActive();
+}
+
 void OpenGLRenderer::renderMasterQuadWithTransforms() {
     // Render the FBO texture to screen with master transforms applied
     const MasterProperties& props = masterProperties_;
@@ -1794,9 +1870,18 @@ void OpenGLRenderer::renderMasterQuadWithTransforms() {
 //   - Shader branch skips all color math (~0.02% GPU overhead)
 //
 // When enabled:
-//   - 6 uniforms are set (enabled + 5 color values)
-//   - Full color correction applied in shader
+//   - 4 uniforms are set (enabled + the CPU-composed matrix, offset and 1/gamma)
+//   - The shader applies M * rgb + off, then gamma and the clamp
 //
+// The trims reach the shaders as a CPU-composed matrix (ColorMatrix.h, programme
+// phase 3 rev 4): about 60 flops per colored layer per draw, instead of the hue
+// matrix and five function calls per pixel.
+void OpenGLRenderer::setColorMatrixUniforms(ShaderProgram* shader, const ColorMatrix& cm) {
+    shader->setUniformMatrix3fv(kUniformColorMatrix, cm.m);
+    shader->setUniform(kUniformColorOffset, cm.off[0], cm.off[1], cm.off[2]);
+    shader->setUniform(kUniformInvGamma, cm.invGamma);
+}
+
 void OpenGLRenderer::setColorCorrectionUniforms(ShaderProgram* shader, 
                                                 const LayerProperties::ColorAdjustment& colorAdjust) {
     if (!shader) return;
@@ -1805,11 +1890,9 @@ void OpenGLRenderer::setColorCorrectionUniforms(ShaderProgram* shader,
     shader->setUniform("uColorCorrectionEnabled", enabled ? 1 : 0);
     
     if (enabled) {
-        shader->setUniform("uBrightness", colorAdjust.brightness);
-        shader->setUniform("uContrast", colorAdjust.contrast);
-        shader->setUniform("uSaturation", colorAdjust.saturation);
-        shader->setUniform("uHue", colorAdjust.hue);
-        shader->setUniform("uGamma", colorAdjust.gamma);
+        setColorMatrixUniforms(shader, composeColorMatrix(colorAdjust.brightness, colorAdjust.contrast,
+                                                          colorAdjust.saturation, colorAdjust.hue,
+                                                          colorAdjust.gamma));
     }
 }
 
@@ -1821,11 +1904,9 @@ void OpenGLRenderer::setMasterColorCorrectionUniforms(ShaderProgram* shader,
     shader->setUniform("uColorCorrectionEnabled", enabled ? 1 : 0);
     
     if (enabled) {
-        shader->setUniform("uBrightness", colorAdjust.brightness);
-        shader->setUniform("uContrast", colorAdjust.contrast);
-        shader->setUniform("uSaturation", colorAdjust.saturation);
-        shader->setUniform("uHue", colorAdjust.hue);
-        shader->setUniform("uGamma", colorAdjust.gamma);
+        setColorMatrixUniforms(shader, composeColorMatrix(colorAdjust.brightness, colorAdjust.contrast,
+                                                          colorAdjust.saturation, colorAdjust.hue,
+                                                          colorAdjust.gamma));
     }
 }
 

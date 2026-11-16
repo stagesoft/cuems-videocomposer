@@ -100,6 +100,7 @@ private:
     bool handleLayerPosition(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerOpacity(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerVisible(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerVisibleAt(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerZOrder(VideoLayer* layer, const std::vector<std::string>& args);
     
     // Time-scaling command handlers (app-level)
@@ -112,6 +113,7 @@ private:
     bool handleLayerTimeScale(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerTimeScale2(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerLoop(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerLoopPeriod(VideoLayer* layer, const std::vector<std::string>& args);  // /layer/<id>/loop/period i i [i]
     bool handleLayerReverse(VideoLayer* layer, const std::vector<std::string>& args);
     
     // Crop/Panorama command handlers (app-level)

@@ -88,10 +88,42 @@ public:
     virtual FrameInfo getFrameInfo() const = 0;
 
     /**
+     * The layer's frame rate as a rational, r_frame_rate (num / den fps):
+     * the rate the loop period arithmetic of a looping cue uses (869ejxng3
+     * section 4.4; the engine computes its frame count on the same rate).
+     * False when the source has no such rate (live sources, mocks).
+     */
+    virtual bool getFrameRateRational(int64_t& num, int64_t& den) const {
+        (void)num;
+        (void)den;
+        return false;
+    }
+
+    /**
+     * This source's own count of the video stream's frames, for the loop
+     * period only to log and compare with the engine's count (869ejxng3
+     * section 4.4, I10): round(stream duration x r_frame_rate) where the
+     * stream has a duration, else the index count; -1 when unknown.
+     * `rule` names which ("stream" or "index").
+     */
+    virtual int64_t realFrames(const char** rule = nullptr) const {
+        if (rule) *rule = "none";
+        return -1;
+    }
+
+    /**
      * Get the current frame number (last frame read)
      * @return Current frame number, or -1 if not available
      */
     virtual int64_t getCurrentFrame() const = 0;
+
+    /**
+     * The frame whose pixels a successful read of `requested` left in the
+     * caller's buffer (869feynrj visible_at, review X1). A read that reports
+     * success while holding an older frame (an async decode-queue miss) says
+     * so here; by default a successful read delivered what was asked.
+     */
+    virtual int64_t deliveredFrame(int64_t requested) const { return requested; }
 
     /**
      * Codec types supported by the system
@@ -226,10 +258,14 @@ public:
     const FrameBuffer* getCachedCPUFrame() const { return !cachedOnGPU_ ? &cachedCPU_ : nullptr; }
     int64_t getCachedFrameNumber() const { return cachedFrameNumber_; }
     bool isCachedOnGPU() const { return cachedOnGPU_; }
+    // Moves on every setCachedFrame: a secondary's CPU buffer is a view of the driver's, rewritten in place,
+    // so this is how it sees new pixels it did not load itself (CPU upload identity, 1amfwm7hg3u).
+    uint64_t cacheGeneration() const { return cacheGeneration_; }
 
     void setCachedFrame(int64_t frameNumber, const GPUTextureFrameBuffer& gpu) {
         cachedGPU_ = gpu;               // non-owning copy (ownsTexture_=false via copy ctor)
         cachedFrameNumber_ = frameNumber;
+        ++cacheGeneration_;
         cachedOnGPU_ = true;
         hasCachedFrame_ = true;
     }
@@ -237,6 +273,7 @@ public:
     void setCachedFrame(int64_t frameNumber, const FrameBuffer& cpu) {
         cachedCPU_.copyFrom(cpu);        // non-owning shallow copy (pointer + metadata, NOT pixels)
         cachedFrameNumber_ = frameNumber;
+        ++cacheGeneration_;
         cachedOnGPU_ = false;
         hasCachedFrame_ = true;
     }
@@ -250,6 +287,7 @@ private:
     // Shared decoder cache storage (only populated when this InputSource is used as a shared driver)
     bool hasCachedFrame_ = false;
     int64_t cachedFrameNumber_ = -1;
+    uint64_t cacheGeneration_ = 0;
     GPUTextureFrameBuffer cachedGPU_;
     FrameBuffer cachedCPU_;
     bool cachedOnGPU_ = false;

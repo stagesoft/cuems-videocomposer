@@ -127,6 +127,12 @@ private:
     bool initializeLayerManager();
     bool createInitialLayer();
     bool initializeGlobalSyncSource();
+    // /run/cuems/videocomposer.caps (869ejxng3 section 4.2): written at the
+    // end of initialize(), unlinked by shutdown() when it is still ours
+    void writeCapsFile();
+    void removeCapsFile();
+    std::string capsPath_;
+    bool capsWritten_ = false;
     
     // Common helper methods
     std::unique_ptr<InputSource> createInputSource(const std::string& source);
@@ -134,7 +140,11 @@ private:
     std::unique_ptr<VideoLayer> createEmptyLayer(const std::string& cueId);
     std::unique_ptr<SyncSource> createLayerSyncSource(InputSource* inputSource);
     void configureMIDISyncSource(MIDISyncSource* midiSync, DisplayBackend* displayBackend);
-    void setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource);
+    void setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource,
+                                   const std::string& cueId = std::string(),
+                                   const std::string& filepath = std::string());
+    /// The refresh rule said at layer load (plan 1amfwm7gq3y §4.2): one journal line per load, naming the cue.
+    void logCadenceAdvice(VideoLayer* layer, const std::string& cueId, const std::string& filepath);
     
     // Source detection helpers
     bool isNDISource(const std::string& source);

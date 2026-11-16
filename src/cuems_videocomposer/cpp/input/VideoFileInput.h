@@ -82,7 +82,26 @@ public:
     bool seek(int64_t frameNumber) override;
     void resetSeekState() override;
     FrameInfo getFrameInfo() const override;
+    bool getFrameRateRational(int64_t& num, int64_t& den) const override {
+        if (rateNum_ <= 0 || rateDen_ <= 0) return false;
+        num = rateNum_;
+        den = rateDen_;
+        return true;
+    }
+    int64_t realFrames(const char** rule = nullptr) const override {
+        if (streamFrames_ >= 0) {
+            if (rule) *rule = "stream";
+            return streamFrames_;
+        }
+        if (rule) *rule = "index";
+        return frameCount_ > 0 ? frameCount_ : -1;
+    }
     int64_t getCurrentFrame() const override;
+    // 869feynrj X1: on the hardware (async queue) path a miss holds the old
+    // texture and still reports success; this is the frame really transferred.
+    int64_t deliveredFrame(int64_t requested) const override {
+        return useHardwareDecoding_ ? lastTransferredFrame_ : requested;
+    }
     CodecType detectCodec() const override;
     bool supportsDirectGPUTexture() const override;
     DecodeBackend getOptimalBackend() const override;
@@ -144,6 +163,35 @@ public:
      */
     void setIndexOnly(bool indexOnly) { indexOnly_ = indexOnly; }
     bool getIndexOnly() const { return indexOnly_; }
+
+    /**
+     * Prime a software decode at load (1amfwm7hk6j): decode frame 0 once, on
+     * the loader's worker right after open(), and keep it (frame_, swsCtx_,
+     * currentFrame_ = 0). The first follow poll on the render thread then takes
+     * readFrame()'s same-frame early return (one colour conversion) instead of
+     * seek + decoder pipeline fill + scaler setup, and frames 1, 2, ... are
+     * sequential. Only for a software decode (codecCtx_ open, no async decode
+     * queue, not index-only); hardware, HAP and NDI never get here.
+     *
+     * Failure: one WARNING naming the file, and the decode state is reset
+     * (currentFrame_ = -1, lastDecodedPTS_/lastDecodedFrameNo_, codec flushed),
+     * because seek() has already set currentFrame_ and the next readFrame(0)
+     * would otherwise skip its seek and read on from where the failed decode
+     * left the stream. The load still succeeds; the first poll decodes as before.
+     */
+    enum class PrimeResult { NotTried, NotApplicable, Primed, Failed };
+    PrimeResult primeSoftwareDecode();
+    PrimeResult lastPrimeResult() const { return primeResult_; }
+
+    // Demuxer seeks made by seek()/readFrame() since open() (index passes not
+    // counted). Observability for the prime's tests.
+    int64_t demuxSeekCount() const { return demuxSeeks_; }
+
+#ifdef CUEMS_VC_TESTING
+    // Test seam: the next primeSoftwareDecode() (any instance) runs its decode
+    // and then reports it failed, leaving the state a real failure leaves.
+    static void failNextPrimeForTesting();
+#endif
 
     // Decode-path health (see InputSource::Health)
     Health getHealth() const override;
@@ -296,10 +344,19 @@ private:
     std::string currentFile_;
     bool ignoreStartOffset_;
     int64_t currentFrame_;
+    int64_t lastTransferredFrame_ = -1;  // hardware path: the frame in the caller's texture (869feynrj X1)
+    PrimeResult primeResult_ = PrimeResult::NotTried;   // 1amfwm7hk6j
+    int64_t demuxSeeks_ = 0;
+#ifdef CUEMS_VC_TESTING
+    bool primeFailSeam_ = false;
+#endif
 
     // Internal state
     bool ready_;
     AVRational frameRateQ_;
+    int64_t rateNum_ = 0;       // r_frame_rate (loop period, 869ejxng3)
+    int64_t rateDen_ = 0;
+    int64_t streamFrames_ = -1; // round(stream duration x r_frame_rate), -1 = no stream duration
     
     // Decode-path health, written by open()'s failure ladder (loader thread)
     // and by the recovery worker; read by the render thread and by a future

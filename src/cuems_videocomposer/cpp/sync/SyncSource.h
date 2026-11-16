@@ -96,6 +96,13 @@ public:
     virtual long getTimeMs() const { return -1; }
 
     /**
+     * The sync time evaluated at an arbitrary CLOCK_MONOTONIC instant (ns), in ms with the display-latency
+     * compensation applied: the cadence engine asks for the time of the vblank its frame will be presented on,
+     * never the time of the poll (plan 1amfwm7gpz7 §5.2 rule 2). Default: the plain getTimeMs().
+     */
+    virtual double getTimeMsAt(int64_t monotonicNs) const { (void)monotonicNs; return static_cast<double>(getTimeMs()); }
+
+    /**
      * Get the display-pipeline latency compensation in milliseconds.
      * MIDISyncSource advances pollFrame() by this amount; callers that need
      * the raw wire-MTC position (e.g. OSD display) subtract it back.

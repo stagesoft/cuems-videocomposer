@@ -25,13 +25,26 @@
 #include "../utils/SMPTEUtils.h"
 #include "../sync/SyncSource.h"
 #include "../sync/FramerateConverterSyncSource.h"
+#include "../sync/EngineOffsetSplit.h"
+#include "../display/CadenceStats.h"
 #include "../input/HAPVideoInput.h"
 #include "../input/VideoFileInput.h"
+#ifdef HAVE_MTCRECEIVER
+#include "../../mtcreceiver/mtcreceiver.h"  // toLocalDay (day alignment)
+#endif
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <chrono>
 
 namespace videocomposer {
+
+uint64_t LayerPlayback::nextIncarnation() {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 LayerPlayback::LayerPlayback()
     : playing_(false)
@@ -58,24 +71,32 @@ LayerPlayback::~LayerPlayback() {
 
 void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
     pause();
+    foldDriverCache();
     inputSource_ = std::move(input);
     isSharedLayer_ = false;
     isDecodeDriver_ = false;
+    attachDriverCache();
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
     frameOnGPU_ = false;
+    ++sourceGeneration_;
+    resetStartProbe();   // a new load: no window carries over (it re-arms on the cue's next offset)
 }
 
 void LayerPlayback::setInputSource(std::shared_ptr<InputSource> input, bool isShared, bool isDriver) {
     pause();
+    foldDriverCache();
     inputSource_ = std::move(input);
     isSharedLayer_ = isShared;
     isDecodeDriver_ = isDriver;
+    attachDriverCache();
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
     frameOnGPU_ = false;
+    ++sourceGeneration_;
+    resetStartProbe();   // a new load: no window carries over (it re-arms on the cue's next offset)
 }
 
 void LayerPlayback::setSyncSource(std::unique_ptr<SyncSource> sync) {
@@ -116,6 +137,8 @@ bool LayerPlayback::seek(int64_t frameNumber) {
 }
 
 void LayerPlayback::update() {
+    contentStarted_ = false;
+    contentFrame_ = INT64_MIN;
     if (!isReady()) {
         return;
     }
@@ -142,11 +165,167 @@ void LayerPlayback::update() {
     }
 }
 
+namespace {
+
+int64_t steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Without an open mtcreceiver driver (none in the build, or MIDI fell back to
+// another driver) nothing will ever make its head authoritative.
+bool mtcReceiverActive() {
+#ifdef HAVE_MTCRECEIVER
+    return dayalign::mtcReceiverDrivers().load() > 0;
+#else
+    return false;
+#endif
+}
+
+bool asReceived(long engineMs, long& localMs, long& k) {
+    localMs = engineMs;
+    k = 0;
+    return true;
+}
+
+} // namespace
+
+void LayerPlayback::setEngineTimeOffset(int64_t rawFrames, const std::string& tag) {
+    engineOffset_.latch(rawFrames, steadyNowMs(), tag);
+    // Resolved on receipt when the head is already authoritative (the normal
+    // case): the offset then takes effect, and getTimeOffset() reports it,
+    // exactly as before. Only a head that is not authoritative leaves it pending.
+    resolveEngineOffset();
+}
+
+void LayerPlayback::resolveEngineOffset() {
+    if (!engineOffset_.pending()) {
+        return;
+    }
+    if (!mtcReceiverActive()) {
+        // Fail open, as before this change, but say so once per process.
+        const int64_t raw = engineOffset_.raw();
+        timeOffset_ = engineOffset_.tryResolve(asReceived).frames;
+        std::string line;
+        if (dayalign::processLog().onAsReceived(raw, line)) {
+            LOG_WARNING << line;
+        }
+        return;
+    }
+#ifdef HAVE_MTCRECEIVER
+    const dayalign::EngineOffsetLatch::Outcome o = engineOffset_.tryResolve(MtcReceiver::toLocalDay);
+    if (o.status == dayalign::EngineOffsetLatch::Status::Resolved) {
+        // 25 fps MTC frames, day-aligned; the fps conversion in
+        // updateFromSyncSource() still applies.
+        timeOffset_ = o.frames;
+        std::string line;
+        bool warning = false;
+        // mtcHead is re-read here, after toLocalDay(): the head printed in the
+        // k line can differ from the one k was computed with by a few ms.
+        if (dayalign::processLog().onResolved(o.k, o.engineMs, MtcReceiver::mtcHead.load(), line, warning)) {
+            if (warning) {
+                LOG_WARNING << line;
+            } else {
+                LOG_INFO << line;
+            }
+        }
+        if (dayalign::processLog().onFrameRate(MtcReceiver::curFrameRate.load(), line)) {
+            LOG_WARNING << line;
+        }
+        return;
+    }
+    int64_t ageMs = 0;
+    if (engineOffset_.unresolvedWarningDue(steadyNowMs(), MtcReceiver::isTimecodeRunning.load(), ageMs)) {
+        LOG_WARNING << "MTC day-align: engine offset " << engineOffset_.raw() << " (engine "
+                    << o.engineMs << " ms) for layer " << engineOffset_.tag() << " unresolved for "
+                    << ageMs << " ms with MTC running (MTC head not authoritative yet); the layer"
+                       " does not follow MTC until it is";
+    }
+#endif
+}
+
+void LayerPlayback::resetStartProbe() {
+    startProbeArmed_ = false;
+    startProbeN_ = 0;
+    startProbeSkipped_ = 0;
+}
+
+void LayerPlayback::startProbe(int64_t frame, FramerateConverterSyncSource* c, double srcFps, double fps) {
+    // An engineering line, not an operator one (one start scatters by about +-6 ms with the vsync grid; it means
+    // something averaged over many GOs): off unless the cadence diagnostics are on, as CadenceStats decides.
+    static const bool statsOn = CadenceStats::enabledFromEnv();
+    if (!statsOn) {
+        return;
+    }
+    if (timeOffset_ != startProbeOffset_) {          // a new engine offset: a new start to measure
+        startProbeOffset_ = timeOffset_;
+        resetStartProbe();
+        startProbeArmed_ = (timeOffset_ != 0);
+    }
+    if (!startProbeArmed_) {
+        return;
+    }
+    // A shared secondary shows its driver's frame; one promoted to driver later would measure mid-cue. A time scale,
+    // no converter or no rates: nothing to measure against. All disarm until the next offset.
+    if ((isSharedLayer_ && !isDecodeDriver_) || timeScale_ != 1.0 || !c || srcFps <= 0.0 || fps <= 0.0) {
+        resetStartProbe();
+        return;
+    }
+    if (frame < 0) {
+        return;                                      // before the cue's start (preload): wait
+    }
+    if (inputSource_) {
+        const int64_t total = inputSource_->getFrameInfo().totalFrames;
+        if (total > 0 && frame >= total) {           // past the media's end: the layer holds its last frame
+            resetStartProbe();
+            return;
+        }
+    }
+    if (!c->lastClockAtPresentation()) {
+        ++startProbeSkipped_;                        // legacy path or no clock this poll: another reference, skipped
+        return;
+    }
+    const double clk = c->lastClockMs();
+    const double frameMs = 1000.0 / fps;
+    if (startProbeN_ > 0 && clk - startProbeLastClock_ > 100.0) {
+        resetStartProbe();                           // a pause inside the window (follow off, MTC gap): no longer a start
+        return;
+    }
+    const double offMs = static_cast<double>(timeOffset_) * 1000.0 / srcFps;
+    const double behind = clk + offMs - static_cast<double>(frame) * frameMs;
+    if (startProbeN_ == 0) {
+        startProbeFirst_ = frame;
+        startProbeClock0_ = clk;
+        startProbeSum_ = 0.0;
+        startProbeMin_ = startProbeMax_ = behind;
+    }
+    startProbeLastClock_ = clk;
+    startProbeSum_ += behind;
+    startProbeMin_ = std::min(startProbeMin_, behind);
+    startProbeMax_ = std::max(startProbeMax_, behind);
+    if (++startProbeN_ == 60) {
+        char line[360];
+        std::snprintf(line, sizeof line,
+                      "start-probe: layer %s fps %.3f offset %lld MTC frames (%.1f ms), first frame %lld at clock %.3f ms;"
+                      " chosen frame behind the cue's start over 60 vsyncs: mean %.2f min %.2f max %.2f ms"
+                      " (frame %.2f ms; %d legacy-path polls skipped)",
+                      engineOffset_.tag().c_str(), fps, static_cast<long long>(timeOffset_), offMs,
+                      static_cast<long long>(startProbeFirst_), startProbeClock0_, startProbeSum_ / 60.0,
+                      startProbeMin_, startProbeMax_, frameMs, startProbeSkipped_);
+        LOG_INFO << line;
+        resetStartProbe();
+    }
+}
+
 void LayerPlayback::updateFromSyncSource() {
     if (!syncSource_ || !syncSource_->isConnected()) {
         // No sync source - manual playback or paused
         return;
     }
+
+    // An engine offset is never used raw: it waits for the MTC head to be
+    // authoritative and is then converted into this process's MTC day.
+    resolveEngineOffset();
     
     // Check if MTC following is disabled for this layer
     if (!mtcFollow_) {
@@ -157,19 +336,58 @@ void LayerPlayback::updateFromSyncSource() {
     // NOTE: These were previously static variables shared across ALL layers (bug!)
     // Now they are instance variables, each layer has its own state
 
+    // The engine offset in content frames, exactly (1amfwm7h924): whole frames added below, the sub-frame
+    // remainder handed to the converter as a phase of its clock before it polls. Only the layer that polls sets it
+    // (a shared secondary reads the driver's frame, and carries the same cue offset). A time scale other than 1
+    // keeps the old whole-frame offset with no phase: the phase is in clock time, the scale is not.
+    auto* converter = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
+    EngineOffsetSplit offsetSplit;
+    offsetSplit.frames = timeOffset_;
+    if (converter) {
+        if (timeOffset_ != 0) {
+            offsetSplit = splitEngineOffset(timeOffset_, converter->getSourceFramerate(), converter->getFramerate());
+        }
+        if (timeScale_ != 1.0) {
+            offsetSplit.phaseMs = 0.0;
+        }
+        if (!(isSharedLayer_ && !isDecodeDriver_)) {
+            converter->setPhaseMs(offsetSplit.phaseMs);
+            phaseMismatchPolls_ = 0;
+        } else if (std::fabs(offsetSplit.phaseMs - converter->getPhaseMs()) > 1e-6) {
+            // A secondary shows the driver's frame, so the driver's phase. The engine sends one offset to every
+            // layer of a cue (run_cue.py), so a difference is only the moment between two of those sends; one that
+            // lasts means this layer can be up to one frame off its own offset. Said once, after ~0.5 s.
+            if (++phaseMismatchPolls_ == 30) {
+                LOG_WARNING << "offset phase: shared layer " << engineOffset_.tag() << " has offset " << timeOffset_
+                            << " (phase " << offsetSplit.phaseMs << " ms) but its decode driver's phase is "
+                            << converter->getPhaseMs() << " ms: up to one content frame off its own offset";
+            }
+        } else {
+            phaseMismatchPolls_ = 0;
+        }
+    }
+
     uint8_t rolling = 0;
     int64_t syncFrame;
     if (isSharedLayer_ && !isDecodeDriver_) {
         // Secondary shared layer: read cached smoothed frame from driver's last pollFrame()
         syncFrame = syncSource_->getCurrentFrame();
         // Read cached rolling state from driver's last pollFrame()
-        auto* frcSync = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
-        if (frcSync) {
-            rolling = frcSync->getCurrentRolling() ? 1 : 0;
+        if (converter) {
+            rolling = converter->getCurrentRolling() ? 1 : 0;
         }
     } else {
         // Driver or non-shared layer: advance the cadence smoother
         syncFrame = syncSource_->pollFrame(&rolling);
+    }
+
+    // Engine offset not placed yet (MTC head not authoritative): fail closed,
+    // the layer loads no frame, as before its cue starts. The poll above still
+    // runs exactly as when following: a driver's pollFrame() advances the
+    // cadence smoother its shared secondaries read, once per vsync. Skipping
+    // the frame-0 fallback further down is intentional too (fail closed).
+    if (engineOffset_.pending()) {
+        return;
     }
     
     // Debug: log frame and rolling state periodically
@@ -252,23 +470,36 @@ void LayerPlayback::updateFromSyncSource() {
     // Process frame updates only if we have a valid frame
     if (syncFrame >= 0) {
         // Apply time-scaling: multiply by timescale, then add offset.
-        // syncFrame is already in video fps (converted by FramerateConverterSyncSource).
-        // timeOffset_ arrives from the engine in MTC fps (always 25fps), so convert
-        // it to video fps using the same ratio the sync source uses for frames.
-        int64_t convertedOffset = timeOffset_;
-        auto* converter = dynamic_cast<FramerateConverterSyncSource*>(syncSource_.get());
-        if (converter && timeOffset_ != 0) {
-            double srcFps = converter->getSourceFramerate();
-            double dstFps = converter->getFramerate();
-            if (srcFps > 0 && dstFps > 0 && std::abs(srcFps - dstFps) > 0.01) {
-                convertedOffset = static_cast<int64_t>(std::floor(
-                    static_cast<double>(timeOffset_) * dstFps / srcFps));
+        // syncFrame is already in video fps (converted by FramerateConverterSyncSource, with the offset's phase).
+        // timeOffset_ arrives from the engine in MTC fps (always 25fps): its whole content frames, computed above
+        // (EngineOffsetSplit.h; it used to be floored on its own, which made non-25p start late, 1amfwm7h924).
+        int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + offsetSplit.frames;
+        startProbe(adjustedFrame, converter, converter ? converter->getSourceFramerate() : 0.0,
+                   converter ? converter->getFramerate() : 0.0);
+        contentFrame_ = adjustedFrame;  // raw, for the visible_at gate (869feynrj)
+
+        // The first position after an engine offset was placed: more than an
+        // hour off the media means a wrong MTC day or an engine time far from now.
+        if (engineOffset_.takePositionCheck() && inputSource_) {
+            FrameInfo info = inputSource_->getFrameInfo();
+            if (dayalign::implausiblePosition(adjustedFrame, info.totalFrames, info.framerate)) {
+                LOG_WARNING << "MTC day-align: implausible position " << adjustedFrame << " (media "
+                            << info.totalFrames << " frames) for layer " << engineOffset_.tag()
+                            << " right after an engine offset (engine " << engineOffset_.lastEngineMs()
+                            << " ms, k=" << engineOffset_.lastK()
+                            << ") -- wrong MTC day, or an engine time far from now";
             }
         }
-        int64_t adjustedFrame = static_cast<int64_t>(std::floor(static_cast<double>(syncFrame) * timeScale_)) + convertedOffset;
         
+        // A looping cue with the engine's period wraps on it (869ejxng3);
+        // without one, the totalFrames wrap/clamp below is unchanged. The tail
+        // blank is decided afresh on every position (D15).
+        tailBlank_ = false;
+        const bool periodApplied = wraparound_ && loopPeriod_.valid() && inputSource_ &&
+                                   applyLoopPeriod(adjustedFrame, syncFrame);
+
         // Clamp frame to valid range (no automatic wrapping - use loop instead)
-        if (inputSource_) {
+        if (inputSource_ && !periodApplied) {
             FrameInfo info = inputSource_->getFrameInfo();
             int64_t totalFrames = info.totalFrames;
             
@@ -375,6 +606,10 @@ void LayerPlayback::updateFromSyncSource() {
                 }
             }
         }
+        // ...and its pixels are in the buffer: a decode miss may report success holding an older frame (X1)
+        contentStarted_ = contentFrame_ >= 0 && currentFrame_ == adjustedFrame &&
+                          inputSource_->deliveredFrame(adjustedFrame) == adjustedFrame &&
+                          (!(isSharedLayer_ && !isDecodeDriver_) || inputSource_->getCachedFrameNumber() == adjustedFrame);
     } else {
         // No valid sync frame yet (MTC not received or not rolling)
         // Show frame 0 as fallback so video is visible while waiting for MTC
@@ -393,13 +628,176 @@ void LayerPlayback::updateFromSyncSource() {
     }
 }
 
+void LayerPlayback::setLoopPeriod(int64_t num, int64_t den, int64_t frames, const std::string& tag) {
+    loopperiod::Period p;
+    p.num = num;
+    p.den = den;
+    p.realFrames = frames > 0 ? frames : 0;
+    if (!p.valid()) {
+        if (loopPeriod_.valid()) {
+            LOG_INFO << "loop period cleared for layer " << tag;
+        }
+        clearLoopPeriod();
+        return;
+    }
+    loopTag_ = tag;
+    if (p == loopPeriod_) {
+        return;   // the per-pass re-send
+    }
+    loopPeriod_ = p;
+    loopLogged_ = false;
+    loopMismatchLogged_ = false;
+    loopCutLogged_ = false;
+    loopNoFramesLogged_ = false;
+    loopEndLogged_ = false;
+    loopLastPass_ = -2;
+    tailBlank_ = false;
+}
+
+void LayerPlayback::clearLoopPeriod() {
+    loopPeriod_ = loopperiod::Period();
+    loopLogged_ = false;
+    loopMismatchLogged_ = false;
+    loopCutLogged_ = false;
+    loopNoFramesLogged_ = false;
+    loopEndLogged_ = false;
+    loopLastPass_ = -2;
+    tailBlank_ = false;
+}
+
+bool LayerPlayback::applyLoopPeriod(int64_t& adjustedFrame, int64_t syncFrame) {
+    loopperiod::Rate rate;
+    if (!inputSource_->getFrameRateRational(rate.num, rate.den)) {
+        // No rational rate (not a file input): the double, on a 1001 base.
+        const double fps = inputSource_->getFrameInfo().framerate;
+        rate.num = static_cast<int64_t>(std::llround(fps * 1001.0));
+        rate.den = 1001;
+    }
+    const char* rule = "none";
+    const int64_t own = inputSource_->realFrames(&rule);
+    const int64_t frames = loopPeriod_.realFrames > 0 ? loopPeriod_.realFrames : own;
+    if (!rate.valid() || frames <= 0) {
+        if (!loopNoFramesLogged_) {
+            LOG_WARNING << "loop period for layer " << loopTag_ << " not applied: "
+                        << (rate.valid() ? "no frame count" : "no frame rate")
+                        << "; wrapping on the file's length";
+            loopNoFramesLogged_ = true;
+        }
+        return false;
+    }
+    const loopperiod::TailKind kind = loopperiod::tailKind(loopPeriod_, rate, frames);
+    const double tailMs = loopperiod::tailMs(loopPeriod_, rate, frames);
+    if (!loopLogged_) {
+        LOG_INFO << "loop period for layer " << loopTag_ << ": " << loopPeriod_.num << "/"
+                 << loopPeriod_.den << " s = " << loopperiod::pfFrames(loopPeriod_, rate)
+                 << " frames at " << rate.num << "/" << rate.den << " fps; frames engine "
+                 << (loopPeriod_.realFrames > 0 ? std::to_string(loopPeriod_.realFrames) : std::string("-"))
+                 << ", own " << own << " (" << rule << "); tail " << tailMs << " ms, "
+                 << loopperiod::tailKindName(kind) << "; passes " << loopPasses_;
+        loopLogged_ = true;
+    }
+    if (loopPeriod_.realFrames > 0 && own >= 0 && std::llabs(own - loopPeriod_.realFrames) > 2 &&
+        !loopMismatchLogged_) {
+        LOG_ERROR << "loop frame count for layer " << loopTag_ << ": engine " << loopPeriod_.realFrames
+                  << ", own " << own << " (" << rule << "), more than 2 frames apart; the engine's rules";
+        loopMismatchLogged_ = true;
+    }
+    // A period shorter than the video: within 0.5 s a same-file pair loops on
+    // its audio length and the video is cut there (R23, INFO); beyond 0.5 s it
+    // cannot come from the engine's rule (a bad sidecar or the test knob):
+    // still applied, never dropped (H9, I4), ERROR.
+    if (!loopCutLogged_ && kind == loopperiod::TailKind::Cut) {
+        LOG_INFO << "loop period shorter than the video by " << -tailMs
+                 << " ms, cut at the loop point (layer " << loopTag_ << ")";
+        loopCutLogged_ = true;
+    } else if (!loopCutLogged_ && kind == loopperiod::TailKind::CutBeyond) {
+        LOG_ERROR << "loop period shorter than the video by " << -tailMs
+                  << " ms, cutting at the period (layer " << loopTag_ << ")";
+        loopCutLogged_ = true;
+    }
+
+    loopperiod::Shown shown = loopperiod::shownFrame(adjustedFrame, loopPeriod_, rate, frames, loopPasses_);
+    // The decode queue's own bound: never ask past the container's length.
+    const int64_t totalFrames = inputSource_->getFrameInfo().totalFrames;
+    if (totalFrames > 0 && shown.frame > totalFrames - 1) {
+        shown.frame = totalFrames - 1;
+    }
+
+    if (shown.pass > loopLastPass_ && shown.pass >= 1 && loopLastPass_ >= 0 && !shown.ended) {
+        long mtcFrame = static_cast<long>(syncFrame);
+#ifdef HAVE_MTCRECEIVER
+        mtcFrame = MtcReceiver::mtcHead.load() / 40;
+#endif
+        const bool tailed = kind == loopperiod::TailKind::Held || kind == loopperiod::TailKind::NotDrawn;
+        if (shown.pass <= 3) {
+            LOG_INFO << "loop pass " << shown.pass + 1 << " of layer " << loopTag_ << " at MTC frame "
+                     << mtcFrame << " (position " << adjustedFrame << ", shows " << shown.frame << ")"
+                     << (tailed ? ", tail " + std::to_string(std::llround(tailMs)) + " ms, " +
+                                      loopperiod::tailKindName(kind)
+                                : std::string());
+        } else {
+            LOG_DEBUG << "loop pass " << shown.pass + 1 << " of layer " << loopTag_ << " at MTC frame "
+                      << mtcFrame << " (position " << adjustedFrame << ", shows " << shown.frame << ")";
+        }
+    }
+    if (shown.ended && !loopEndLogged_) {
+        if (shown.blank) {
+            LOG_INFO << "loop of layer " << loopTag_ << " ended after " << loopPasses_
+                     << " passes, after a tail not drawn: nothing drawn (R2)";
+        } else {
+            LOG_INFO << "loop of layer " << loopTag_ << " ended after " << loopPasses_
+                     << " passes; holding frame " << shown.frame;
+        }
+        loopEndLogged_ = true;
+    }
+    loopLastPass_ = shown.pass;
+    tailBlank_ = shown.blank;
+    adjustedFrame = shown.frame;
+    return true;
+}
+
 bool LayerPlayback::isHardwareDecodeLayer() const {
     VideoFileInput* videoInput = dynamic_cast<VideoFileInput*>(inputSource_.get());
     return videoInput &&
            videoInput->getOptimalBackend() == InputSource::DecodeBackend::GPU_HARDWARE;
 }
 
+uint64_t LayerPlayback::frameGeneration() const {
+    // Every term only grows, and a role or source change folds the live cache term into cacheBase_ instead
+    // of dropping it: the sum moves forward whenever a load or a driver's cached frame changes the pixels,
+    // and never returns to a value it had.
+    const uint64_t liveCache = readsDriverCache() ? inputSource_->cacheGeneration() - cacheAttach_ : 0;
+    return loadGeneration_ + cacheBase_ + liveCache;
+}
+
+void LayerPlayback::foldDriverCache() {
+    if (readsDriverCache()) {
+        cacheBase_ += inputSource_->cacheGeneration() - cacheAttach_;
+    }
+    cacheAttach_ = 0;
+}
+
+void LayerPlayback::attachDriverCache() {
+    cacheAttach_ = readsDriverCache() ? inputSource_->cacheGeneration() : 0;
+}
+
+void LayerPlayback::setDecodeDriver(bool v) {
+    foldDriverCache();
+    isDecodeDriver_ = v;
+    attachDriverCache();
+}
+
 bool LayerPlayback::loadFrame(int64_t frameNumber) {
+    // Every successful load may have written new pixels into the frame buffer, whatever its frame number
+    // (a seek back to the shown number reloads it): the CPU upload identity counts loads, not numbers.
+    const bool loaded = loadFrameInto(frameNumber);
+    if (loaded) {
+        ++loadGeneration_;
+    }
+    return loaded;
+}
+
+bool LayerPlayback::loadFrameInto(int64_t frameNumber) {
     if (!inputSource_ || !inputSource_->isReady()) {
         return false;
     }
@@ -581,7 +979,7 @@ void LayerPlayback::reverse() {
         // So: newOffset = currentFrame - (syncFrame * -timeScale)
         // But we don't have syncFrame here, so we use a simpler approach:
         // Set offset to currentFrame and negate timescale
-        timeOffset_ = currentFrame_;
+        setTimeOffset(currentFrame_);
         timeScale_ = -timeScale_;
     } else {
         // Just negate timescale if no current frame
