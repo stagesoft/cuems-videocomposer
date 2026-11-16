@@ -21,8 +21,14 @@
 
 #include "TestFramework.h"
 #include "../display/ModeSelect.h"
+#include "../display/DisplayConfigurationManager.h"
 #include "../display/OutputInfo.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <unistd.h>
 #include <vector>
 
 using namespace videocomposer;
@@ -151,4 +157,97 @@ bool test_ModeSelect_PinNotHonouredFollowsTheInterlacedRules() {
         && !refreshPinNotHonoured(25.0, false, i60, tol)
         // refresh=60i on a sink without it ends on a progressive mode: not what was asked, even at 60.000 Hz.
         && refreshPinNotHonoured(60.0, true, p60, tol);
+}
+
+// --- rows from the change review of 2026-11-16 (cuems-RELATIONS baselines/1amfwm7evfj/reviews)
+
+bool test_ModeSelect_OutputInfoFindModeRefusesInterlacedWhenProgressiveExists() {
+    // The OSC display/mode pre-check: 1080 has a progressive mode, so refresh=30 must not be answered with 1080i60.
+    OutputInfo info;
+    OutputMode p60; p60.width = 1920; p60.height = 1080; p60.refreshRate = 60.0; p60.interlaced = false;
+    OutputMode i60; i60.width = 1920; i60.height = 1080; i60.refreshRate = 30.0; i60.interlaced = true;
+    info.modes = {p60, i60};
+    const bool refused = info.findMode(1920, 1080, 30.0) == nullptr;
+    const OutputMode* any = info.findMode(1920, 1080);          // no refresh asked: the progressive one
+    return refused && any && !any->interlaced;
+}
+
+bool test_ModeSelect_EqualDistanceKeepsTheFirstMode() {
+    // Two timings at the same rate (an EDID DTD and a CEA VIC): the first listed wins, as before this change
+    // (the kernel lists the preferred one first).
+    const std::vector<ModeView> prog = {
+        {1920, 1080, 60.00, false, true},
+        {1920, 1080, 60.00, false, false},
+        {1920, 1080, 50.00, false, false},
+    };
+    const std::vector<ModeView> inter = {
+        {1920, 1080, 30.00, true, false},
+        {1920, 1080, 30.00, true, false},
+    };
+    const auto p = pickModeForRefresh(prog, 1920, 1080, 60.0, false);
+    const auto i = pickModeForRefresh(inter, 1920, 1080, 60.0, true);
+    return p.kind == ModePick::Kind::Exact && p.index == 0 && i.kind == ModePick::Kind::Exact && i.index == 0;
+}
+
+bool test_ModeSelect_OnlyInterlacedSizeUsesFieldRateWhenAskedInterlaced() {
+    // A size with interlaced modes only, refresh=50i, no 50i: the nearest FIELD rate is 48 (1080i48), not the
+    // mode whose frame rate (30) is nearest to the number 50.
+    const std::vector<ModeView> modes = {
+        {1920, 1080, 30.00, true, false},   // 1080i60
+        {1920, 1080, 24.00, true, false},   // 1080i48
+    };
+    const auto p = pickModeForRefresh(modes, 1920, 1080, 50.0, true);
+    return p.kind == ModePick::Kind::OnlyInterlaced && p.index == 1;
+}
+
+bool test_ModeSelect_ExplicitInterlacedWithoutSuchModeFallsToNativeProgressive() {
+    const auto modes = lg4k();   // no interlaced mode at all
+    const auto p = pickModeForRefresh(modes, 3840, 2160, 60.0, true);
+    return p.kind == ModePick::Kind::NativeProgressive && p.index == 0;
+}
+
+bool test_ModeSelect_DisplayConfRefreshInterlacedSuffix() {
+    // refresh=<n>i in display.conf: the "i" is found whatever follows it on the line (a CRLF file, a trailing
+    // space), in either case, and survives save + load.
+    char tmpl[] = "/tmp/vc-modeselect-XXXXXX";
+    const int fd = ::mkstemp(tmpl);
+    if (fd < 0) {
+        return false;
+    }
+    ::close(fd);
+    const std::string in = tmpl;
+    const std::string out = in + ".out";
+    {
+        std::ofstream f(in);
+        f << "[output:HDMI-A-1]\nresolution=1920x1080\nrefresh=60i\ncanvas_region=0,0,1920,1080\n"
+          << "[output:HDMI-A-2]\nresolution=1920x1080\nrefresh=60I\r\ncanvas_region=1920,0,1920,1080\n"
+          << "[output:HDMI-A-3]\nresolution=1920x1080\nrefresh=50i \ncanvas_region=3840,0,1920,1080\n"
+          << "[output:HDMI-A-4]\nresolution=1920x1080\nrefresh=50\ncanvas_region=5760,0,1920,1080\n";
+    }
+    bool ok = false;
+    {
+        DisplayConfigurationManager m;
+        ok = m.loadFromFile(in);
+        const OutputConfiguration* a1 = m.getOutputConfig("HDMI-A-1");
+        const OutputConfiguration* a2 = m.getOutputConfig("HDMI-A-2");
+        const OutputConfiguration* a3 = m.getOutputConfig("HDMI-A-3");
+        const OutputConfiguration* a4 = m.getOutputConfig("HDMI-A-4");
+        ok = ok && a1 && a2 && a3 && a4
+            && a1->refreshRate == 60.0 && a1->refreshInterlaced
+            && a2->refreshRate == 60.0 && a2->refreshInterlaced
+            && a3->refreshRate == 50.0 && a3->refreshInterlaced
+            && a4->refreshRate == 50.0 && !a4->refreshInterlaced;
+        ok = ok && m.saveToFile(out);
+    }
+    if (ok) {
+        DisplayConfigurationManager again;
+        ok = again.loadFromFile(out);
+        const OutputConfiguration* a1 = again.getOutputConfig("HDMI-A-1");
+        const OutputConfiguration* a4 = again.getOutputConfig("HDMI-A-4");
+        ok = ok && a1 && a4 && a1->refreshRate == 60.0 && a1->refreshInterlaced
+            && a4->refreshRate == 50.0 && !a4->refreshInterlaced;
+    }
+    ::unlink(in.c_str());
+    ::unlink(out.c_str());
+    return ok;
 }
