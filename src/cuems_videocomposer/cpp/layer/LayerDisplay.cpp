@@ -54,6 +54,10 @@ bool LayerDisplay::prepareFrame(const FrameBuffer* cpuFrame, const GPUTextureFra
             return true;
         } else if (!isFrameOnGPU && cpuFrame && cpuFrame->isValid()) {
             // For CPU frames without modifications, just point to source
+            if (cpuFromPrepared_) {
+                ++preparedGeneration_;  // other pixels than the prepared buffer the texture may hold
+                cpuFromPrepared_ = false;
+            }
             sourceFrameCpu_ = cpuFrame;
             preparedFrameOnGPU_ = false;
             frameReady_ = true;
@@ -82,6 +86,8 @@ bool LayerDisplay::prepareFrame(const FrameBuffer* cpuFrame, const GPUTextureFra
     } else if (!isFrameOnGPU && cpuFrame && cpuFrame->isValid()) {
         // Frame is on CPU - apply CPU processing (crop/panorama)
         if (applyModificationsCPU(*cpuFrame, preparedCpuBuffer_)) {
+            ++preparedGeneration_;  // rewritten (each update(): a held frame's panOffset may have moved)
+            cpuFromPrepared_ = true;
             sourceFrameCpu_ = nullptr;  // Using our processed buffer
             preparedFrameOnGPU_ = false;
             frameReady_ = true;

@@ -925,9 +925,26 @@ void DRMBackend::warnIfMixedRefreshRates(const char* context) {
                   << rates[i].second << "Hz";
     }
 
-    // Same 0.5Hz tolerance harmonizeRefreshRates() uses to call two outputs equal.
+    // Same 0.5Hz tolerance harmonizeRefreshRates() uses to call two outputs equal. Below it, rates that are close
+    // but not equal (60.000 next to 59.940 or 59.950) are still a beat under coupled pacing: the slowest CRTC paces
+    // the commit, so a faster output repeats one vsync every 1/(max-min) seconds (plan 1amfwm7gq3y §4.3). Said once
+    // per configuration, as a WARNING, since it is invisible in the rates rounded to 0.01 Hz everywhere else.
     if (maxHz - minHz <= 0.5) {
-        lastMixedRefreshSignature_.clear();
+        if (maxHz - minHz > 0.005 && coupledPacing_ && signature.str() != lastMixedRefreshSignature_) {
+            lastMixedRefreshSignature_ = signature.str();
+            std::ostringstream exact;
+            exact << std::fixed << std::setprecision(3);
+            for (size_t i = 0; i < rates.size(); ++i) {
+                exact << (i ? ", " : "") << rates[i].first << "=" << rates[i].second << "Hz";
+            }
+            LOG_WARNING << "DRMBackend: near-equal refresh rates on enabled outputs (" << context << "): "
+                        << exact.str() << " -- one atomic commit paces them all at the slowest ("
+                        << std::fixed << std::setprecision(3) << minHz << " Hz), so the faster outputs repeat one "
+                        << "vsync every ~" << std::setprecision(0) << (1.0 / (maxHz - minHz))
+                        << " s; give every output the same mode (same refresh= in display.conf)";
+        } else if (maxHz - minHz <= 0.005) {
+            lastMixedRefreshSignature_.clear();
+        }
         return;
     }
 

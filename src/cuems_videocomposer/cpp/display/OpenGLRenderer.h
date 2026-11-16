@@ -28,6 +28,7 @@
 #include "ShaderProgram.h"
 #include "MasterProperties.h"
 #include "ColorMatrix.h"
+#include "CpuUploadPolicy.h"
 #include <vector>
 #include <map>
 #include <cstdint>
@@ -128,19 +129,31 @@ private:
     
     // Cached textures per layer (layerId -> texture info)
     struct LayerTextureCache {
-        GLuint textureId;
-        int width;
-        int height;
-        // PBO double-buffering for async texture upload
-        GLuint pbo[2];          // Double-buffered PBOs
-        int pboIndex;           // Current PBO index (0 or 1)
-        bool pboInitialized;    // PBOs have been created
+        GLuint textureId = 0;
+        int width = 0;
+        int height = 0;
+        uint64_t textureGeneration = 0;     // moves on every (re)creation (CPU upload identity)
+        // Staging buffer of the CPU upload (1amfwm7hg3u, D2 (a)): one PBO per layer, orphaned and
+        // refilled with this tick's frame, then uploaded in the same call.
+        GLuint pbo = 0;
+        bool pboInitialized = false;
+        bool pboFailed = false;             // creation failed once: the direct path, not retried
+        cpuupload::Policy uploadPolicy;     // what the texture holds; carried across a recreation
+        cpuupload::Stats uploadStats;       // VIDEOCOMPOSER_CADENCE_STATS only
     };
     std::map<int, LayerTextureCache> layerTextureCache_;
-    
+    uint64_t textureGenerationCounter_ = 0;
+    bool cpuUploadStatsEnabled_ = false;
+
     // PBO helper methods
-    bool initLayerPBOs(LayerTextureCache& cache, int width, int height);
+    bool initLayerPBO(LayerTextureCache& cache);
     void cleanupLayerPBOs(LayerTextureCache& cache);
+    // Upload this draw's CPU frame into the layer's (bound) GL_TEXTURE_2D in this call, through the PBO or,
+    // when staging fails or there is no PBO, straight from the CPU buffer.
+    void uploadCpuFrame(int layerId, LayerTextureCache& cache, const FrameBuffer& frame,
+                        const cpuupload::Identity& id);
+    // The layer is gone: its last CpuUploadStats window, if any.
+    void flushCpuUploadStats(int layerId, LayerTextureCache& cache);
     
     // Master layer properties (for composite output)
     MasterProperties masterProperties_;

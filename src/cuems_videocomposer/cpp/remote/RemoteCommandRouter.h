@@ -100,6 +100,7 @@ private:
     bool handleLayerPosition(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerOpacity(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerVisible(VideoLayer* layer, const std::vector<std::string>& args);
+    bool handleLayerVisibleAt(VideoLayer* layer, const std::vector<std::string>& args);
     bool handleLayerZOrder(VideoLayer* layer, const std::vector<std::string>& args);
     
     // Time-scaling command handlers (app-level)

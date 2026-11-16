@@ -643,6 +643,9 @@ set(CPP_SOURCES
     src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
     src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
     src/cuems_videocomposer/cpp/sync/PresentTick.cpp
+    src/cuems_videocomposer/cpp/sync/CadenceAdvice.cpp
+    src/cuems_videocomposer/cpp/display/DisplayBackendChoice.cpp
+    src/cuems_videocomposer/cpp/display/CpuUploadPolicy.cpp
     src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
     src/cuems_videocomposer/cpp/sync/MTCDecoder.cpp
     src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
@@ -1017,6 +1020,12 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestOutputColorCommands.cpp
         src/cuems_videocomposer/cpp/test/TestDayAlign.cpp
         src/cuems_videocomposer/cpp/test/TestLoopPeriod.cpp
+        src/cuems_videocomposer/cpp/test/TestCadenceAdvice.cpp
+        src/cuems_videocomposer/cpp/test/TestVisibleAt.cpp
+        src/cuems_videocomposer/cpp/test/TestPrimeDecode.cpp
+        src/cuems_videocomposer/cpp/test/TestSoftwareDecodeLeak.cpp
+        src/cuems_videocomposer/cpp/test/TestDisplayBackend.cpp
+        src/cuems_videocomposer/cpp/test/TestCpuUpload.cpp
     )
     
     # C++ implementation files needed by tests
@@ -1033,6 +1042,9 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/sync/MIDISyncSource.cpp
         src/cuems_videocomposer/cpp/sync/FramerateConverterSyncSource.cpp
         src/cuems_videocomposer/cpp/sync/PresentTick.cpp
+        src/cuems_videocomposer/cpp/sync/CadenceAdvice.cpp
+        src/cuems_videocomposer/cpp/display/DisplayBackendChoice.cpp
+        src/cuems_videocomposer/cpp/display/CpuUploadPolicy.cpp
         src/cuems_videocomposer/cpp/sync/MIDIDriver.cpp
         src/cuems_videocomposer/cpp/sync/ALSASeqMIDIDriver.cpp
         src/cuems_videocomposer/cpp/video/FrameBuffer.cpp
@@ -1099,6 +1111,8 @@ if(BUILD_TESTS)
     
     add_executable(cuems_videocomposer_test ${TEST_SOURCES} ${TEST_CPP_SOURCES} ${TEST_HAP_SOURCES} src/cuems_videocomposer/common.c)
     target_compile_definitions(cuems_videocomposer_test PRIVATE VC_TEST_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/src/cuems_videocomposer/cpp/test/fixtures")
+    # Test-only seams in production sources (e.g. VideoFileInput::failNextPrimeForTesting, 1amfwm7hk6j)
+    target_compile_definitions(cuems_videocomposer_test PRIVATE CUEMS_VC_TESTING)
     target_include_directories(cuems_videocomposer_test PRIVATE
         src/cuems_videocomposer
         src/cuems_videocomposer/cpp
