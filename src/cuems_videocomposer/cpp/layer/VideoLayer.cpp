@@ -522,6 +522,15 @@ bool VideoLayer::getPreparedFrame(const FrameBuffer*& cpuBuffer, const GPUTextur
     return display_.getPreparedFrame(cpuBuffer, gpuBuffer);
 }
 
+cpuupload::Identity VideoLayer::cpuUploadIdentity() const {
+    cpuupload::Identity id;
+    id.incarnation = playback_.incarnation();
+    id.sourceGeneration = playback_.sourceGeneration();
+    id.frameGeneration = playback_.frameGeneration();
+    id.preparedGeneration = display_.preparedGeneration();
+    return id;
+}
+
 bool VideoLayer::isFrameOnGPU() const {
     return display_.isFrameOnGPU();
 }

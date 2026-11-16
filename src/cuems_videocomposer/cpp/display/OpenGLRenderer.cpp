@@ -36,6 +36,7 @@ extern "C" {
 #include "../../homography.h"
 }
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -149,6 +150,12 @@ bool OpenGLRenderer::init() {
     if (textureId_ == 0) {
         return false;
     }
+
+    cpuUploadStatsEnabled_ = cpuupload::statsEnabledFromEnv();
+    if (cpuUploadStatsEnabled_) {
+        LOG_INFO << "OpenGLRenderer: CpuUploadStats enabled (VIDEOCOMPOSER_CADENCE_STATS) -- "
+                 << "one line per CPU-uploaded layer every 60 s";
+    }
     
     // Initialize VBO/VAO for shader-based rendering
     if (!initQuadVBO()) {
@@ -182,6 +189,7 @@ void OpenGLRenderer::cleanup() {
     
     // Cleanup all cached layer textures and PBOs
     for (auto& pair : layerTextureCache_) {
+        flushCpuUploadStats(pair.first, pair.second);
         if (pair.second.textureId != 0) {
             glDeleteTextures(1, &pair.second.textureId);
         }
@@ -201,41 +209,90 @@ void OpenGLRenderer::cleanup() {
     initialized_ = false;
 }
 
-// PBO helper methods for async texture upload
-bool OpenGLRenderer::initLayerPBOs(LayerTextureCache& cache, int width, int height) {
+// The CPU upload's staging buffer (1amfwm7hg3u, D2 (a)): one PBO per layer. Its store is allocated by the
+// orphaning glBufferData of each upload, so nothing is sized here.
+bool OpenGLRenderer::initLayerPBO(LayerTextureCache& cache) {
     if (cache.pboInitialized) {
         return true;
     }
-    
-    // Calculate buffer size (BGRA = 4 bytes per pixel)
-    size_t bufferSize = static_cast<size_t>(width) * height * 4;
-    
-    glGenBuffers(2, cache.pbo);
-    if (cache.pbo[0] == 0 || cache.pbo[1] == 0) {
-        LOG_ERROR << "Failed to create PBOs for layer texture upload";
+    if (cache.pboFailed) {
         return false;
     }
-    
-    // Initialize both PBOs with empty storage
-    for (int i = 0; i < 2; i++) {
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cache.pbo[i]);
-        glBufferData(GL_PIXEL_UNPACK_BUFFER, bufferSize, nullptr, GL_STREAM_DRAW);
+    glGenBuffers(1, &cache.pbo);
+    if (cache.pbo == 0) {
+        LOG_ERROR << "Failed to create the PBO for layer texture upload: uploading directly from the CPU buffer";
+        cache.pboFailed = true;
+        return false;
     }
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    
-    cache.pboIndex = 0;
     cache.pboInitialized = true;
-    
-    LOG_DEBUG << "Initialized PBO double-buffering for layer (" << width << "x" << height << ")";
+    LOG_DEBUG << "Initialized the upload PBO for layer (" << cache.width << "x" << cache.height << ")";
     return true;
 }
 
 void OpenGLRenderer::cleanupLayerPBOs(LayerTextureCache& cache) {
     if (cache.pboInitialized) {
-        glDeleteBuffers(2, cache.pbo);
-        cache.pbo[0] = 0;
-        cache.pbo[1] = 0;
+        glDeleteBuffers(1, &cache.pbo);
+        cache.pbo = 0;
         cache.pboInitialized = false;
+    }
+}
+
+void OpenGLRenderer::uploadCpuFrame(int layerId, LayerTextureCache& cache, const FrameBuffer& frame,
+                                    const cpuupload::Identity& id) {
+    using Clock = std::chrono::steady_clock;
+    const int width = cache.width;
+    const int height = cache.height;
+    const size_t dataSize = static_cast<size_t>(width) * height * 4;  // BGRA
+    const Clock::time_point t0 = cpuUploadStatsEnabled_ ? Clock::now() : Clock::time_point();
+
+    // Stage THIS draw's frame: orphan the store (the GL keeps the old one alive for any pending read, so
+    // the write never waits on the GPU), map, copy, unmap. A NULL map or a GL_FALSE unmap leaves nothing
+    // usable in the PBO.
+    cpuupload::Staging staging = cpuupload::Staging::NoPbo;
+    if (initLayerPBO(cache)) {
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cache.pbo);
+        glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(dataSize), nullptr, GL_STREAM_DRAW);
+        void* ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, static_cast<GLsizeiptr>(dataSize),
+                                     GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+        if (!ptr) {
+            staging = cpuupload::Staging::MapFailed;
+        } else {
+            memcpy(ptr, frame.data(), dataSize);
+            staging = glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER) == GL_TRUE ? cpuupload::Staging::Ok
+                                                                       : cpuupload::Staging::UnmapFailed;
+        }
+    }
+
+    const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        Clock::now().time_since_epoch()).count();
+    const cpuupload::Decision d = cache.uploadPolicy.finish(staging, id, nowNs);
+    if (d.directFromCpu) {
+        // The data pointer is client memory only with no unpack buffer bound.
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, frame.data());
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);  // offset 0
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    }
+
+    if (d.warn) {
+        LOG_WARNING << "CPU upload: layer " << layerId << " staging buffer "
+                    << (staging == cpuupload::Staging::MapFailed ? "map failed" : "unmap returned GL_FALSE")
+                    << "; uploaded directly from the CPU buffer, the next draw retries the PBO"
+                    << (d.suppressed ? " (" + std::to_string(d.suppressed) + " more since the last warning)"
+                                     : std::string());
+    }
+
+    if (cpuUploadStatsEnabled_) {
+        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        cache.uploadStats.add(ms, d.directFromCpu, width, height, nowNs);
+    }
+}
+
+void OpenGLRenderer::flushCpuUploadStats(int layerId, LayerTextureCache& cache) {
+    std::string line;
+    if (cpuUploadStatsEnabled_ && cache.uploadStats.takeFinalLine(layerId, line)) {
+        LOG_INFO << line;
     }
 }
 
@@ -603,10 +660,15 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 shaderTextureId = cacheIt->second.textureId;
                 cachePtr = &cacheIt->second;
             } else {
-                // Create new GL_TEXTURE_2D
+                // Create new GL_TEXTURE_2D. The upload record and stats stay with the layer; the new
+                // texture generation makes its first draw upload.
+                cpuupload::Policy carriedPolicy;
+                cpuupload::Stats carriedStats;
                 if (cacheIt != layerTextureCache_.end()) {
                     texturesToDelete_.push_back(cacheIt->second.textureId);
                     cleanupLayerPBOs(cacheIt->second);
+                    carriedPolicy = cacheIt->second.uploadPolicy;
+                    carriedStats = std::move(cacheIt->second.uploadStats);
                     layerTextureCache_.erase(cacheIt);
                 }
                 
@@ -623,49 +685,31 @@ bool OpenGLRenderer::renderLayer(const VideoLayer* layer) {
                 cache.textureId = shaderTextureId;
                 cache.width = layerTextureWidth;
                 cache.height = layerTextureHeight;
-                cache.pbo[0] = 0;
-                cache.pbo[1] = 0;
-                cache.pboIndex = 0;
-                cache.pboInitialized = false;
-                layerTextureCache_[layerId] = cache;
-                cachePtr = &layerTextureCache_[layerId];
+                cache.textureGeneration = ++textureGenerationCounter_;
+                cache.uploadPolicy = carriedPolicy;
+                cache.uploadStats = std::move(carriedStats);
+                cachePtr = &(layerTextureCache_[layerId] = std::move(cache));
             }
             
-            // Upload frame data using PBO double-buffering for async transfer
-            // This avoids blocking the render thread during CPU→GPU copy
+            // Upload THIS tick's frame, in this call (1amfwm7hg3u): the frame chosen in this tick reaches
+            // the texture in this tick, and the first draw after a show or a texture (re)creation is this
+            // frame, never the other buffer's leftovers. Once per identity: another surface drawing the
+            // layer in the same tick, or a held frame, reuses the texture (D3 (a)).
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, shaderTextureId);
-            
-            size_t dataSize = static_cast<size_t>(layerTextureWidth) * layerTextureHeight * 4;
-            
-            if (cachePtr && initLayerPBOs(*cachePtr, layerTextureWidth, layerTextureHeight)) {
-                // PBO path: async upload
-                int currentPBO = cachePtr->pboIndex;
-                int nextPBO = 1 - currentPBO;
-                
-                // Bind the "next" PBO for texture upload (data was copied last frame)
-                // On first frame, this will upload uninitialized data, but that's ok
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cachePtr->pbo[nextPBO]);
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
-                                GL_BGRA, GL_UNSIGNED_BYTE, nullptr);  // offset 0 in PBO
-                
-                // Now copy new frame data to "current" PBO (async DMA)
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cachePtr->pbo[currentPBO]);
-                // Use GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT for best performance
-                void* ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, dataSize,
-                                             GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
-                if (ptr) {
-                    memcpy(ptr, cpuBuffer->data(), dataSize);
-                    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+
+            cpuupload::Identity drawId = layer->cpuUploadIdentity();
+            drawId.textureGeneration = cachePtr->textureGeneration;
+            if (cachePtr->uploadPolicy.needsUpload(drawId)) {
+                uploadCpuFrame(layerId, *cachePtr, *cpuBuffer, drawId);
+            }
+            if (cpuUploadStatsEnabled_) {
+                std::string statsLine;
+                const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (cachePtr->uploadStats.takeLine(layerId, nowNs, statsLine)) {
+                    LOG_INFO << statsLine;
                 }
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-                
-                // Swap PBO index for next frame
-                cachePtr->pboIndex = nextPBO;
-            } else {
-                // Fallback: direct upload (no PBO)
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, layerTextureWidth, layerTextureHeight,
-                            GL_BGRA, GL_UNSIGNED_BYTE, cpuBuffer->data());
             }
             
             // Apply blend mode
@@ -903,6 +947,7 @@ void OpenGLRenderer::evictRemovedLayerTextures(const std::vector<const VideoLaye
             ++it;
             continue;
         }
+        flushCpuUploadStats(layerId, it->second);
         if (it->second.textureId != 0) {
             texturesToDelete_.push_back(it->second.textureId);
         }

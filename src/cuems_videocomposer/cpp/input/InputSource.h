@@ -258,10 +258,14 @@ public:
     const FrameBuffer* getCachedCPUFrame() const { return !cachedOnGPU_ ? &cachedCPU_ : nullptr; }
     int64_t getCachedFrameNumber() const { return cachedFrameNumber_; }
     bool isCachedOnGPU() const { return cachedOnGPU_; }
+    // Moves on every setCachedFrame: a secondary's CPU buffer is a view of the driver's, rewritten in place,
+    // so this is how it sees new pixels it did not load itself (CPU upload identity, 1amfwm7hg3u).
+    uint64_t cacheGeneration() const { return cacheGeneration_; }
 
     void setCachedFrame(int64_t frameNumber, const GPUTextureFrameBuffer& gpu) {
         cachedGPU_ = gpu;               // non-owning copy (ownsTexture_=false via copy ctor)
         cachedFrameNumber_ = frameNumber;
+        ++cacheGeneration_;
         cachedOnGPU_ = true;
         hasCachedFrame_ = true;
     }
@@ -269,6 +273,7 @@ public:
     void setCachedFrame(int64_t frameNumber, const FrameBuffer& cpu) {
         cachedCPU_.copyFrom(cpu);        // non-owning shallow copy (pointer + metadata, NOT pixels)
         cachedFrameNumber_ = frameNumber;
+        ++cacheGeneration_;
         cachedOnGPU_ = false;
         hasCachedFrame_ = true;
     }
@@ -282,6 +287,7 @@ private:
     // Shared decoder cache storage (only populated when this InputSource is used as a shared driver)
     bool hasCachedFrame_ = false;
     int64_t cachedFrameNumber_ = -1;
+    uint64_t cacheGeneration_ = 0;
     GPUTextureFrameBuffer cachedGPU_;
     FrameBuffer cachedCPU_;
     bool cachedOnGPU_ = false;

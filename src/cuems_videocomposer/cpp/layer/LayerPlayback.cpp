@@ -33,12 +33,18 @@
 #include "../../mtcreceiver/mtcreceiver.h"  // toLocalDay (day alignment)
 #endif
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <chrono>
 
 namespace videocomposer {
+
+uint64_t LayerPlayback::nextIncarnation() {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 LayerPlayback::LayerPlayback()
     : playing_(false)
@@ -65,25 +71,31 @@ LayerPlayback::~LayerPlayback() {
 
 void LayerPlayback::setInputSource(std::unique_ptr<InputSource> input) {
     pause();
+    foldDriverCache();
     inputSource_ = std::move(input);
     isSharedLayer_ = false;
     isDecodeDriver_ = false;
+    attachDriverCache();
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
     frameOnGPU_ = false;
+    ++sourceGeneration_;
     resetStartProbe();   // a new load: no window carries over (it re-arms on the cue's next offset)
 }
 
 void LayerPlayback::setInputSource(std::shared_ptr<InputSource> input, bool isShared, bool isDriver) {
     pause();
+    foldDriverCache();
     inputSource_ = std::move(input);
     isSharedLayer_ = isShared;
     isDecodeDriver_ = isDriver;
+    attachDriverCache();
     currentFrame_ = -1;
     lastSyncFrame_ = -1;
     liveFrames_ = 0;
     frameOnGPU_ = false;
+    ++sourceGeneration_;
     resetStartProbe();   // a new load: no window carries over (it re-arms on the cue's next offset)
 }
 
@@ -750,7 +762,42 @@ bool LayerPlayback::isHardwareDecodeLayer() const {
            videoInput->getOptimalBackend() == InputSource::DecodeBackend::GPU_HARDWARE;
 }
 
+uint64_t LayerPlayback::frameGeneration() const {
+    // Every term only grows, and a role or source change folds the live cache term into cacheBase_ instead
+    // of dropping it: the sum moves forward whenever a load or a driver's cached frame changes the pixels,
+    // and never returns to a value it had.
+    const uint64_t liveCache = readsDriverCache() ? inputSource_->cacheGeneration() - cacheAttach_ : 0;
+    return loadGeneration_ + cacheBase_ + liveCache;
+}
+
+void LayerPlayback::foldDriverCache() {
+    if (readsDriverCache()) {
+        cacheBase_ += inputSource_->cacheGeneration() - cacheAttach_;
+    }
+    cacheAttach_ = 0;
+}
+
+void LayerPlayback::attachDriverCache() {
+    cacheAttach_ = readsDriverCache() ? inputSource_->cacheGeneration() : 0;
+}
+
+void LayerPlayback::setDecodeDriver(bool v) {
+    foldDriverCache();
+    isDecodeDriver_ = v;
+    attachDriverCache();
+}
+
 bool LayerPlayback::loadFrame(int64_t frameNumber) {
+    // Every successful load may have written new pixels into the frame buffer, whatever its frame number
+    // (a seek back to the shown number reloads it): the CPU upload identity counts loads, not numbers.
+    const bool loaded = loadFrameInto(frameNumber);
+    if (loaded) {
+        ++loadGeneration_;
+    }
+    return loaded;
+}
+
+bool LayerPlayback::loadFrameInto(int64_t frameNumber) {
     if (!inputSource_ || !inputSource_->isReady()) {
         return false;
     }
