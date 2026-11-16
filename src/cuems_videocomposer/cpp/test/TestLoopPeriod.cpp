@@ -41,7 +41,7 @@
 #include "../utils/CapsFile.h"
 #include "../video/FrameBuffer.h"
 #if defined(HAVE_MTCRECEIVER) && defined(MTCRECV_TESTING)
-#include "../../mtcreceiver/mtcreceiver.h"
+#include "../../../mtcreceiver/mtcreceiver.h"
 #endif
 #include <algorithm>
 #include <cmath>

@@ -30,7 +30,7 @@
 #include "../input/HAPVideoInput.h"
 #include "../input/VideoFileInput.h"
 #ifdef HAVE_MTCRECEIVER
-#include "../../mtcreceiver/mtcreceiver.h"  // toLocalDay (day alignment)
+#include "../../../mtcreceiver/mtcreceiver.h"  // toLocalDay (day alignment)
 #endif
 #include <algorithm>
 #include <atomic>

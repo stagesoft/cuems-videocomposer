@@ -31,7 +31,7 @@
 #include "../sync/SyncSource.h"
 #include "../video/FrameBuffer.h"
 #ifdef HAVE_MTCRECEIVER
-#include "../../mtcreceiver/mtcreceiver.h"
+#include "../../../mtcreceiver/mtcreceiver.h"
 #endif
 #include <climits>
 #include <cstdlib>
