@@ -855,9 +855,9 @@ void warnIfRefreshNotHonoured(const std::string& name, drmModeConnector* conn, d
     }
     std::ostringstream line;
     line << std::fixed << std::setprecision(3) << "display: [output:" << name << "] refresh=" << asked
-         << " not available at " << mode->hdisplay << "x" << mode->vdisplay << ": using " << mode->hdisplay << "x"
-         << mode->vdisplay << "@" << chosen.frameHz << " Hz; the sink offers " << offer.str()
-         << " Hz at that resolution (" << via << ")";
+         << (askedInterlaced ? "i" : "") << " not available at " << mode->hdisplay << "x" << mode->vdisplay
+         << ": using " << mode->hdisplay << "x" << mode->vdisplay << "@" << chosen.frameHz << " Hz; the sink offers "
+         << offer.str() << " Hz" << (askedInterlaced ? " progressive" : "") << " at that resolution (" << via << ")";
     LOG_WARNING << line.str();
 }
 

@@ -201,8 +201,8 @@ number of vsyncs. Plan: `cuems-RELATIONS/Plans/2026-11-06-refresh-rule-and-warni
   (Epson EB-L690: 1920x1200 **only** at 59.95; no 1080p25 on the EB-L690 / EB-815E) and 59.94 on many TVs.
 - **Pinning a rate**: `refresh=` per `[output:…]` in `/etc/cuems/display.conf` (the generator never writes it; see
   cuems-common "display.conf authoring"), then restart the VC **and** `cuems-node-engine` with nothing loaded
-  (869f8jn34). `findMode` takes the closest rate the sink offers, so a pin is a request, not a guarantee: read the
-  journal.
+  (869f8jn34). `findMode` takes a progressive mode within 0.5 Hz of the pin, else the native progressive mode of that
+  size with an ERROR (the interlaced rules above), so a pin is a request, not a guarantee: read the journal.
 - **How visible a near miss is** (and so whether the layer-load line below is a WARNING or an INFO): **decided
   from the 1amfwm7gpz7 eye test (Ion, 2026-11-10): `cadence::kNearIntegerWarnIntervalS = 60` s.** On panels a
   single-vsync correction was seen every 4.8 s (Acer 59.79 Hz) and every 16.2 s (LG at 59.94 Hz, 30p); at 60.000 Hz
@@ -233,7 +233,11 @@ DRMBackend: near-equal refresh rates on enabled outputs (openWindow): HDMI-A-1=5
   cadence engine decides on its own at reveal. Exact = within 10 ppm (below the clocks' own drift). A standard content
   rate is suggested only when it brings the corrections under the threshold (none helps on 59.79 Hz).
 - **`refresh= … not available`**: a pinned rate that differs from the chosen mode by more than 0.005 Hz (so `refresh=60`
-  on a 59.95-only sink is caught), from `setMode` and from `/videocomposer/output/mode`.
+  on a 59.95-only sink is caught), from `setMode` and from `/videocomposer/output/mode`. It lists **progressive rates
+  only**: an interlaced mode's frame rate (1080i60 = 30) is not on offer to a bare `refresh=`. An interlaced mode that
+  was chosen (asked for with `refresh=60i`, or the only kind at that size) has its own line and never this one;
+  `refresh=60i` that ended on a progressive mode logs `refresh=60.000i not available … the sink offers … Hz
+  progressive` (`refreshPinNotHonoured`, `offeredRefreshRates` in `display/ModeSelect.h`).
 - **`harmonizeRefreshRates()`** (outputs without a pin) gives each output its matched mode's own rate and lists the
   rates in its summary; it returns early when the free outputs already agree within 0.5 Hz, so with identical sinks
   it logs nothing at INFO.

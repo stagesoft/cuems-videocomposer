@@ -130,11 +130,13 @@ inline ModePick pickModeForRefresh(const std::vector<ModeView>& modes, int width
  * says agrees with what pickModeForRefresh() does.
  */
 
-/// The rates a mode list offers at a size, ascending, one entry per distinct rate (within 0.0005 Hz).
+/// The rates a refresh= pin can obtain at a size: progressive modes only, ascending, one entry per distinct rate
+/// (within 0.0005 Hz). An interlaced mode is never taken by a bare refresh= (rules above), so its frame rate
+/// (1080i60 = 30) is not listed: it would send the operator back to the pin that was just refused.
 inline std::vector<double> offeredRefreshRates(const std::vector<ModeView>& modes, int width, int height) {
     std::vector<double> rates;
     for (const auto& m : modes) {
-        if (m.width != width || m.height != height || m.frameHz <= 0.0) {
+        if (m.width != width || m.height != height || m.frameHz <= 0.0 || m.interlaced) {
             continue;
         }
         const double hz = m.frameHz;
@@ -146,11 +148,20 @@ inline std::vector<double> offeredRefreshRates(const std::vector<ModeView>& mode
     return rates;
 }
 
-/// Whether the mode chosen for a pinned refresh= is not the rate that was asked for. `askedInterlaced` is the
-/// trailing "i" of refresh=<field rate>i.
+/// Whether the mode chosen for a pinned refresh= is not what was asked for, in the terms of the WARNING (progressive
+/// rates). `askedInterlaced` is the trailing "i" of refresh=<field rate>i.
+///  - An interlaced choice is never reported here: the selection has its own line for it (asked for: INFO with the
+///    field rate; the only kind at that size: WARNING), and its frame rate is half the number that was asked.
+///  - refresh=<n>i that ended on a progressive mode is always reported, even at the same number.
+///  - Otherwise: the chosen rate differs from the pin by more than `toleranceHz`.
 inline bool refreshPinNotHonoured(double askedHz, bool askedInterlaced, const ModeView& chosen, double toleranceHz) {
-    (void)askedInterlaced;
-    return askedHz > 0.0 && std::abs(chosen.frameHz - askedHz) > toleranceHz;
+    if (askedHz <= 0.0 || chosen.interlaced) {
+        return false;
+    }
+    if (askedInterlaced) {
+        return true;
+    }
+    return std::abs(chosen.frameHz - askedHz) > toleranceHz;
 }
 
 } // namespace videocomposer
