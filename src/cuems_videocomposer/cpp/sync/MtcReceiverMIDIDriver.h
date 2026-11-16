@@ -30,7 +30,7 @@
 #define VIDEOCOMPOSER_MTCRECEIVER_MIDI_DRIVER_H
 
 #include "MIDIDriver.h"
-#include "../../mtcreceiver/mtcreceiver.h"
+#include "../../../mtcreceiver/mtcreceiver.h"
 #include <memory>
 #include <mutex>
 
