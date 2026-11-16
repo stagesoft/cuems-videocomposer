@@ -1932,6 +1932,7 @@ bool RemoteCommandRouter::handleDisplayMode(const std::vector<std::string>& args
         for (const auto& mode : found->modes) {
             LOG_WARNING << "    - " << mode.width << "x" << mode.height 
                        << "@" << mode.refreshRate << "Hz"
+                       << (mode.interlaced ? " (interlaced, frame rate; not taken by a bare refresh)" : "")
                        << (mode.preferred ? " (preferred)" : "");
         }
         LOG_WARNING << "==========================";

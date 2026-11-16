@@ -1007,6 +1007,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestFramerateConverter.cpp
         src/cuems_videocomposer/cpp/test/TestMTCDecoder.cpp
         src/cuems_videocomposer/cpp/test/TestPresentationTiming.cpp
+        src/cuems_videocomposer/cpp/test/TestModeSelect.cpp
         src/cuems_videocomposer/cpp/test/TestOutputSnapshot.cpp
         src/cuems_videocomposer/cpp/test/TestCadenceStats.cpp
         src/cuems_videocomposer/cpp/test/TestSMPTEUtils.cpp
