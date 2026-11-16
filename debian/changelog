@@ -1,3 +1,55 @@
+cuems-videocomposer (0.1.2-14) unstable; urgency=medium
+
+  * A video cue's first frame reaches the screen at its start (869feynrj
+    4.6, PR #28). New layer command /videocomposer/layer/<id>/visible_at
+    and capability token "visible_at": with 1 the layer stays hidden and
+    becomes visible on the first presented frame whose content time is
+    >= 0, in the same submission as that frame. Without the command
+    nothing changes. Journal: "layer <id> visible at content <ms> ms" per
+    reveal. Needs a cuems-engine that sends it (the release after
+    0.1.0rc6-7).
+  * Software-decoded layers (ProRes, any codec VAAPI cannot decode) and
+    NDI:
+    - Frame 0 is decoded at load, off the render thread (1amfwm7hk6j, PR
+      #30). The first frame no longer holds every layer on every output
+      while it decodes. Journal: "primed frame 0 of '<file>' in <ms> ms".
+      Cost: about 61 ms more per load on a loader thread and one decoded
+      frame kept from the load (about 8 MB at 1080p).
+    - A frame uploaded from CPU memory reaches the screen in the tick it
+      is chosen, once per layer (1amfwm7hg3u, PR #32). It was one refresh
+      late (16.7 ms at 60 Hz), and the first draw of a layer could show
+      the leftovers of another buffer. Hardware decode and HAP are
+      untouched.
+    - Memory leak fixed (1amfwm7hrb9, PR #31): since 0.1.2-9 every decoded
+      frame leaked its compressed packet, about 8 MB/s on a 1080p30 ProRes
+      layer; the videocomposer degraded after about 7 minutes.
+  * Exact start for content that is not 25 fps (1amfwm7h924, PR #26). The
+    engine's offset is split into whole content frames and a phase of
+    less than one frame, added to the clock. A 30p cue started 0 to
+    26.7 ms late depending on where the GO fell; 25p is unchanged.
+  * The refresh rule in the journal (1amfwm7gq3y, PR #27). One "cadence:
+    cue=<id> file=<name> <fps> fps on <hz> Hz (<connector>)" line per
+    layer load: INFO when the ratio is exact; WARNING with the rate to use
+    when it is not, or when a single-vsync correction comes more often
+    than every 60 s (30p on 59.94 or 59.95 Hz). A pinned refresh= the sink
+    cannot honour logs "refresh=... not available ... using ..." at mode
+    set.
+  * DRM/KMS is the default display backend (1amfwm7hjze, PR #29). DISPLAY
+    and WAYLAND_DISPLAY in the environment no longer select X11 or
+    Wayland: they are chosen only with --display-backend=x11|wayland. A
+    backend asked for by the flag that cannot open exits with status 1
+    instead of falling back; a bad value exits with status 2.
+  * Test aids, off unless VIDEOCOMPOSER_CADENCE_STATS=1, never on a show:
+    one "start-probe:" line per engine offset and "CpuUploadStats" every
+    60 s per CPU-uploaded layer.
+  * Verified: 296/296 unit tests on an FP530 and an N97 for this source
+    (rc_1 78c73c9); rig rows per ticket on test3, .111 and test +
+    test-node01 (cuems-RELATIONS baselines/<ticket>). Not for show
+    machines until the human test battery. Same version on every box of a
+    cluster.
+
+ -- Ion Reguera <ion@stagelab.coop>  Mon, 16 Nov 2026 17:03:41 +0100
+
 cuems-videocomposer (0.1.2-13) unstable; urgency=medium
 
   * Frame cadence on the vblank tick (1amfwm7gpz7, PR #24). The frame shown
