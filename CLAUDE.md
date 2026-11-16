@@ -13,6 +13,8 @@ Multi-layer video compositor for live production: hardware-decoded video renderi
 
 **DRM/KMS is THE path** — it is what every deployed node runs and the only backend kept current. `X11Display` and `WaylandDisplay` are **legacy, left in the tree but outdated**: they still compile and can come up on a dev desktop, but they are not maintained and must not be treated as reference behaviour. When the backends disagree, DRM is right and the other two are stale — never "fix" DRM to match them, and never rely on something X11/Wayland happen to do (see the hardware-decoder probe gotcha below for a bug that hid exactly there). `HeadlessDisplay` is a last-resort fallback when DRM fails, not a selectable mode.
 
+**The backend is chosen by a flag, never by the environment (1amfwm7hjze).** The VC starts on DRM whatever `DISPLAY` or `WAYLAND_DISPLAY` say; before this, either variable leaking into the service (a desktop session on the box, a hand start, an env file) silently put it on X11/Wayland with one INFO line as the trace. A desktop backend runs only with **`--display-backend=x11`** or **`--display-backend=wayland`** (also `=drm`; case-insensitive), and logs `WARNING display backend <x>: not maintained, not for production`. There is **no `auto`**: `auto`, an unknown value or a missing one stops the start (stderr names the flag and `drm, x11, wayland`, exit 1). An explicitly chosen desktop backend that fails is **one ERROR and exit 1**, no fallback to the other desktop backend (the old Wayland → X11 step is gone) nor to DRM; under the unit, `Restart=on-failure` makes that a loud restart loop on purpose. DRM → Headless is unchanged. Write the flag **only in the `=` form**: an older VC treats `--display-backend x11` as the flag (an unrecognized-option WARNING) plus a movie file called `x11`, while `--display-backend=x11` is only WARNed about and the old env-based choice applies. It is not advertised in cuems-common's `videocomposer-flags.env.example`: the desktop backends are for development, and their removal is ClickUp 1amfwm7hjzf. Code: `display/DisplayBackendChoice.*`, `ConfigurationManager::parseCommandLine`, `VideoComposerApplication::initializeDisplay`.
+
 Vendored git submodules: `mtcreceiver`, `oscreceiver` (+ others). Run `git submodule update --init` after cloning.
 
 ## Build
@@ -28,6 +30,19 @@ Deploy binaries with the **stop → cp → start** discipline (the player is a s
 The engine→VC protocol is documented once in the cuems-RELATIONS CLAUDE.md ("Video Cue Lifecycle"). VC's half: receive `/videocomposer/layer/load <file> <cueId>` on arm; on run, honor `/offset`, `/visible`, `/loop`, `/mtcfollow`; lock playback to MTC; auto-unload the layer on end (if enabled); `/videocomposer/reset` clears all state between projects. Default OSC port **7000**.
 
 `LayerPlayback` clamps an overshooting media frame to `totalFrames-1` while `wraparound_` is false, and wraps (`% totalFrames`) once it's true. `wraparound_` is enabled by the engine's `/loop=1` — for infinite loops the engine now sends `/loop` **before** `/mtcfollow` (see field notes).
+
+### `visible_at`: the self-gated reveal (869feynrj, caps token `visible_at`)
+
+Plan `cuems-RELATIONS/Plans/2026-11-03-audio-first-pass-head-869feynrj.md` §4.6. `/videocomposer/layer/<id>/visible_at 1` keeps the layer invisible and makes it visible **in the `update()` whose poll gives a raw content frame ≥ 0** (offset applied, *before* the loop period and the clamp: after them a pre-start position is frame 0 or the file's tail) **with that frame's pixels in the buffer**. The flip and frame 0 thus go in one submission and land on the vblank the cadence engine picked for content time 0 (tgt of the two-deep loop); there is no second clock read. A decode miss on that poll defers the reveal to the poll that delivers its frame (never the tail, never a stale frame): the gate checks `InputSource::deliveredFrame()`, because the hardware async queue (`VideoFileInput::readFrameToTexture`) and the async HAP decoder report success while *holding* the previous texture on a queue miss. Covered: VideoFileInput hardware path (`lastTransferredFrame_`, set only on a real transfer, to the number `AsyncDecodeQueue::getFrame` reports for the frame it returned: on a miss it falls back to the closest *earlier* queued frame, and before 1amfwm7hk6j the requested number was recorded instead, so the gate could trust a stale frame), HAPVideoInput (its `currentFrame_`, moved only by a decode/upload, and by `seek`), shared secondaries (the shared input's delivered frame **and** the driver cache's frame number). Software VideoFileInput and other inputs: a successful read delivered the frame (default). Not covered: a `seek()` followed by a read of the same frame, which on VideoFileInput (software) and HAP returns the old buffer through the "same frame" early return (pre-existing; only after a failed load or a full-frame SYSEX). After a held miss the layer does not re-request that frame, so the reveal then comes with the next frame (frame 1). It never goes through `awaitingFrame` (that waits for a frame *change* and would show frame 1 on a layer parked at 0).
+
+- `visible_at 0`: drops a pending reveal, or hides a layer the gate already revealed (the engine's cancel is final, D5). Nothing pending or gate-revealed: ignored, logged.
+- `/visible 1` while the gate is pending is covered by it (no early flip, no `awaitingFrame`) **as long as the layer has an MTC position** (`LayerPlayback::hasContentFrame()`: following, an MTC frame, the offset placed). Without one the gate cannot fire, so the 1 is the engine's healer: the gate is dropped and the layer shown at once as before visible_at (`awaitingFrame`), INFO `… visible_at pending without an MTC position: visible 1 shows it now`. After a reveal `/visible 1` changes nothing. `/visible 0` drops a pending gate. Without `visible_at`, `/visible` is unchanged.
+- A gate still pending after **6 s** (`VideoLayer::kVisibleAtPendingWarnMs`) logs one WARNING per gate, `… visible_at pending for <ms> ms without a frame at content time >= 0 (following <0|1>, MTC position <0|1>)`. The engine arms the gate at start − F (~0.1 s) and sets a video layer up at most ~5 s before its start, so past 6 s the start is not coming (lost `/mtcfollow`, MTC stopped, offset never placed).
+- Code: `VideoLayer::setVisibleAt` / `setVisible` and the gate in `VideoLayer::update()`; `LayerPlayback` only exposes `contentStarted()` / `contentFrame()`.
+- **Journal lines are a contract** (`remote/JournalContract.h`; the engine's rig rows grep them): `layer <id> visible at content <ms> ms` per reveal (0 = frame 0), `layer <id> visible_at cancelled after <ms> ms visible` (WARNING), `… visible_at cancelled before the reveal`, `… visible_at 0 ignored: no reveal pending or done`, `… visible_at dropped by visible 0`, plus the healer and pending lines above.
+- Limits: coupled pacing, one gate per layer (not per output). In the drop regime (content faster than the output) the cadence may never present frame 0; the reveal then shows frame 1 and logs its content time.
+- **CPU-uploaded content** (software-decoded codecs, NDI; not hardware h264/HEVC, not HAP, which arrive as GPU textures) reaches the texture **on the tick its frame is chosen** (1amfwm7hg3u): `OpenGLRenderer::uploadCpuFrame` binds the layer's single PBO, orphans it (`glBufferData(NULL)`), maps, copies this tick's prepared frame, unmaps and `glTexSubImage2D`s from offset 0, all in the same `renderLayer` call. Before it, a double PBO uploaded the *previous* call's buffer: every CPU frame was one refresh late and the first draw after a hidden period or a texture recreation could be uninitialised or stale (visible_at and `/visible 1` alike). The upload happens once per frame identity (`display/CpuUploadPolicy.h`: source generation, frame-load generation, prepared-pixel generation, texture generation), so a held frame or a second surface in the same tick reuses the texture, and a panorama pan on a held frame still re-uploads. A NULL map or a GL_FALSE unmap uploads that frame straight from the CPU buffer, is not recorded (the next draw retries the PBO) and logs `CPU upload: layer <id> staging buffer map failed|unmap returned GL_FALSE; …` at most once per layer per 10 s. With `VIDEOCOMPOSER_CADENCE_STATS=1` also, per CPU-uploaded layer every 60 s (and a `final` one when the layer goes): `CpuUploadStats: layer=<id> size=WxH n=… mean=…ms p95=…ms max=…ms direct=<n>`, the CPU-side cost from the PBO bind to the return of `glTexSubImage2D` over the window, `direct` = uploads that bypassed the PBO. The RECTANGLE fixed-function fallback (no shaders) always uploaded directly in the same call and is unchanged.
+- Tests: `test/TestVisibleAt.cpp` replays the model fixtures (`test/fixtures/cadence/`, plus 25/30 Hz outputs in `test/fixtures/visible_at/`, made by its `gen_fixtures.py` from the same model; `va_res_*` = the five 30 fps offset residues of 1amfwm7h924's phase, with the model run on the phase-shifted clock).
 
 ## NDI input and the montaje preview (from deb 0.1.2-7)
 
@@ -121,7 +136,8 @@ fixtures in `cuems-RELATIONS/baselines/test3-saltitos-20261104/model/` (the C++ 
   (debug only: ~4 lines per vsync). Healthy, 30p on 60 Hz with a looping clip: `holds{1}` = `corr-` + stalls,
   `holds{3}` = `corr+` + stalls, stalls = loop wraps, `reanchors=0`, no `anti-drift SNAP` after the GO.
   `cuems-RELATIONS/baselines/test3-saltitos-20261104/model/cadence_parse.py <journal>` judges a run against the
-  model's prediction.
+  model's prediction. The rule-1 line carries `cue=<id>` after `layer=c<id>` (1amfwm7gq3y), so it joins the
+  layer-load advice line of the "Refresh rule" section below.
 - **Kill switch**: `VIDEOCOMPOSER_CADENCE_LEGACY=1` in `/etc/cuems/videocomposer-flags.env`, then restart the VC with no
   project loaded (and restart `cuems-node-engine`: it does not notice a VC restart, 869f8jn34). One INFO line says so;
   every layer runs the legacy smoother. Per-surface pacing, `renderLegacy`, X11 and headless publish no tick and run
@@ -152,6 +168,66 @@ Here `resolution=1920x1080` is the per-output exception: it pins a 4K panel to 1
 An earlier version of this example had indented keys and an inline comment. The VC ignored both of those keys.
 
 The patch lives in `cpp/display/drm/DRMBackend.cpp` (`openWindow`/`initializeVirtualCanvas`): load display.conf before the global modeset (unless `-r` was explicit); the per-output override block applies unconditionally. **Deploy gotcha:** `cuems-generate-display-conf` does NOT emit `resolution_policy=`, so a fresh node with no operator override falls back to the 1080p default.
+
+### Refresh rule: content fps against output Hz (1amfwm7gq3y)
+
+Smooth playback needs the output refresh to be a whole multiple of the content fps: each frame is then held the same
+number of vsyncs. Plan: `cuems-RELATIONS/Plans/2026-11-06-refresh-rule-and-warning-1amfwm7gq3y.md` (§4.1, rig rows in
+§5.1); sink lists from the manuals in `Plans/2026-11-04-vc-stutter-free-playback-research.md` §D.10.
+
+| content fps | exact | a regular pattern (visible judder) | near miss: one single-vsync step every … |
+|---|---|---|---|
+| 23.976 | 47.95 (rare on sinks) | 59.94 / 60 (2,3) | 24.000: ~42 s |
+| 24 | 48 (rare) | 60 / 59.94 / 59.95 (2,3) | — |
+| 25 | **50** | 60 / 59.94 / 59.95 (2,3,2,3,2) | — |
+| 29.97 | **59.94** (the 148.352 MHz CEA mode: exact) | 50 (1,2) | 60.000: ~17 s · 59.95: ~99 s |
+| 30 | **60.000** | 50 (1,2) | **59.94: ~17 s** (many TVs) · **59.95: ~20 s** (every 1920x1200 "60", CVT-RB) · 59.79 (the Acer V193HQV 1366x768): ~4.8 s |
+| 50 | 50 | 60 (1,2) | — |
+| 60 | 60.000 | 50 (drop regime: 1 frame in 6 never shown) | 59.94 / 59.95: a skipped frame every ~17–20 s |
+
+- **Every output of a node at the same rate.** Coupled pacing paces every output at the slowest CRTC, so a 59.94 output
+  next to 60.000 ones makes the 60 Hz ones repeat a vsync every ~17 s (DRMBackend says so at start, below). Until a
+  per-output engine exists this holds for the whole node, not only for overlapping outputs.
+- **The traps are the near misses**, because nothing announces them: "60" is 59.95 on every 1920x1200 CVT-RB mode
+  (Epson EB-L690: 1920x1200 **only** at 59.95; no 1080p25 on the EB-L690 / EB-815E) and 59.94 on many TVs.
+- **Pinning a rate**: `refresh=` per `[output:…]` in `/etc/cuems/display.conf` (the generator never writes it; see
+  cuems-common "display.conf authoring"), then restart the VC **and** `cuems-node-engine` with nothing loaded
+  (869f8jn34). `findMode` takes the closest rate the sink offers, so a pin is a request, not a guarantee: read the
+  journal.
+- **How visible a near miss is** (and so whether the layer-load line below is a WARNING or an INFO): **decided
+  from the 1amfwm7gpz7 eye test (Ion, 2026-11-10): `cadence::kNearIntegerWarnIntervalS = 60` s.** On panels a
+  single-vsync correction was seen every 4.8 s (Acer 59.79 Hz) and every 16.2 s (LG at 59.94 Hz, 30p); at 60.000 Hz
+  (one every few minutes) it was not. A projector at 59.95 Hz hid it because it re-times the signal, so the
+  59.94/59.95 class (the 1920x1200 "60" trap) is a WARNING. Record: cuems-RELATIONS
+  `baselines/test3-saltitos-20261104/RESULTS.md`, "D2 of 1amfwm7gq3y, measured".
+
+Journal lines (grep `cadence: cue=`, `not available at`, `near-equal refresh`):
+
+```
+cadence: cue=<id> file=<name> 30 fps on 60.000 Hz: ratio 2.0000 -> hold 2 (exact) [tick]                       INFO
+cadence: cue=<id> file=<name> 25 fps on 60.000 Hz: non-integer ratio 2.4000 -> 2,3 pulldown (a regular judder
+  by construction); exact would be 50.000 Hz [tick]                                                           WARNING
+cadence: cue=<id> file=<name> 29.97 fps on 60.000 Hz: near-integer ratio 2.0020 (the output runs 60.000 Hz, not
+  59.940): hold 2 with one single-vsync correction every ~17 s; use a 59.940 Hz mode or content at 30 fps (exact)
+                                                         WARNING below kNearIntegerWarnIntervalS, INFO above
+display: [output:HDMI-A-1] refresh=75.000 not available at 1920x1080: using 1920x1080@60.000 Hz; the sink offers
+  23.976, 24.000, 29.970, 30.000, 50.000, 59.934, 59.940, 60.000 Hz at that resolution (display.conf)       WARNING
+DRMBackend: near-equal refresh rates on enabled outputs (openWindow): HDMI-A-1=59.940Hz, HDMI-A-2=60.000Hz, …
+  -- one atomic commit paces them all at the slowest (59.940 Hz), so the faster outputs repeat one vsync every
+  ~17 s; give every output the same mode (same refresh= in display.conf)                                    WARNING
+```
+
+- **The layer-load line** (`cadence::advise`, `sync/CadenceAdvice.{h,cpp}`, a pure function; hooked in
+  `VideoComposerApplication::setupLayerWithInputSource` on every load path) is logged once per load, **before the
+  GO**, from the tick's period (`[tick]`) or, before the first render, the slowest enabled output's mode (`[output
+  mode]`). Live inputs (NDI) are skipped; an unknown fps logs `fps unknown: no cadence advice`. It changes nothing: the
+  cadence engine decides on its own at reveal. Exact = within 10 ppm (below the clocks' own drift). A standard content
+  rate is suggested only when it brings the corrections under the threshold (none helps on 59.79 Hz).
+- **`refresh= … not available`**: a pinned rate that differs from the chosen mode by more than 0.005 Hz (so `refresh=60`
+  on a 59.95-only sink is caught), from `setMode` and from `/videocomposer/output/mode`.
+- **`harmonizeRefreshRates()`** (outputs without a pin) gives each output its matched mode's own rate and lists the
+  rates in its summary; it returns early when the free outputs already agree within 0.5 Hz, so with identical sinks
+  it logs nothing at INFO.
 
 ## Per-output color (phase 3)
 
@@ -327,6 +403,7 @@ display/blend REFUSED: /tmp/cuems.show.lock exists — a project is loaded, or t
 
 ## Field notes / gotchas
 
+- **A software-decoded layer is primed at load (1amfwm7hk6j).** Software decodes (ProRes, any codec without VAAPI) have no background decoder, so the first follow poll used to seek, fill FFmpeg's frame-thread pipeline, set up the scaler and convert on the **render thread** (test3, 1080p ProRes: a 373 ms stall, reveal at content 367 ms, every layer of the node frozen meanwhile). `AsyncVideoLoader::createInputSourceAsync` now calls `VideoFileInput::primeSoftwareDecode()` after a successful `open()`: `readFrame(0)` once on the loader worker, keeping the decoded frame (`frame_`, ~8 MB at 1080p 4:2:2 10-bit, ~33 MB at 4K, per loaded software layer, D2), so the first poll takes the same-frame early return (one `sws_scale`) and frames 1, 2, … are sequential. Journal: `AsyncVideoLoader: primed frame 0 of '<file>' in <ms> ms`; the existing `Loaded … in <ms>ms` includes it. A failed prime logs one WARNING `priming frame 0 failed for <file>` and resets `currentFrame_`, `lastDecodedPTS_`/`lastDecodedFrameNo_` and flushes the codec (`seek()` had already set `currentFrame_`, which would make the next `readFrame(0)` skip its seek); the load still succeeds and the first poll decodes as before. Not primed: hardware (async queue), index-only opens, HAP, NDI. A cue that starts elsewhere than frame 0 pays one wasted decode at load. Frames after 0 still decode on the render thread (out of scope; options 2/3 of the plan). Tests: `test/TestPrimeDecode.cpp` (prores_ks via ffmpeg; `demuxSeekCount()` counts demuxer seeks; `failNextPrimeForTesting()` exists only in the test build, `CUEMS_VC_TESTING`). Plan `cuems-RELATIONS/Plans/2026-11-11-vc-prime-software-decode-at-load.md`.
 - **A layer can claim hardware decode and run on the CPU — defect 6(b) (FIXED, `feat/g8-truth-in-reporting` `5e3b753`).** `AsyncDecodeQueue::isHardwareDecoding()` answers from `useHardware_`, which `open()` sets from *"a VAAPI device attached and the codec is whitelisted"* — a statement of **intent**, decided before any frame exists. A **4:2:2 8-bit** clip satisfies every one of those conditions and FFmpeg then decodes it on the CPU regardless, so the layer reported `Health::ok` **and hardware** while the GPU's decode engine sat at zero. Pre-existing, not an F2 regression.
   The truthful signal was already being computed and thrown away: the decode thread compares `decodeFrame_->format == AV_PIX_FMT_VAAPI` at two sites and simply took the other branch when they disagreed. `noteDecodedFormat()` now latches that on the **first decoded frame of each `open()`** (so a recovery reopen re-arms it — a reopen can land on a different path), logs it once at **ERROR** naming the real pixel format, and `VideoFileInput::getHealth()` **derives** `sw_fallback` from it.
   Three things to know before touching this:

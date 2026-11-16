@@ -45,10 +45,13 @@
 #include "sync/FramerateConverterSyncSource.h"
 #include "sync/MtcReceiverMIDIDriver.h"  // MtcReceiver::resetWrapOffset() in resetAll()
 #include "sync/DayAlign.h"
+#include "sync/CadenceAdvice.h"
+#include "sync/PresentTick.h"
 #include "layer/LayerManager.h"
 #include "layer/VideoLayer.h"
 #include "video/FrameFormat.h"
 #include "display/DisplayManager.h"
+#include "display/DisplayBackendChoice.h"
 #include "display/OpenGLRenderer.h"
 #include "display/StartupSplash.h"
 #include "remote/OSCRemoteControl.h"
@@ -71,6 +74,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 
 // The Debian package version, passed by debian/rules (see CMakeLists.txt).
 // Logged at startup so a tool reading the journal knows which build it talks to.
@@ -287,31 +291,55 @@ bool VideoComposerApplication::initializeHangGuard() {
 bool VideoComposerApplication::initializeDisplay() {
     // Create display manager
     displayManager_ = std::make_unique<DisplayManager>();
-    
-    // Auto-detect and create display backend (prefer Wayland over X11, then DRM)
-    const char* waylandDisplay = getenv("WAYLAND_DISPLAY");
-    const char* x11Display = getenv("DISPLAY");
-    
-    bool waylandAttempted = false;
-    bool needsDisplayManager = true;
-    
-#ifdef HAVE_WAYLAND
-    if (waylandDisplay) {
-        LOG_INFO << "WAYLAND_DISPLAY=" << waylandDisplay << " detected - attempting Wayland backend";
-        displayBackend_ = std::make_unique<WaylandDisplay>();
-        waylandAttempted = true;
-    } else
-#endif
-    if (x11Display) {
-        LOG_INFO << "Using X11 display backend (DISPLAY=" << x11Display << ")";
-        displayBackend_ = std::make_unique<X11Display>();
+
+    // 1amfwm7hjze: DRM/KMS unless --display-backend=x11|wayland asks for a
+    // desktop backend. DISPLAY and WAYLAND_DISPLAY no longer choose: a desktop
+    // session or an env file leaking either into the service used to put a
+    // show box on an unmaintained backend with one INFO line as the trace.
+    displaybackend::Kind kind = displaybackend::Kind::Drm;
+    const std::string option = config_->getString("display_backend", "");
+    if (!displaybackend::select(option, kind)) {
+        // The parser rejects bad values; only a config-file line reaches here.
+        LOG_ERROR << "display_backend=" << option << " is not a valid value (expected one of: "
+                  << displaybackend::acceptedValues() << ")";
+        return false;
     }
+
+    if (kind != displaybackend::Kind::Drm) {
+        LOG_WARNING << "display backend " << displaybackend::name(kind)
+                    << ": not maintained, not for production";
+        // One attempt, no fallback to the other desktop backend or to DRM
+        // (D2): the start fails and Restart=on-failure keeps the unit loud.
+        const bool opened = displaybackend::openExplicitDesktop(kind, [this](displaybackend::Kind k) {
+            if (k == displaybackend::Kind::Wayland) {
+#ifdef HAVE_WAYLAND
+                displayBackend_ = std::make_unique<WaylandDisplay>();
+#else
+                LOG_WARNING << "this build has no Wayland backend";
+                return false;
+#endif
+            } else {
+                displayBackend_ = std::make_unique<X11Display>();
+            }
+            if (!displayManager_->detectDisplays()) {
+                displayBackend_.reset();
+                return false;
+            }
+            // Single window mode
+            if (!displayManager_->createWindows(displayBackend_.get(), 0)) {
+                displayBackend_.reset();
+                return false;
+            }
+            return true;
+        });
+        if (!opened) {
+            return false;
+        }
+    } else {
 #ifdef HAVE_DRM_BACKEND
-    else {
-        // No display server - try DRM/KMS direct rendering
-        LOG_INFO << "No display server detected - attempting DRM/KMS direct rendering";
+        LOG_INFO << "Display backend drm - attempting DRM/KMS direct rendering";
         auto drmBackend = std::make_unique<DRMBackend>();
-        
+
         // Apply resolution mode from command line
         std::string resMode = config_->getString("resolution_mode", "1080p");
         drmBackend->setResolutionExplicit(config_->isResolutionExplicit());
@@ -320,63 +348,29 @@ bool VideoComposerApplication::initializeDisplay() {
             LOG_ERROR << "Valid modes: native, maximum, 1080p, 720p, 4k";
             return false;
         }
-        
+
         if (drmBackend->openWindow()) {
             LOG_INFO << "DRM/KMS backend initialized with " << drmBackend->getOutputCount() << " output(s)";
-            displayBackend_ = std::move(drmBackend);
-            needsDisplayManager = false;  // DRM manages its own outputs
+            displayBackend_ = std::move(drmBackend);  // DRM manages its own outputs
         } else {
             // DRM failed - try headless as last resort
             LOG_WARNING << "DRM backend failed - attempting headless mode";
             auto headless = std::make_unique<HeadlessDisplay>();
             headless->setDimensions(1920, 1080);  // Default resolution
-            
+
             if (headless->openWindow()) {
                 LOG_INFO << "Headless display backend initialized (1920x1080)";
                 displayBackend_ = std::move(headless);
-                needsDisplayManager = false;
             } else {
-                LOG_ERROR << "All display backends failed (X11, Wayland, DRM, Headless)";
+                LOG_ERROR << "All display backends failed (DRM, Headless)";
                 return false;
             }
         }
-    }
 #else
-    else {
-        LOG_ERROR << "No display server detected (neither WAYLAND_DISPLAY nor DISPLAY set)";
-        LOG_ERROR << "DRM backend not available - rebuild with libgbm-dev installed";
+        LOG_ERROR << "DRM backend not available - rebuild with libgbm-dev installed "
+                  << "(or start with --display-backend=x11|wayland, not for production)";
         return false;
-    }
 #endif
-
-    // Only use DisplayManager for X11/Wayland backends
-    if (needsDisplayManager) {
-        if (!displayManager_->detectDisplays()) {
-            std::cerr << "Failed to detect displays" << std::endl;
-            return false;
-        }
-        
-        // Create window (single window mode for now)
-        if (!displayManager_->createWindows(displayBackend_.get(), 0)) {
-#ifdef HAVE_WAYLAND
-            // If Wayland failed but X11 is available, try falling back
-            if (waylandAttempted && x11Display) {
-                LOG_WARNING << "Wayland backend failed - falling back to X11";
-                displayBackend_.reset();
-                displayBackend_ = std::make_unique<X11Display>();
-                
-                if (!displayManager_->createWindows(displayBackend_.get(), 0)) {
-                    LOG_ERROR << "X11 fallback also failed";
-                    return false;
-                }
-                LOG_INFO << "Successfully fell back to X11 display backend";
-            } else
-#endif
-            {
-                LOG_ERROR << "Failed to create display window";
-                return false;
-            }
-        }
     }
 
 #ifdef HAVE_VAAPI_INTEROP
@@ -997,7 +991,8 @@ std::unique_ptr<SyncSource> VideoComposerApplication::createLayerSyncSource(Inpu
     return std::make_unique<FramerateConverterSyncSource>(globalSyncSource_.get(), inputSource);
 }
 
-void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource) {
+void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std::unique_ptr<InputSource> inputSource,
+                                                         const std::string& cueId, const std::string& filepath) {
     if (!layer || !inputSource) {
         return;
     }
@@ -1009,6 +1004,9 @@ void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std:
     // All layers share the same global MTC sync source, but each has its own framerate converter
     auto syncSource = createLayerSyncSource(layer->getInputSource());
     if (syncSource) {
+        if (auto* converter = dynamic_cast<FramerateConverterSyncSource*>(syncSource.get())) {
+            converter->setCueId(cueId);
+        }
         layer->setSyncSource(std::move(syncSource));
     }
     
@@ -1020,6 +1018,45 @@ void VideoComposerApplication::setupLayerWithInputSource(VideoLayer* layer, std:
         props.height = info.height;
     }
 
+    logCadenceAdvice(layer, cueId, filepath);
+}
+
+void VideoComposerApplication::logCadenceAdvice(VideoLayer* layer, const std::string& cueId,
+                                                const std::string& filepath) {
+    if (!layer || !layer->getInputSource() || layer->getInputSource()->isLiveStream()) {
+        return;   // a live source has no file cadence to advise on
+    }
+    const double fps = layer->isReady() ? layer->getFrameInfo().framerate : 0.0;
+    // The period the cadence engine will pace this layer on: the pacing CRTC's tick (coupled DRM path). Without a
+    // tick (legacy smoother, per-surface pacing, X11, headless, or before the first flip) the slowest enabled
+    // output's mode, which is what paces a coupled commit.
+    int64_t periodNs = currentPresentTick().periodNs;
+    std::string source = "tick";
+    if (periodNs <= 0 && displayBackend_) {
+        double minHz = 0.0;
+        for (const auto& out : displayBackend_->getOutputs()) {
+            if (out.connected && out.enabled && out.refreshRate > 0.0 && (minHz <= 0.0 || out.refreshRate < minHz)) {
+                minHz = out.refreshRate;
+            }
+        }
+        if (minHz > 0.0) {
+            periodNs = static_cast<int64_t>(std::llround(1e9 / minHz));
+            source = "output mode";
+        }
+    }
+    const cadence::Advice advice = cadence::advise(fps, periodNs);
+    const std::string file = filepath.empty() ? std::string("-") : filepath.substr(filepath.find_last_of('/') + 1);
+    std::ostringstream line;
+    line << "cadence: cue=" << (cueId.empty() ? std::string("-") : cueId) << " file=" << file << " "
+         << advice.text;
+    if (advice.kind != cadence::Kind::Unknown) {
+        line << " [" << source << "]";
+    }
+    if (advice.warning) {
+        LOG_WARNING << line.str();
+    } else {
+        LOG_INFO << line.str();
+    }
 }
 
 bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, const std::string& filepath) {
@@ -1064,7 +1101,7 @@ bool VideoComposerApplication::createLayerWithFile(const std::string& cueId, con
     
     VideoLayer* layerPtr = layerManager_->getLayerByCueId(cueId);
     if (layerPtr) {
-        setupLayerWithInputSource(layerPtr, std::move(inputSource));
+        setupLayerWithInputSource(layerPtr, std::move(inputSource), cueId, filepath);
     }
     
     LOG_INFO << "Created layer with file: " << filepath << " (cue ID: " << cueId << ")";
@@ -1186,7 +1223,7 @@ bool VideoComposerApplication::loadFileIntoLayer(const std::string& cueId, const
         return false;
     }
     
-    setupLayerWithInputSource(layer, std::move(inputSource));
+    setupLayerWithInputSource(layer, std::move(inputSource), cueId, filepath);
     
     LOG_INFO << "Loaded file into layer: " << filepath << " (cue ID: " << cueId << ")";
     return true;
@@ -1292,7 +1329,7 @@ void VideoComposerApplication::onAsyncLoadComplete(const std::string& cueId, con
     }
 
     // Setup layer with the loaded input source
-    setupLayerWithInputSource(layer, std::move(inputSource));
+    setupLayerWithInputSource(layer, std::move(inputSource), cueId, filepath);
     LOG_INFO << journal::asyncLoadComplete(filepath, cueId);
 
     // Resolve pending shared layers waiting for this driver

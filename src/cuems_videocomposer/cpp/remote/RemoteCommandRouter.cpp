@@ -131,6 +131,9 @@ RemoteCommandRouter::RemoteCommandRouter(VideoComposerApplication* app, LayerMan
     registerLayerCommand("visible", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerVisible(layer, args);
     });
+    registerLayerCommand("visible_at", [this](VideoLayer* layer, const std::vector<std::string>& args) {
+        return handleLayerVisibleAt(layer, args);
+    });
     registerLayerCommand("zorder", [this](VideoLayer* layer, const std::vector<std::string>& args) {
         return handleLayerZOrder(layer, args);
     });
@@ -696,14 +699,19 @@ bool RemoteCommandRouter::handleLayerVisible(VideoLayer* layer, const std::vecto
         return false;
     }
 
-    int visible = std::atoi(args[0].c_str());
-    // When transitioning 0→1, suppress rendering until a fresh frame
-    // is loaded by updateFromSyncSource. This prevents a stale frame
-    // from previous playback from flashing on screen.
-    if (visible != 0 && !layer->properties().visible) {
-        layer->properties().awaitingFrame = true;
+    // 0->1 sets awaitingFrame (no stale frame flash); a pending visible_at
+    // gate covers a 1 and is dropped by a 0 (VideoLayer::setVisible).
+    layer->setVisible(std::atoi(args[0].c_str()) != 0);
+    return true;
+}
+
+bool RemoteCommandRouter::handleLayerVisibleAt(VideoLayer* layer, const std::vector<std::string>& args) {
+    if (!layer || args.empty()) {
+        return false;
     }
-    layer->properties().visible = (visible != 0);
+    // 869feynrj §4.6: 1 = reveal on the first presented frame with content
+    // time >= 0; 0 = cancel (logged by the layer).
+    layer->setVisibleAt(std::atoi(args[0].c_str()) != 0);
     return true;
 }
 
