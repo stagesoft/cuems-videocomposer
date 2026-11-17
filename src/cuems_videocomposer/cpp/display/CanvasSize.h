@@ -353,8 +353,15 @@ inline DeclaredFile plainSections(const std::string& text) {
  * layout (canvas_layout is not custom, or there is no file).
  */
 inline Size wantedCanvas(const DeclaredFile* declared, const std::vector<Driven>& driven) {
-    (void)declared;  // step 1 of the plan: today's rule, the driven regions only
-    return boundingBox(regionsOf(driven));
+    std::vector<Rect> rects = regionsOf(driven);  // the floor: never smaller than what is driven
+    if (declared) {
+        for (const auto& s : declared->sections) {
+            if (s.plain && s.enabled && s.hasRegion) {
+                rects.push_back(s.region);  // counted as written, driven or not, as the engine counts it
+            }
+        }
+    }
+    return boundingBox(rects);
 }
 
 enum class CanvasSource {
@@ -380,11 +387,28 @@ struct CanvasChoice {
  */
 inline CanvasChoice canvasToConfigure(const DeclaredFile* declared, const std::vector<Driven>& driven, int sizeLimit,
                                       const std::function<bool(int, int)>& tryAllocate) {
-    (void)sizeLimit;  // step 1 of the plan: today's rule
     CanvasChoice c;
     c.driven = boundingBox(regionsOf(driven));
     c.wanted = wantedCanvas(declared, driven);
     c.source = CanvasSource::Driven;
+
+    if (c.wanted.valid() && c.wanted != c.driven) {
+        if (sizeLimit > 0 && (c.wanted.width > sizeLimit || c.wanted.height > sizeLimit)) {
+            c.source = CanvasSource::DrivenBeyondLimit;
+            c.reason = "a side is beyond this GPU's limit of " + std::to_string(sizeLimit) + " px, not attempted";
+        } else {
+            c.attempts.push_back(c.wanted);
+            if (tryAllocate(c.wanted.width, c.wanted.height)) {
+                c.source = CanvasSource::Declared;
+                c.size = c.wanted;
+                return c;
+            }
+            c.source = CanvasSource::DrivenAfterFailure;
+            c.reason = "the GPU refused a canvas of that size";
+        }
+    }
+
+    // Today's canvas: the driven regions
     if (!c.driven.valid()) {
         c.source = CanvasSource::None;
         return c;
@@ -415,12 +439,22 @@ struct SurfacePlan {
 
 /** `customLayout`: this videocomposer uses the file's layout (canvas_layout=custom as it reads it). */
 inline SurfacePlan surfacesToCreate(const std::vector<ConnectedOutput>& connected, bool customLayout) {
-    (void)customLayout;  // step 1 of the plan: today's rule, only enabled=false is skipped
     SurfacePlan plan;
+    bool anyListedEnabled = false;
+    for (const auto& c : connected) {
+        if (c.listed && c.enabled) {
+            anyListedEnabled = true;
+        }
+    }
     for (const auto& c : connected) {
         if (c.listed && !c.enabled) {
             plan.disabled.push_back(c.name);
+        } else if (!c.listed && customLayout && anyListedEnabled) {
+            plan.unlisted.push_back(c.name);  // D4: dark, like enabled=false
         } else {
+            if (!c.listed && customLayout) {
+                plan.exception = true;  // no listed output connected: driven as before, never a black headless box
+            }
             plan.create.push_back(c.name);
         }
     }
@@ -439,11 +473,65 @@ struct LayoutNote {
 /** The lines logged once at start, where the engine's canvas and this one can differ. */
 inline std::vector<LayoutNote> layoutNotes(const DeclaredFile& file, bool customLayout,
                                            const std::vector<Driven>& driven, const SurfacePlan& surfaces) {
-    (void)file;
-    (void)customLayout;
-    (void)driven;
-    (void)surfaces;
-    return {};  // step 1 of the plan: today says nothing
+    std::vector<LayoutNote> notes;
+    auto warn = [&notes](const char* code, const std::string& text) {
+        notes.push_back(LayoutNote{LayoutNote::Level::Warning, code, text});
+    };
+    auto isDriven = [&driven](const std::string& name) {
+        for (const auto& d : driven) {
+            if (d.name == name) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (customLayout) {
+        const Size canvas = wantedCanvas(&file, driven);
+        for (const auto& s : file.sections) {
+            if (!s.enabled) {
+                continue;  // dark by design, counted by neither reader
+            }
+            const bool drivenHere = isDriven(s.name);
+            if (s.plain && !drivenHere) {
+                warn("W1", "[output:" + s.name + "] canvas_region=" + toString(s.region) + " is listed but no output " +
+                               "is driven on " + s.name + " (not connected, or no surface): it stays in the canvas, " +
+                               toString(canvas) + " as the engine's, and its region stays dark");
+            } else if (!s.plain) {
+                warn("W2", "[output:" + s.name + "] is not written in the plain form (" + s.notPlainBecause +
+                               "): the engine may read it differently. It is " +
+                               (drivenHere ? "counted in the canvas because it is driven"
+                                           : "left out of the canvas because it is not driven"));
+            } else if (s.region.width <= 0 || s.region.height <= 0) {
+                warn("W3", "[output:" + s.name + "] canvas_region=" + toString(s.region) + " has a width or height " +
+                               "of zero or less: the engine takes it as written, this videocomposer uses the output's " +
+                               "own size, so the two canvases can differ");
+            }
+        }
+        for (const auto& name : surfaces.unlisted) {
+            warn("W6", name + " is connected but display.conf has no [output:" + name + "] section: no surface " +
+                           "created, it stays dark (add a section for it to use it)");
+        }
+        if (surfaces.exception) {
+            std::string names;
+            for (const auto& name : surfaces.create) {
+                names += (names.empty() ? "" : ", ") + name;
+            }
+            notes.push_back(LayoutNote{LayoutNote::Level::Error, "D4-exception",
+                                       "no output listed in display.conf is connected; driving the connected " +
+                                           names + " as before, which the file does not list. The file and the " +
+                                           "connected outputs disagree: check the cabling or display.conf"});
+        }
+    } else if (file.regionLines) {
+        warn("W5", "display.conf has canvas_region lines but this videocomposer does not use the file's layout (no " +
+                       std::string("line written exactly canvas_layout=custom): the engine places cues by those ") +
+                       "regions, this videocomposer lays the outputs out by itself");
+    }
+    if (file.canvasSizeLine) {
+        warn("W4", "display.conf has a canvas_size line: the engine uses it, this videocomposer does not (ticket "
+                   "1amfwm7j9xv), so the two canvases differ");
+    }
+    return notes;
 }
 
 }  // namespace canvas
