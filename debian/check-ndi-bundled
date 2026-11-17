@@ -1,0 +1,88 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Stagelab Coop SCCL
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
+#
+# check-ndi-bundled PACKAGE_ROOT
+#
+# Fails the package build when a binary in PACKAGE_ROOT/usr/bin could not start on a
+# clean machine because of the NDI library (1amfwm7j9r7).
+#
+# libndi.so.6 is proprietary: it is not a Debian package and not a Depends of ours. It is
+# bundled in /usr/lib/cuems-videocomposer/ and found through the binary's RUNPATH. CMake
+# links the binary against whatever SDK it finds, while debian/rules copies the library
+# from a fixed list of places; when the two disagree the package used to be built anyway,
+# with a binary that stops in the loader before main() (0.1.2-1 and 0.1.2-3 shipped so).
+#
+# For every binary in PACKAGE_ROOT/usr/bin that has a NEEDED entry libndi.so.*:
+#   - PACKAGE_ROOT/usr/lib/cuems-videocomposer/<that name> must exist (a dangling link fails). The
+#     name is read from the binary and not assumed: debian/rules bundles libndi.so.6 only, so a
+#     binary linked against an SDK of another major (libndi.so.5, a future libndi.so.7) fails here;
+#   - the binary's RUNPATH (or RPATH) must contain /usr/lib/cuems-videocomposer (with or without a
+#     trailing slash).
+# A binary that needs no NDI library passes whatever the package holds.
+#
+# Exit status: 0 all binaries pass, 1 at least one fails, 2 wrong use.
+# Called from debian/rules after the install step; can be run by hand on any unpacked package.
+set -eu
+
+PRIVATE_DIR=usr/lib/cuems-videocomposer
+
+if [ $# -ne 1 ]; then
+    echo "usage: check-ndi-bundled PACKAGE_ROOT" >&2
+    exit 2
+fi
+root=$1
+if [ ! -d "$root/usr/bin" ]; then
+    echo "check-ndi-bundled: $root/usr/bin is not a directory" >&2
+    exit 2
+fi
+
+fail=0
+checked=0
+for bin in "$root"/usr/bin/*; do
+    [ -f "$bin" ] || continue
+    # Not an ELF file (a script): objdump fails, nothing to check.
+    dyn=$(objdump -p "$bin" 2>/dev/null) || continue
+    checked=$((checked + 1))
+    name=${bin#"$root"/}
+    # Every NDI library the binary asks the loader for: libndi.so.6 with today's SDK.
+    needed=$(printf '%s\n' "$dyn" | awk '$1 == "NEEDED" && $2 ~ /^libndi\.so/ { print $2 }')
+    if [ -z "$needed" ]; then
+        echo "check-ndi-bundled: $name does not need an NDI library: nothing to check"
+        continue
+    fi
+    ok=1
+    for soname in $needed; do
+        if [ ! -e "$root/$PRIVATE_DIR/$soname" ]; then
+            echo "check-ndi-bundled: ERROR: $name needs $soname but the package has no /$PRIVATE_DIR/$soname." >&2
+            echo "  The binary was linked against an NDI SDK that debian/rules did not find to bundle" >&2
+            echo "  (it bundles libndi.so.6 from /opt/NDI SDK for Linux/ or from NDI_SDK_DIR). Install" >&2
+            echo "  that SDK or set NDI_SDK_DIR, then rebuild." >&2
+            ok=0
+        fi
+    done
+    # One line per RPATH / RUNPATH entry of the ELF header, each a colon-separated list: joined into
+    # one list, and a trailing slash on an element dropped, before looking for the private directory.
+    runpath=$(printf '%s\n' "$dyn" | awk '$1 == "RUNPATH" || $1 == "RPATH" { print $2 }' \
+              | tr '\n' ':' | sed 's#/*:#:#g; s#:*$##')
+    case ":$runpath:" in
+        *":/$PRIVATE_DIR:"*) ;;
+        *)
+            echo "check-ndi-bundled: ERROR: $name needs $(echo $needed) but its RUNPATH is '$runpath'," >&2
+            echo "  without /$PRIVATE_DIR: the loader would not look where the library is bundled." >&2
+            ok=0
+            ;;
+    esac
+    if [ $ok -eq 1 ]; then
+        echo "check-ndi-bundled: $name needs $(echo $needed): bundled in /$PRIVATE_DIR, RUNPATH '$runpath'"
+    else
+        fail=1
+    fi
+done
+
+if [ $checked -eq 0 ]; then
+    echo "check-ndi-bundled: no ELF binary in $root/usr/bin" >&2
+    exit 2
+fi
+exit $fail
