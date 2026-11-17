@@ -386,7 +386,7 @@ bool test_OutputColor_ClampsMatchLayerHandlers() {
 }
 
 // The layer loop `while (hue > 180) hue -= 360` never ends for huge values; the fold is
-// O(1) and agrees with the loop wherever the loop ends (180 stays 180, -180 stays -180)
+// O(1) and agrees with the loop wherever the loop was exact (180 stays 180, -180 stays -180)
 bool test_OutputColor_HueFoldNeverLoops() {
     TEST_ASSERT(foldHue(540.0f) == 180.0f);
     TEST_ASSERT(foldHue(900.0f) == 180.0f);
@@ -498,15 +498,16 @@ bool test_OutputColor_HueArgFoldsFinite() {
     TEST_ASSERT(parseHueDegrees("90 \r\n", hue) && hue == 90.0f);
     TEST_ASSERT(parseHueDegrees("+90", hue) && hue == 90.0f);
 
-    // The values that never left the loop: 8.6e9 is where x - 360 == x begins for a float
+    // The values that never left the loop: above 2^33 (8.59e9) x - 360 == x for a float
     const char* huge[] = {"8.6e9", "-8.6e9", "1e11", "1e30", "-1e30", "3.4e38", "-3.4e38"};
     for (const char* text : huge) {
         hue = 999.0f;
         TEST_ASSERT(parseHueDegrees(text, hue));
         TEST_ASSERT(std::isfinite(hue) && hue >= -180.0f && hue <= 180.0f);
     }
-    // 2^33 is a multiple of 360 plus 152, and exact as a float
+    // 2^33 is a multiple of 360 plus 152 and exact as a float; the next float up is the first stuck one
     TEST_ASSERT(parseHueDegrees("8589934592", hue) && hue == 152.0f);
+    TEST_ASSERT(parseHueDegrees("8589935616", hue) && hue == 96.0f);   // 2^33 + 1024
 
     // The same numbers as an OSC float argument reaches the handlers ("1e+30", "8.6e+09")
     const float sent[] = {0.0f, 90.0f, -90.5f, 180.0f, -180.0f, 540.0f, 8.6e9f, 1e30f, -1e30f};

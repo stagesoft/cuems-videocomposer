@@ -28,6 +28,7 @@
 #include "../osd/OSDManager.h"
 #include "../display/OpenGLRenderer.h"
 #include "../display/DisplayBackend.h"
+#include "../display/OutputColor.h"  // parseHueDegrees
 #include "../display/ShowLock.h"
 #include "OutputColorCommands.h"
 #include "../utils/Logger.h"  // For LOG_INFO, LOG_WARNING
@@ -1714,10 +1715,16 @@ bool RemoteCommandRouter::handleLayerHue(VideoLayer* layer, const std::vector<st
         return false;
     }
     
-    float hue = std::atof(args[0].c_str());
-    // Wrap hue to -180 to 180
-    while (hue > 180.0f) hue -= 360.0f;
-    while (hue < -180.0f) hue += 360.0f;
+    // Folded into -180 .. 180 in constant time; a value that is not a finite number is
+    // refused, where the old loop never ended for inf and hung the render thread (1amfwm7eyq5)
+    float hue = 0.0f;
+    if (!parseHueDegrees(args[0], hue)) {
+        LOG_WARNING << "layer hue: '" << ndiSanitizeForLog(args[0])
+                    << "' is not a finite number: ignored, hue unchanged (layer "
+                    << layer->getLayerId() << ", cue ID: "
+                    << ndiSanitizeForLog(layer->getCueId()) << ")";
+        return false;
+    }
     layer->properties().colorAdjust.hue = hue;
     return true;
 }
@@ -1781,9 +1788,13 @@ bool RemoteCommandRouter::handleMasterHue(const std::vector<std::string>& args) 
         return false;
     }
     
-    float hue = std::atof(args[0].c_str());
-    while (hue > 180.0f) hue -= 360.0f;
-    while (hue < -180.0f) hue += 360.0f;
+    // Same rule as the layer hue (1amfwm7eyq5)
+    float hue = 0.0f;
+    if (!parseHueDegrees(args[0], hue)) {
+        LOG_WARNING << "master/hue: '" << ndiSanitizeForLog(args[0])
+                    << "' is not a finite number: ignored, hue unchanged";
+        return false;
+    }
     app_->renderer().masterProperties().colorAdjust.hue = hue;
     return true;
 }

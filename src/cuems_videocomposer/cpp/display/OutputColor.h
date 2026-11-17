@@ -26,7 +26,6 @@
 #include <charconv>
 #include <cmath>
 #include <cstddef>
-#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -116,11 +115,13 @@ inline bool parseFiniteFloat(std::string_view text, float& out) {
 }
 
 /**
- * Fold a hue angle into [-180, 180] without a loop. The layer handlers use
- * `while (hue > 180) hue -= 360`, which never ends for inf or |h| >~ 1e11 (869c3p77c);
- * this gives the same result as that loop for every finite input (180 stays 180,
- * -180 stays -180, 540 -> 180, -540 -> -180) and is O(1). Callers refuse non-finite
- * values before calling it.
+ * Fold a hue angle into [-180, 180] without a loop. The layer and master handlers used
+ * `while (hue > 180) hue -= 360`, which never ends for inf or |h| > 2^33 (8.6e9); they
+ * go through parseHueDegrees below now (1amfwm7eyq5). This gives the value that loop gave
+ * wherever the loop was exact, |h| < 2^27 (180 stays 180, -180 stays -180, 540 -> 180,
+ * -540 -> -180), except for the sign of a zero result (-360 -> -0 here, +0 from the loop;
+ * parseHueDegrees restores it), and is O(1). Callers refuse non-finite values before
+ * calling it.
  */
 inline float foldHue(float hue) {
     double h = std::fmod(static_cast<double>(hue), 360.0);
@@ -131,22 +132,24 @@ inline float foldHue(float hue) {
 
 /**
  * One hue argument of /videocomposer/layer/<id>/hue or /videocomposer/master/hue to the
- * angle the handler stores (1amfwm7eyq5). A finite value is folded into [-180, 180] in
- * constant time, with the result the handlers' loop gave wherever that loop was exact
- * (|h| < 2^27): a value already inside the range comes back untouched, -0 included, and a
- * multiple of 360 gives +0, as the loop's own subtraction did.
+ * angle the handler stores (1amfwm7eyq5). The handlers read it with std::atof and wrapped
+ * it with `while (hue > 180) hue -= 360`: for inf, and for any |h| above 2^33 (8.6e9),
+ * where a float no longer changes when 360 is subtracted, that loop never ended and the
+ * render thread hung with it; nan passed both loops and was stored.
  *
- * The argument is still read as the handlers read it today, with std::atof: a leading
- * number is taken and the rest ignored, text and an empty string are 0, and "inf" and
- * "nan" are accepted and returned as they are. The rows that ask for a refusal fail on
- * this; the next commit makes it strict.
+ * Refused, with out left alone: what parseFiniteFloat refuses. That is inf and nan in any
+ * spelling, a number beyond the float range, text, an empty string, and a number followed
+ * by anything else ("12abc", which std::atof read as 12).
+ *
+ * A finite value is folded into [-180, 180] in constant time. Below 2^27, where the loop
+ * was exact (a float step is at most 8 there and 360 is a multiple of it), the result is
+ * the loop's bit for bit: a value already inside the range comes back untouched, -0
+ * included, and a multiple of 360 gives +0, as the loop's own subtraction did. From 2^27
+ * up the loop subtracted a rounded 360 and did not return the true angle; this does.
  */
 inline bool parseHueDegrees(std::string_view text, float& out) {
-    const float value = static_cast<float>(std::atof(std::string(text).c_str()));
-    if (!std::isfinite(value)) {
-        out = value;
-        return true;
-    }
+    float value = 0.0f;
+    if (!parseFiniteFloat(text, value)) return false;
     if (value >= -180.0f && value <= 180.0f) {
         out = value;
         return true;
