@@ -169,6 +169,18 @@ An earlier version of this example had indented keys and an inline comment. The 
 
 The patch lives in `cpp/display/drm/DRMBackend.cpp` (`openWindow`/`initializeVirtualCanvas`): load display.conf before the global modeset (unless `-r` was explicit); the per-output override block applies unconditionally. **Deploy gotcha:** `cuems-generate-display-conf` does NOT emit `resolution_policy=`, so a fresh node with no operator override falls back to the 1080p default.
 
+**Interlaced modes (R11, ClickUp 1amfwm7evfj).** The VC's rate of a mode is the FRAME rate (`clock/(htotal·vtotal)`),
+so 1080i60 reads 30 Hz; every monitor on the rigs offers 1080 at 25/29.97/30 only as interlaced. Since this fix a
+`refresh=` never selects an interlaced mode unless asked for: a progressive mode within 0.5 Hz wins; if the rate does
+not exist in progressive the native progressive mode of that size is used with an ERROR naming both
+(`… 1920x1080@30 does not exist as a progressive mode on this monitor; using the native progressive …`); an
+interlaced mode is taken only with `refresh=<field rate>i` (e.g. `refresh=60i`, matched against the field rate that
+`modetest` shows) or when the size has no progressive mode at all (WARNING). Auto-selection and refresh
+harmonization skip interlaced modes too. `/videocomposer/display/mode` follows the same rule in its pre-check: a rate
+that exists only interlaced at a size with progressive modes is refused (`=== MODE NOT AVAILABLE ===`, the list marks
+the interlaced modes). At equal distance the first mode listed wins. The `i` of `refresh=60i` is found past a trailing
+space or the carriage return of a CRLF file.
+
 ### Refresh rule: content fps against output Hz (1amfwm7gq3y)
 
 Smooth playback needs the output refresh to be a whole multiple of the content fps: each frame is then held the same
@@ -192,8 +204,8 @@ number of vsyncs. Plan: `cuems-RELATIONS/Plans/2026-11-06-refresh-rule-and-warni
   (Epson EB-L690: 1920x1200 **only** at 59.95; no 1080p25 on the EB-L690 / EB-815E) and 59.94 on many TVs.
 - **Pinning a rate**: `refresh=` per `[output:…]` in `/etc/cuems/display.conf` (the generator never writes it; see
   cuems-common "display.conf authoring"), then restart the VC **and** `cuems-node-engine` with nothing loaded
-  (869f8jn34). `findMode` takes the closest rate the sink offers, so a pin is a request, not a guarantee: read the
-  journal.
+  (869f8jn34). `findMode` takes a progressive mode within 0.5 Hz of the pin, else the native progressive mode of that
+  size with an ERROR (the interlaced rules above), so a pin is a request, not a guarantee: read the journal.
 - **How visible a near miss is** (and so whether the layer-load line below is a WARNING or an INFO): **decided
   from the 1amfwm7gpz7 eye test (Ion, 2026-11-10): `cadence::kNearIntegerWarnIntervalS = 60` s.** On panels a
   single-vsync correction was seen every 4.8 s (Acer 59.79 Hz) and every 16.2 s (LG at 59.94 Hz, 30p); at 60.000 Hz
@@ -224,7 +236,11 @@ DRMBackend: near-equal refresh rates on enabled outputs (openWindow): HDMI-A-1=5
   cadence engine decides on its own at reveal. Exact = within 10 ppm (below the clocks' own drift). A standard content
   rate is suggested only when it brings the corrections under the threshold (none helps on 59.79 Hz).
 - **`refresh= … not available`**: a pinned rate that differs from the chosen mode by more than 0.005 Hz (so `refresh=60`
-  on a 59.95-only sink is caught), from `setMode` and from `/videocomposer/output/mode`.
+  on a 59.95-only sink is caught), from `setMode` and from `/videocomposer/output/mode`. It lists **progressive rates
+  only**: an interlaced mode's frame rate (1080i60 = 30) is not on offer to a bare `refresh=`. An interlaced mode that
+  was chosen (asked for with `refresh=60i`, or the only kind at that size) has its own line and never this one;
+  `refresh=60i` that ended on a progressive mode logs `refresh=60.000i not available … the sink offers … Hz
+  progressive` (`refreshPinNotHonoured`, `offeredRefreshRates` in `display/ModeSelect.h`).
 - **`harmonizeRefreshRates()`** (outputs without a pin) gives each output its matched mode's own rate and lists the
   rates in its summary; it returns early when the free outputs already agree within 0.5 Hz, so with identical sinks
   it logs nothing at INFO.
@@ -413,7 +429,7 @@ display/blend REFUSED: /tmp/cuems.show.lock exists — a project is loaded, or t
   Drill: `cuems-RELATIONS/baselines/fp530-capacity/g8-truth-drill.py`. Plan: `Plans/2026-08-28-g8-truth-in-reporting-and-f9-ping.md`. ClickUp 869en65tm.
 - **Looping-video first-loop freeze (FIXED engine-side).** A `loop=-1` cue played one loop, froze ~one loop on the last frame, then looped forever. Root cause was engine OSC ordering: `/mtcfollow=1` was sent at GO but `/loop=1` only after the postwait, so during that gap the layer followed MTC with `wraparound_` OFF → overshoot → clamp to last frame. Fixed in cuems-engine `rc_1` `41ab6bc` (`run_videoCue` sends `/loop` before `/mtcfollow` for infinite loops). It was **NOT** the HAP decoder's per-wrap buffer clears (benign, ~25ms recovery) and **NOT** a 30fps-MTC bug (MTC is 25fps; VC correctly translates 25fps MTC *time* to 30fps media *frame* numbers). Latent since engine `4efc1e7` (2026-03); only visible when postwait > clip length.
 - **2s synchronized skip on ALL outputs (FIXED in mtcreceiver).** All outputs across both nodes + audio skipped in lockstep every ~2s. Cause: `libmtcmaster` (jitter_improvement build) emits a full-frame MTC SysEx resync every 50 frames (2s @25fps); mtcreceiver's QF-assembled `mtcHead` lags wire-MTC by a constant ~3 frames (Phase-2 commit `021b689` removed the `+2` compensation), so storing the FF into `mtcHead` unconditionally snapped +80–120ms every 2s → VC MIDISyncSource anti-drift hard-snapped. Fixed in mtcreceiver `rc_1` `aa44894` (hold the QF timebase on RESYNC, only reposition on genuine SEEK). VC side shipped on `main` `118e06d` (submodule bump + MIDISyncSource snap log + `resetWrapOffset()` in `resetAll()` + classifier tolerance 2→5); **VC deb 0.1.2-2** (also fixed `Depends: librtmidi1`→`librtmidi6`). See the mtcreceiver CLAUDE.md.
-- **Engine/VC canvas mismatch is a KNOWN accepted limitation.** When `display.conf` declares more outputs than are physically connected, the engine canvas = bbox of ALL declared `[output:*]` regions while VC self-limits to *connected* DRM connectors. Cues targeting declared-but-disconnected outputs land outside the VC canvas — expected on partially-cabled rigs; do NOT trim display.conf ad hoc. Also: `canvas_region` (logical) ≠ scanout mode; e.g. an Acer V193HQV via HDMI→VGA runs native 1366×768 while its adapter-mangled EDID falsely advertises 1080p — don't force 1080p through such adapters.
+- **The canvas follows display.conf, connected or not (1amfwm7hrv0, since the release after 0.1.2-14).** The engine places and sizes every layer relative to ITS canvas: the bounding box of every enabled `[output:*]` section with a valid `canvas_region`, connected or not (`cuems-engine tools/display_conf.py`). Up to 0.1.2-14 the videocomposer sized its canvas from the *connected* outputs only, so an output listed but unplugged on the right or bottom edge moved or blacked out the picture on the working outputs (test3 2026-11-12: engine 7680, VC 1920, black; .111 2026-11-17: "gear on the half left"). Now, under `canvas_layout=custom`, the canvas is the bounding box of every enabled section written in the **plain form** (as `cuems-generate-display-conf` and `cuems-display-setup` write it: first column, `key=value` without spaces, no repeated key or section, four integers, no CR), driven or not, never smaller than the driven regions — one rule in `display/CanvasSize.h` used by `MultiOutputRenderer::reconfigureCanvas`, `DRMBackend::setOutputMode` and `getCanvasSize`. A section outside the plain form counts only if driven (today's behaviour). A declared canvas past the GPU's limit (read at init) or refused by it falls back to the driven regions with an ERROR. **A connected output the file does not list gets no surface and is switched off** (D4/D6), like `enabled=false`; only when no listed output is connected are the unlisted ones driven as before, with an ERROR. **No surface is not dark by itself:** a connector keeps what the kernel shows (the fbcon text console), so at start the CRTC of every connected output without a surface is switched off (`switchOffOutputsWithoutSurface`). Where the two canvases can still differ, the journal says so once at start: W1 listed but not driven, W2 not in the plain form, W3 a driven region of width/height ≤ 0, W4 a `canvas_size` line (the engine uses it, this videocomposer does not: ticket 1amfwm7j9xv, with the engine's scale rule for canvases narrower than the media), W5 regions without `canvas_layout=custom`, W6 a connected output not listed. Grep `display.conf:` in the journal. Plan and rig record: `cuems-RELATIONS/Plans/2026-11-16-vc-declared-canvas-1amfwm7hrv0.md`. Also: `canvas_region` (logical) ≠ scanout mode; e.g. an Acer V193HQV via HDMI→VGA runs native 1366×768 while its adapter-mangled EDID falsely advertises 1080p — don't force 1080p through such adapters.
 - **Heap corruption when several video layers load at once (FIXED, `rc_1` `d5f08ff`).** Arming ≥3 video cues aborted the process (`double free or corruption`, alternating SIGABRT/SIGSEGV; 5× in 40 min on the FP530). **Two independent defects** — the obvious one is not the one that kills:
   1. `HardwareDecoder::detectAvailable()` gated on a plain `bool`, so all 4 `AsyncVideoLoader` workers passed the cold-cache gate together and `clear()`/`push_back()`ed the same `std::vector`.
   2. **`av_log_set_callback()` installs the callback PROCESS-WIDE.** Once any thread armed it, a thread merely running `avformat_open_input()` read *another* thread's `is_probing_hardware` and appended to the same shared vector. **Fatal on its own** — an instrumented run aborted with a single prober and zero concurrent probes, purely from non-probing threads writing the capture buffer. This is the reported backtrace (`avformat_open_input → av_log → callback → __libc_free`), and **serialising the probe does NOT fix it**. General rule: *never back an FFmpeg log callback with non-`thread_local` state.*

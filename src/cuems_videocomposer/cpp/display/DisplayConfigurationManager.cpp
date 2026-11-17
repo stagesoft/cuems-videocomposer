@@ -56,6 +56,7 @@ void DisplayConfigurationManager::resetToDefaults() {
     config_.outputs.clear();
     resolutionPolicySpecified_ = false;
     loadReport_ = DisplayConfigLoadReport();
+    loadedText_.clear();
     updateTimestamp();
 }
 
@@ -161,68 +162,6 @@ void DisplayConfigurationManager::setCanvasSize(int width, int height) {
     config_.canvasHeight = height;
     updateTimestamp();
     notifyListeners();
-}
-
-void DisplayConfigurationManager::calculateCanvasSize(const std::vector<OutputInfo>& outputs,
-                                                       int& width, int& height) const {
-    width = 0;
-    height = 0;
-    
-    if (config_.canvasWidth > 0 && config_.canvasHeight > 0) {
-        // Use explicit size
-        width = config_.canvasWidth;
-        height = config_.canvasHeight;
-        return;
-    }
-    
-    // Calculate from outputs based on layout
-    switch (config_.canvasLayout) {
-        case CanvasLayout::AUTO_HORIZONTAL:
-            for (const auto& out : outputs) {
-                if (out.enabled) {
-                    width += out.width;
-                    height = std::max(height, out.height);
-                }
-            }
-            break;
-            
-        case CanvasLayout::AUTO_VERTICAL:
-            for (const auto& out : outputs) {
-                if (out.enabled) {
-                    width = std::max(width, out.width);
-                    height += out.height;
-                }
-            }
-            break;
-            
-        case CanvasLayout::AUTO_GRID: {
-            // Simple 2-column grid
-            int cols = 2;
-            int rows = (static_cast<int>(outputs.size()) + cols - 1) / cols;
-            int maxW = 0, maxH = 0;
-            for (const auto& out : outputs) {
-                if (out.enabled) {
-                    maxW = std::max(maxW, out.width);
-                    maxH = std::max(maxH, out.height);
-                }
-            }
-            width = maxW * cols;
-            height = maxH * rows;
-            break;
-        }
-            
-        case CanvasLayout::CUSTOM:
-            // Use output configurations
-            for (const auto& outConfig : config_.outputs) {
-                int right = outConfig.canvasX + 
-                    (outConfig.canvasWidth > 0 ? outConfig.canvasWidth : outConfig.width);
-                int bottom = outConfig.canvasY + 
-                    (outConfig.canvasHeight > 0 ? outConfig.canvasHeight : outConfig.height);
-                width = std::max(width, right);
-                height = std::max(height, bottom);
-            }
-            break;
-    }
 }
 
 std::vector<OutputRegion> DisplayConfigurationManager::generateOutputRegions(
@@ -437,7 +376,7 @@ bool DisplayConfigurationManager::saveToFile(const std::string& path) const {
             file << "resolution=" << out.width << "x" << out.height << "\n";
         }
         if (out.refreshRate > 0) {
-            file << "refresh=" << out.refreshRate << "\n";
+            file << "refresh=" << out.refreshRate << (out.refreshInterlaced ? "i" : "") << "\n";
         }
         file << "canvas_region=" << out.canvasX << "," << out.canvasY 
              << "," << out.canvasWidth << "," << out.canvasHeight << "\n";
@@ -464,7 +403,14 @@ bool DisplayConfigurationManager::loadFromFile(const std::string& path) {
         return false;
     }
     
+    // Read the whole file first: the canvas (canvas::plainSections) classifies the same bytes this parser reads
+    std::ostringstream whole;
+    whole << file.rdbuf();
+    const std::string text = whole.str();
+    std::istringstream lines(text);
+    
     resetToDefaults();
+    loadedText_ = text;
     
     std::string line;
     std::string currentOutput;
@@ -478,7 +424,7 @@ bool DisplayConfigurationManager::loadFromFile(const std::string& path) {
     std::map<std::string, SectionKeys> sectionKeys;
     std::vector<std::string> sectionOrder;
     
-    while (std::getline(file, line)) {
+    while (std::getline(lines, line)) {
         // Skip comments and empty lines
         if (line.empty() || line[0] == '#') continue;
         
@@ -533,6 +479,11 @@ bool DisplayConfigurationManager::loadFromFile(const std::string& path) {
                 sscanf(value.c_str(), "%dx%d", &out->width, &out->height);
             } else if (key == "refresh") {
                 out->refreshRate = std::stod(value);
+                // refresh=<field rate>i. Values are not trimmed in this file, so look past a trailing space or the
+                // carriage return of a CRLF file: missing the "i" would set the output progressive without a word.
+                const size_t lastChar = value.find_last_not_of(" \t\r\n");
+                out->refreshInterlaced =
+                    lastChar != std::string::npos && (value[lastChar] == 'i' || value[lastChar] == 'I');
             } else if (key == "canvas_region") {
                 sscanf(value.c_str(), "%d,%d,%d,%d",
                        &out->canvasX, &out->canvasY,

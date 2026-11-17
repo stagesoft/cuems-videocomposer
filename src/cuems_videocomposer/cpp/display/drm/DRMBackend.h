@@ -44,11 +44,13 @@
 #include "DRMOutputManager.h"
 #include "DRMSurface.h"
 #include "../CadenceStats.h"
+#include "../CanvasSize.h"
 #include <vector>
 #include <map>
 #include <array>
 #include <memory>
 #include <chrono>
+#include <optional>
 
 namespace videocomposer {
 
@@ -303,6 +305,8 @@ public:
     const std::vector<OutputRegion>& getOutputRegions() const { return outputRegions_; }
     
 private:
+    void switchOffOutputsWithoutSurface();  // D6 of 1amfwm7hrv0
+
     // DRM management
     std::unique_ptr<DRMOutputManager> outputManager_;
     std::unique_ptr<DisplayConfigurationManager> configManager_;
@@ -328,6 +332,8 @@ private:
     // Rendering - Virtual Canvas mode
     std::unique_ptr<MultiOutputRenderer> multiRenderer_;
     std::vector<OutputRegion> outputRegions_;
+    std::optional<canvas::DeclaredFile> declaredLayout_;  // display.conf's sections when its layout is used (1amfwm7hrv0)
+    canvas::SurfacePlan surfacePlan_;                     // which connected outputs got a surface, and why not (D4)
     bool useVirtualCanvas_ = true;  // Default to Virtual Canvas mode
     bool resolutionExplicit_ = false;  // True when -r was explicitly passed
     

@@ -115,17 +115,48 @@ inline bool parseFiniteFloat(std::string_view text, float& out) {
 }
 
 /**
- * Fold a hue angle into [-180, 180] without a loop. The layer handlers use
- * `while (hue > 180) hue -= 360`, which never ends for inf or |h| >~ 1e11 (869c3p77c);
- * this gives the same result as that loop for every finite input (180 stays 180,
- * -180 stays -180, 540 -> 180, -540 -> -180) and is O(1). Callers refuse non-finite
- * values before calling it.
+ * Fold a hue angle into [-180, 180] without a loop. The layer and master handlers used
+ * `while (hue > 180) hue -= 360`, which never ends for inf or |h| > 2^33 (8.6e9); they
+ * go through parseHueDegrees below now (1amfwm7eyq5). This gives the value that loop gave
+ * wherever the loop was exact, |h| < 2^27 (180 stays 180, -180 stays -180, 540 -> 180,
+ * -540 -> -180), except for the sign of a zero result (-360 -> -0 here, +0 from the loop;
+ * parseHueDegrees restores it), and is O(1). Callers refuse non-finite values before
+ * calling it.
  */
 inline float foldHue(float hue) {
     double h = std::fmod(static_cast<double>(hue), 360.0);
     if (h > 180.0) h -= 360.0;
     else if (h < -180.0) h += 360.0;
     return static_cast<float>(h);
+}
+
+/**
+ * One hue argument of /videocomposer/layer/<id>/hue or /videocomposer/master/hue to the
+ * angle the handler stores (1amfwm7eyq5). The handlers read it with std::atof and wrapped
+ * it with `while (hue > 180) hue -= 360`: for inf, and for any |h| above 2^33 (8.6e9),
+ * where a float no longer changes when 360 is subtracted, that loop never ended and the
+ * render thread hung with it; nan passed both loops and was stored.
+ *
+ * Refused, with out left alone: what parseFiniteFloat refuses. That is inf and nan in any
+ * spelling, a number beyond the float range, text, an empty string, and a number followed
+ * by anything else ("12abc", which std::atof read as 12).
+ *
+ * A finite value is folded into [-180, 180] in constant time. Below 2^27, where the loop
+ * was exact (a float step is at most 8 there and 360 is a multiple of it), the result is
+ * the loop's bit for bit: a value already inside the range comes back untouched, -0
+ * included, and a multiple of 360 gives +0, as the loop's own subtraction did. From 2^27
+ * up the loop subtracted a rounded 360 and did not return the true angle; this does.
+ */
+inline bool parseHueDegrees(std::string_view text, float& out) {
+    float value = 0.0f;
+    if (!parseFiniteFloat(text, value)) return false;
+    if (value >= -180.0f && value <= 180.0f) {
+        out = value;
+        return true;
+    }
+    const float folded = foldHue(value);
+    out = (folded == 0.0f) ? 0.0f : folded;
+    return true;
 }
 
 /**

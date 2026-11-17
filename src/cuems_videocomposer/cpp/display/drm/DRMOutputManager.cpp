@@ -26,6 +26,8 @@
 #include "DRMOutputManager.h"
 #include <vector>
 #include <sstream>
+#include <limits>
+#include "../ModeSelect.h"
 #include "../../utils/Logger.h"
 
 #include <fcntl.h>
@@ -504,6 +506,7 @@ void DRMOutputManager::parseModes(DRMConnector& connector) {
         }
         
         outMode.preferred = (mode.type & DRM_MODE_TYPE_PREFERRED) != 0;
+        outMode.interlaced = (mode.flags & DRM_MODE_FLAG_INTERLACE) != 0;
         
         connector.info.modes.push_back(outMode);
     }
@@ -814,30 +817,38 @@ double modeHz(const drmModeModeInfo* m) {
 /// and `refresh=59.94` against a 59.9402 Hz mode (integer-kHz clock) must still pass.
 constexpr double kRefreshHonouredTolHz = 0.005;
 
-/// The plan's WARNING: the operator pinned a refresh the sink does not offer at that resolution; findMode() took the
-/// closest one without a word, and the cadence of every layer on that output follows the mode, not the request.
-void warnIfRefreshNotHonoured(const std::string& name, drmModeConnector* conn, double asked,
+ModeView viewOf(const drmModeModeInfo& m) {
+    ModeView v;
+    v.width = m.hdisplay;
+    v.height = m.vdisplay;
+    v.frameHz = modeHz(&m);
+    v.interlaced = (m.flags & DRM_MODE_FLAG_INTERLACE) != 0;
+    v.preferred = (m.type & DRM_MODE_TYPE_PREFERRED) != 0;
+    return v;
+}
+
+std::vector<ModeView> viewsOf(const drmModeConnector* conn) {
+    std::vector<ModeView> views;
+    views.reserve(conn->count_modes);
+    for (int i = 0; i < conn->count_modes; ++i) {
+        views.push_back(viewOf(conn->modes[i]));
+    }
+    return views;
+}
+
+/// The plan's WARNING: the operator pinned a refresh the sink does not offer at that resolution; findMode() took
+/// another one, and the cadence of every layer on that output follows the mode, not the request. The decision and the
+/// list of rates are refreshPinNotHonoured() and offeredRefreshRates() (display/ModeSelect.h).
+void warnIfRefreshNotHonoured(const std::string& name, drmModeConnector* conn, double asked, bool askedInterlaced,
                               const drmModeModeInfo* mode, const char* via) {
     if (!conn || !mode || asked <= 0.0) {
         return;
     }
-    const double got = modeHz(mode);
-    if (std::abs(got - asked) <= kRefreshHonouredTolHz) {
+    const ModeView chosen = viewOf(*mode);
+    if (!refreshPinNotHonoured(asked, askedInterlaced, chosen, kRefreshHonouredTolHz)) {
         return;
     }
-    std::vector<double> rates;
-    for (int i = 0; i < conn->count_modes; ++i) {
-        const drmModeModeInfo* m = &conn->modes[i];
-        if (m->hdisplay != mode->hdisplay || m->vdisplay != mode->vdisplay) {
-            continue;
-        }
-        const double hz = modeHz(m);
-        if (hz > 0.0 && std::none_of(rates.begin(), rates.end(),
-                                     [hz](double r) { return std::abs(r - hz) < 0.0005; })) {
-            rates.push_back(hz);
-        }
-    }
-    std::sort(rates.begin(), rates.end());
+    const std::vector<double> rates = offeredRefreshRates(viewsOf(conn), mode->hdisplay, mode->vdisplay);
     std::ostringstream offer;
     offer << std::fixed << std::setprecision(3);
     for (size_t i = 0; i < rates.size(); ++i) {
@@ -845,55 +856,43 @@ void warnIfRefreshNotHonoured(const std::string& name, drmModeConnector* conn, d
     }
     std::ostringstream line;
     line << std::fixed << std::setprecision(3) << "display: [output:" << name << "] refresh=" << asked
-         << " not available at " << mode->hdisplay << "x" << mode->vdisplay << ": using " << mode->hdisplay << "x"
-         << mode->vdisplay << "@" << got << " Hz; the sink offers " << offer.str() << " Hz at that resolution ("
-         << via << ")";
+         << (askedInterlaced ? "i" : "") << " not available at " << mode->hdisplay << "x" << mode->vdisplay
+         << ": using " << mode->hdisplay << "x" << mode->vdisplay << "@" << chosen.frameHz << " Hz; the sink offers "
+         << offer.str() << " Hz" << (askedInterlaced ? " progressive" : "") << " at that resolution (" << via << ")";
     LOG_WARNING << line.str();
 }
 
 }  // namespace
 
-drmModeModeInfo* DRMOutputManager::findMode(drmModeConnector* conn, 
-                                            int width, int height, 
-                                            double refreshRate) {
+drmModeModeInfo* DRMOutputManager::findMode(drmModeConnector* conn,
+                                            int width, int height,
+                                            double refreshRate, bool wantInterlaced,
+                                            const std::string& logName) {
     if (!conn) {
         return nullptr;
     }
-    
-    drmModeModeInfo* best = nullptr;
-    double bestRefreshDiff = 999.0;
-    
-    for (int i = 0; i < conn->count_modes; ++i) {
-        drmModeModeInfo* mode = &conn->modes[i];
-        
-        if (mode->hdisplay != static_cast<uint16_t>(width) ||
-            mode->vdisplay != static_cast<uint16_t>(height)) {
-            continue;
-        }
-        
-        double modeRefresh = 0.0;
-        if (mode->htotal && mode->vtotal) {
-            modeRefresh = static_cast<double>(mode->clock * 1000) /
-                         (mode->htotal * mode->vtotal);
-        }
-        
-        if (refreshRate <= 0.0) {
-            // Prefer preferred mode, then highest refresh
-            if (!best || (mode->type & DRM_MODE_TYPE_PREFERRED) ||
-                modeRefresh > bestRefreshDiff) {
-                best = mode;
-                bestRefreshDiff = modeRefresh;
-            }
-        } else {
-            double diff = std::abs(modeRefresh - refreshRate);
-            if (diff < bestRefreshDiff) {
-                best = mode;
-                bestRefreshDiff = diff;
-            }
-        }
+    const std::vector<ModeView> views = viewsOf(conn);
+    const ModePick pick = pickModeForRefresh(views, width, height, refreshRate, wantInterlaced);
+    if (pick.index < 0) {
+        return nullptr;
     }
-    
-    return best;
+    const ModeView& chosen = views[pick.index];
+    const std::string who = logName.empty() ? std::string("output") : logName;
+    if (pick.kind == ModePick::Kind::NativeProgressive) {
+        LOG_ERROR << "DRMOutputManager: " << who << ": " << width << "x" << height << "@"
+                  << refreshRate << (wantInterlaced ? "i" : "") << " does not exist as "
+                  << (wantInterlaced ? "an interlaced" : "a progressive") << " mode on this monitor; using the native "
+                  << "progressive " << chosen.width << "x" << chosen.height << "@" << chosen.frameHz
+                  << "Hz instead (interlaced modes are used only when asked for, e.g. refresh=60i)";
+    } else if (pick.kind == ModePick::Kind::OnlyInterlaced) {
+        LOG_WARNING << "DRMOutputManager: " << who << ": no progressive " << width << "x" << height
+                    << " mode exists; using INTERLACED " << chosen.width << "x" << chosen.height
+                    << "i (field rate " << fieldRateHz(chosen) << "Hz)";
+    } else if (chosen.interlaced) {
+        LOG_INFO << "DRMOutputManager: " << who << ": interlaced mode as requested, field rate "
+                 << fieldRateHz(chosen) << "Hz";
+    }
+    return &conn->modes[pick.index];
 }
 
 bool DRMOutputManager::setMode(int index, int width, int height, double refreshRate) {
@@ -908,7 +907,7 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
     
     LOG_INFO << "  Connector: " << conn->info.name << " crtcId=" << conn->crtcId;
     
-    drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate);
+    drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate, false, conn->info.name);
     if (!mode) {
         LOG_ERROR << "DRMOutputManager: Mode not found: " 
                   << width << "x" << height << "@" << refreshRate;
@@ -917,7 +916,7 @@ bool DRMOutputManager::setMode(int index, int width, int height, double refreshR
     
     LOG_INFO << "  Found mode: " << mode->hdisplay << "x" << mode->vdisplay 
              << " clock=" << mode->clock;
-    warnIfRefreshNotHonoured(conn->info.name, conn->connector, refreshRate, mode, "/output/mode");
+    warnIfRefreshNotHonoured(conn->info.name, conn->connector, refreshRate, false, mode, "/output/mode");
     
     // Clamp connector max bpc to 8 — our framebuffers are 8-bit (AR24), and
     // 12 bpc on Intel TC-port DP makes link training intermittently fail
@@ -972,7 +971,7 @@ bool DRMOutputManager::prepareMode(int index, int width, int height, double refr
         return false;
     }
     
-    drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate);
+    drmModeModeInfo* mode = findMode(conn->connector, width, height, refreshRate, false, conn->info.name);
     if (!mode) {
         LOG_WARNING << "=== MODE NOT AVAILABLE ===";
         LOG_WARNING << "  Output: " << conn->info.name;
@@ -1076,7 +1075,7 @@ bool DRMOutputManager::applyResolutionModeToOutput(int index) {
         }
 
         const drmModeModeInfo* requested =
-            findMode(conn->connector, wantW, wantH, ovr->refreshRate);
+            findMode(conn->connector, wantW, wantH, ovr->refreshRate, ovr->interlaced, conn->info.name);
         if (!requested) {
             // Fail loudly. Silently dropping to the preferred mode is what kept the
             // original bug invisible: the operator had no way to tell that the mode
@@ -1095,7 +1094,8 @@ bool DRMOutputManager::applyResolutionModeToOutput(int index) {
             }
             conn->currentMode = *requested;
             conn->hasCurrentMode = true;
-            warnIfRefreshNotHonoured(conn->info.name, conn->connector, ovr->refreshRate, requested, "display.conf");
+            warnIfRefreshNotHonoured(conn->info.name, conn->connector, ovr->refreshRate, ovr->interlaced, requested,
+                                     "display.conf");
 
             LOG_INFO << "DRMOutputManager: " << conn->info.name
                      << " configured from display.conf to "
@@ -1176,7 +1176,9 @@ const drmModeModeInfo* DRMOutputManager::findBestMode(const DRMConnector& connec
     }
     
     const drmModeModeInfo* bestMode = nullptr;
-    int bestScore = -1;
+    // Lowest possible: the interlaced penalty below makes a score negative, and a sink with interlaced modes only
+    // must still get one of them.
+    int bestScore = std::numeric_limits<int>::min();
     
     for (int i = 0; i < connector.connector->count_modes; ++i) {
         const drmModeModeInfo* mode = &connector.connector->modes[i];
@@ -1203,6 +1205,12 @@ const drmModeModeInfo* DRMOutputManager::findBestMode(const DRMConnector& connec
             score += mode->hdisplay * mode->vdisplay / 1000;
         }
         
+        // Interlaced only when nothing progressive qualifies (R11): outweighs
+        // even the preferred bonus.
+        if (mode->flags & DRM_MODE_FLAG_INTERLACE) {
+            score -= 2000000;
+        }
+
         // Prefer higher refresh rate as tiebreaker
         if (mode->htotal && mode->vtotal) {
             double refresh = (double)mode->clock * 1000.0 / 
@@ -1424,6 +1432,9 @@ void DRMOutputManager::harmonizeRefreshRates() {
             mode->vdisplay != firstConn.currentMode.vdisplay) {
             continue;
         }
+        if (mode->flags & DRM_MODE_FLAG_INTERLACE) {
+            continue;  // never harmonize onto an interlaced mode (R11)
+        }
         double rate = (mode->htotal && mode->vtotal)
             ? (double)mode->clock * 1000.0 / ((double)mode->htotal * (double)mode->vtotal)
             : 0.0;
@@ -1442,6 +1453,9 @@ void DRMOutputManager::harmonizeRefreshRates() {
                 const drmModeModeInfo* m2 = &conn.connector->modes[k];
                 if (m2->hdisplay != conn.currentMode.hdisplay ||
                     m2->vdisplay != conn.currentMode.vdisplay) {
+                    continue;
+                }
+                if (m2->flags & DRM_MODE_FLAG_INTERLACE) {
                     continue;
                 }
                 double r2 = (m2->htotal && m2->vtotal)

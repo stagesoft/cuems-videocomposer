@@ -1,3 +1,67 @@
+cuems-videocomposer (0.1.2-15) unstable; urgency=medium
+
+  * Fixed: the videocomposer died when the decoding layer of a video cue
+    shown on several outputs was unloaded before its shared layers, with
+    software decode (ProRes, any codec VAAPI cannot decode) (1amfwm7j9r8,
+    PR #39). The layer promoted to decode went on using the removed
+    layer's frame memory after it was freed; it now takes that memory
+    over. Hardware decode and HAP are untouched.
+  * Fixed: /videocomposer/master/hue and /videocomposer/layer/<id>/hue with
+    an infinite value, or one above about 8.6e9, hung the render thread for
+    good: every output froze while the service stayed "active"
+    (1amfwm7eyq5, PR #36). Such a value is refused with a WARNING and the
+    hue is left unchanged. Text that is not a number is refused too (it
+    used to count as 0, or as its leading digits).
+  * A pinned refresh= never selects an interlaced mode (1amfwm7evfj, PR
+    #16). refresh=30 at 1080 used to select 1080i60 without a word; it now
+    takes the native progressive mode with an ERROR. An interlaced mode is
+    used only when asked for with the field rate and an "i"
+    (refresh=60i), or when the size has no progressive mode. The
+    "refresh=... not available" WARNING lists progressive rates only.
+  * Fixed: an output listed in display.conf and not connected at start
+    moved, resized or blacked out the cues on the outputs that are
+    (1amfwm7hrv0, PR #35). The canvas is now sized as the engine sizes
+    it: every enabled section written the way cuems-generate-display-conf
+    and cuems-display-setup write it counts, connected or not. A box whose
+    file lists outputs it never drives gets a wider canvas (measured on an
+    N97: no dropped frame, no CPU cost, at four times the width). A canvas
+    the GPU cannot hold falls back to today's with an ERROR.
+  * Changed: a connected monitor that display.conf does not list now stays
+    dark instead of showing a copy of the canvas's top-left corner
+    (1amfwm7hrv0). Exception: when no listed output is connected at all,
+    the connected ones are driven as before, with an ERROR. Add an
+    [output:<connector>] section to use a monitor.
+  * Fixed: an output with enabled=false (or not listed) showed the Linux
+    text console on boxes that have one, instead of staying dark
+    (1amfwm7hrv0). It is now switched off at start.
+  * The journal now says, once at start, where the engine's canvas and this
+    one can still differ (grep "display.conf:"): a listed output not
+    driven, a section not written in the plain form, a canvas_size line
+    (still used by the engine only; ticket 1amfwm7j9xv), region lines
+    without canvas_layout=custom, a connected output not listed. A file
+    the generator wrote in its unknown-node fallback (every node's
+    outputs, sections repeated) or one cuems-display-setup re-ran
+    (duplicates kept) gets the "not written in the plain form" line at
+    every start: it is true, not a fault. Boxes checked from the fleet
+    records: alquiler1 (controller, node01, node02) and alquiler2
+    (panera); every other box is unknown.
+  * Packaging: the build fails when the binary needs an NDI library the
+    package does not carry, and the bundled NDI library is shipped as the
+    SDK provides it (1amfwm7j9r7, PR #38). Every package that bundled it,
+    from 0.1.1-4 to 0.1.2-14, carried a stripped copy.
+  * Build: no include directory outside the source tree (1amfwm7j916, PR
+    #34; 1amfwm7j9r7, PR #37). The 0.1.2-14 package was compiled with a
+    neighbouring libmtcmaster checkout on its include path.
+  * Removed a dead class that shared its name with the display
+    configuration in use (1amfwm7et2z, PR #11). No change of behaviour.
+  * Verified: 373/373 unit tests on an N97 for this source (rc_1
+    a1b344b), also under AddressSanitizer; rig rows per ticket on .111,
+    test3 and test2 node01 (cuems-RELATIONS baselines/<ticket>). Not for
+    show machines until the human test battery. Same version on every
+    box of a cluster.
+
+ -- Ion Reguera <ion@stagelab.coop>  Tue, 17 Nov 2026 19:39:41 +0100
+
 cuems-videocomposer (0.1.2-14) unstable; urgency=medium
 
   * A video cue's first frame reaches the screen at its start (869feynrj
