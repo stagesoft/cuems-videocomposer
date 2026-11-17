@@ -44,6 +44,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <map>
 #include <set>
@@ -108,6 +109,8 @@ struct DeclaredSection {
     bool enabled = true;          // as both readers read it: the last "enabled=" line, only "true" or "1" keep it on
     bool hasRegion = false;       // a canvas_region of four integers in the plain form
     Rect region;                  // as written (a width or height <= 0 is kept as written, as the engine keeps it)
+    bool vcRegion = false;        // this videocomposer read a canvas_region line for this section (exact key)
+    Rect vcRect;                  // what it read, exactly as DisplayConfigurationManager::loadFromFile does (W3)
 };
 
 struct DeclaredFile {
@@ -211,6 +214,13 @@ inline DeclaredFile plainSections(const std::string& text) {
             s.notPlainBecause = why;
         }
     };
+    // canvas_region as this videocomposer's loader reads it: the same sscanf into the same fields, so a partial
+    // match keeps the earlier values and the last line wins (W3 is judged on what this videocomposer uses). An
+    // out-of-range number behaves here exactly as in the loader, which is the point: this mirrors it on purpose.
+    auto readLikeTheVc = [](DeclaredSection& s, const std::string& value) {
+        s.vcRegion = true;
+        std::sscanf(value.c_str(), "%d,%d,%d,%d", &s.vcRect.x, &s.vcRect.y, &s.vcRect.width, &s.vcRect.height);
+    };
 
     std::vector<std::string> lines;
     {
@@ -280,6 +290,7 @@ inline DeclaredFile plainSections(const std::string& text) {
             }
             const std::string key = line.substr(0, eq);
             if (key == "canvas_region") {
+                readLikeTheVc(s, line.substr(eq + 1));
                 notPlain(s, "a canvas_region line under a later '[' header, which this videocomposer reads into this "
                             "section and the engine does not");
             } else if (key == "enabled") {
@@ -314,6 +325,9 @@ inline DeclaredFile plainSections(const std::string& text) {
             notPlain(s, "the key '" + key + "' holds a space or another character the engine reads differently");
             continue;
         }
+        if (!value.empty() && (value[0] == ' ' || value[0] == '\t')) {
+            notPlain(s, "a space after the '=' of " + key);
+        }
         if (!keysSeen[s.name].insert(key).second) {
             notPlain(s, "the key " + key + " appears twice");
         }
@@ -321,6 +335,7 @@ inline DeclaredFile plainSections(const std::string& text) {
             s.enabled = (value == "true" || value == "1");
         } else if (key == "canvas_region") {
             Rect r;
+            readLikeTheVc(s, value);
             if (detail::parsePlainRegion(value, r)) {
                 s.hasRegion = true;
                 s.region = r;
@@ -533,10 +548,13 @@ inline std::vector<LayoutNote> layoutNotes(const DeclaredFile& file, bool custom
                                "): the engine may read it differently. It is " +
                                (drivenHere ? "counted in the canvas because it is driven"
                                            : "left out of the canvas because it is not driven"));
-            } else if (s.region.width <= 0 || s.region.height <= 0) {
-                warn("W3", "[output:" + s.name + "] canvas_region=" + toString(s.region) + " has a width or height " +
-                               "of zero or less: the engine takes it as written, this videocomposer uses the output's " +
-                               "own size, so the two canvases can differ");
+            }
+            const Rect& vr = s.vcRect;
+            if (drivenHere && s.vcRegion && (vr.width <= 0 || vr.height <= 0)) {
+                warn("W3", "[output:" + s.name + "] canvas_region read as " + toString(vr) + " has a width or height " +
+                               "of zero or less: this videocomposer uses the output's own size there" +
+                               (s.plain ? std::string(", the engine takes it as written, so the two canvases can differ")
+                                        : std::string("; how the engine reads this section is not known here (W2)")));
             }
         }
         for (const auto& name : surfaces.unlisted) {

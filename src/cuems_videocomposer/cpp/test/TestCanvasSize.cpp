@@ -604,3 +604,76 @@ bool test_CanvasSize_D6_EachCrtcOnce() {
     TEST_ASSERT_EQ(off[1], 90u);
     return true;
 }
+
+// ===== External change review of 2026-11-17 (Codex), findings 2 and 3 =====
+
+/** A space right after '=' (any key) leaves the plain form: the rule is "no space around the '='". */
+bool test_CanvasSize_Review_SpaceAfterEqualsNotPlain() {
+    return ac1bVector("[output:HDMI-A-2]\nresolution= 1920x1080\ncanvas_region=1920,0,1920,1080\n", "space after");
+}
+/** W3 for a driven section with a width of 0 also when the section is outside the plain form (here a repeated key). */
+bool test_CanvasSize_Review_W3ForDrivenNonPlainSection() {
+    const std::string text = "canvas_layout=custom\n[output:HDMI-A-1]\ncanvas_region=0,0,1920,1080\n"
+                             "[output:HDMI-A-2]\nrefresh=60\nrefresh=60\ncanvas_region=1920,0,0,1080\n";
+    const auto notes = notesFor(text, named({"HDMI-A-1", "HDMI-A-2"}));
+    if (!hasNote(notes, "W3", "HDMI-A-2") || !hasNote(notes, "W2", "HDMI-A-2")) {
+        printNotes(notes);
+        return false;
+    }
+    return true;
+}
+/** A region this videocomposer cannot read gives 0,0,0,0 and the output's own size: W3 says so, W2 explains the form. */
+bool test_CanvasSize_Review_UnreadableRegionW3SaysEngineUnknown() {
+    const std::string text = "canvas_layout=custom\n[output:HDMI-A-1]\ncanvas_region=0,0,1920,1080\n"
+                             "[output:HDMI-A-2]\ncanvas_region=not-a-region\n";
+    const auto notes = notesFor(text, named({"HDMI-A-1", "HDMI-A-2"}));
+    if (!hasNote(notes, "W3", "not known here") || !hasNote(notes, "W2", "HDMI-A-2")) {
+        printNotes(notes);
+        return false;
+    }
+    return true;
+}
+/** A spaced key is not a key this videocomposer knows: no region read, no W3; W2 names the section. */
+bool test_CanvasSize_Review_SpacedKeyNoW3() {
+    const std::string text = "canvas_layout=custom\n[output:HDMI-A-1]\ncanvas_region=0,0,1920,1080\n"
+                             "[output:HDMI-A-2]\ncanvas_region =1920,0,0,1080\n";
+    const auto notes = notesFor(text, named({"HDMI-A-1", "HDMI-A-2"}));
+    if (hasNote(notes, "W3") || !hasNote(notes, "W2", "HDMI-A-2")) {
+        printNotes(notes);
+        return false;
+    }
+    return true;
+}
+/** Read exactly as the loader does: a CRLF zero width, eight-digit zeros, and a continuation line the engine joins. */
+bool test_CanvasSize_Review_W3FromTheVcsOwnReading() {
+    const std::vector<std::string> seconds = {
+        "[output:HDMI-A-2]\ncanvas_region=1920,0,0,1080\r\n",
+        "[output:HDMI-A-2]\ncanvas_region=1920,0,00000000,1080\n",
+        "[output:HDMI-A-2]\ncanvas_region=1920,0,0,1080\n  invalid\n",
+    };
+    for (const auto& second : seconds) {
+        const std::string text = "canvas_layout=custom\n[output:HDMI-A-1]\ncanvas_region=0,0,1920,1080\n" + second;
+        const auto notes = notesFor(text, named({"HDMI-A-1", "HDMI-A-2"}));
+        if (!hasNote(notes, "W3", "1920,0,0,1080") || !hasNote(notes, "W2", "HDMI-A-2")) {
+            std::cerr << "    for: " << second << "\n";
+            printNotes(notes);
+            return false;
+        }
+    }
+    return true;
+}
+/** The loader reads a canvas_region under a later non-output header into the section: W3 from it, W2 for the form. */
+bool test_CanvasSize_Review_W3FromARegionUnderAnotherHeader() {
+    const std::string text = "canvas_layout=custom\n[output:HDMI-A-1]\ncanvas_region=0,0,1920,1080\n"
+                             "[output:HDMI-A-2]\nresolution=1920x1080\n[other]\ncanvas_region=1920,0,0,1080\n";
+    const auto notes = notesFor(text, named({"HDMI-A-1", "HDMI-A-2"}));
+    if (!hasNote(notes, "W3", "1920,0,0,1080") || !hasNote(notes, "W2", "HDMI-A-2")) {
+        printNotes(notes);
+        return false;
+    }
+    return true;
+}
+/** A tab right after '=' leaves the plain form too. */
+bool test_CanvasSize_Review_TabAfterEqualsNotPlain() {
+    return ac1bVector("[output:HDMI-A-2]\nresolution=\t1920x1080\ncanvas_region=1920,0,1920,1080\n", "space after");
+}
