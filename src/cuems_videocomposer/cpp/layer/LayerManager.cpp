@@ -425,8 +425,9 @@ void LayerManager::promoteDecodeDriver(VideoLayer* removedLayer) {
     InputSource* sharedInput = removedLayer->getInputSource();
     if (!sharedInput) return;
 
-    // Invalidate cache — prevents secondaries from reading stale non-owning views
-    // that point to the removed driver's freed frame buffers
+    // Invalidate the cache: the frame it names was decoded by the driver being removed,
+    // and the new driver fills it again with its first decode. The pixels themselves are
+    // kept alive below (adoptDriverFrameFrom), so the secondaries' views stay valid.
     sharedInput->invalidateCache();
 
     // Find a surviving layer sharing the same InputSource and promote it
@@ -435,6 +436,9 @@ void LayerManager::promoteDecodeDriver(VideoLayer* removedLayer) {
         if (layer->playback().getSharedInputSource().get() == sharedInput) {
             layer->playback().setDecodeDriver(true);
             layer->setUpdatePriority(0);
+            // The frame memory moves to the new owner too: every sharer's CPU buffer is a
+            // view of the removed driver's pixels, which are freed with it (1amfwm7j9r8).
+            layer->playback().adoptDriverFrameFrom(removedLayer->playback());
             // The decode session survives the driver that owned it, so its
             // hang-guard slot moves to the new owner instead of being dropped
             // and re-requested - which could otherwise be refused, stopping a

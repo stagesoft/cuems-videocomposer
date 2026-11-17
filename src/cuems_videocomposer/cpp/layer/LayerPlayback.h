@@ -69,6 +69,11 @@ public:
     bool isSharedLayer() const { return isSharedLayer_; }
     bool isDecodeDriver() const { return isDecodeDriver_; }
     void setDecodeDriver(bool v);
+    // Called on the layer promoted to decode driver, with the driver that is being removed (1amfwm7j9r8).
+    // On the CPU path the driver's frame buffer owns the pixels; the source's cache and every shared
+    // secondary's buffer are views of them. The decode session survives its driver, so the pixels must too:
+    // this layer becomes their owner. Same pointer, nothing copied, no picture changes.
+    void adoptDriverFrameFrom(LayerPlayback& removedDriver);
 
     // Playback control
     bool play();

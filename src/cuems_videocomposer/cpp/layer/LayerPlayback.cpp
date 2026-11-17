@@ -787,6 +787,26 @@ void LayerPlayback::setDecodeDriver(bool v) {
     attachDriverCache();
 }
 
+void LayerPlayback::adoptDriverFrameFrom(LayerPlayback& removedDriver) {
+    FrameBuffer& pixels = removedDriver.cpuFrameBuffer_;
+    if (!pixels.isValid()) {
+        return;  // nothing decoded on the CPU path (no frame yet, or the frames are on the GPU)
+    }
+    if (!pixels.ownsBuffer()) {
+        // A decode driver whose own buffer is a view: the pixels belong to someone else, so there is
+        // nothing to take over, and nothing here can tell whether they outlive this driver. No path
+        // leaves a driver in this state; if one ever does, say so instead of staying silent.
+        LOG_WARNING << "Shared layer promotion: the removed decode driver did not own its frame memory; "
+                       "nothing adopted";
+        return;
+    }
+    // This layer's buffer is a view of exactly these pixels, or empty. Left as a view it would point at freed
+    // memory once the driver is destroyed, and a decoder allocates only when the buffer is not valid or has
+    // another size: the next frame would be written into it. The move releases the view (which frees nothing)
+    // and takes the driver's buffer with its ownership; the cache and the other secondaries keep viewing it.
+    cpuFrameBuffer_ = std::move(pixels);
+}
+
 bool LayerPlayback::loadFrame(int64_t frameNumber) {
     // Every successful load may have written new pixels into the frame buffer, whatever its frame number
     // (a seek back to the shown number reloads it): the CPU upload identity counts loads, not numbers.
