@@ -477,9 +477,19 @@ struct ConnectorCrtc {
  */
 inline std::vector<uint32_t> crtcsToSwitchOff(const std::vector<ConnectorCrtc>& withoutSurface,
                                               const std::vector<uint32_t>& drivenCrtcs) {
-    (void)withoutSurface;
-    (void)drivenCrtcs;
-    return {};  // rows first (D6, 2026-11-17): nothing is switched off yet
+    std::vector<uint32_t> off;
+    for (const auto& w : withoutSurface) {
+        if (w.crtcId == 0) {
+            continue;  // not on any CRTC: already dark
+        }
+        if (std::find(drivenCrtcs.begin(), drivenCrtcs.end(), w.crtcId) != drivenCrtcs.end()) {
+            continue;  // a driven output's modeset takes this CRTC over
+        }
+        if (std::find(off.begin(), off.end(), w.crtcId) == off.end()) {
+            off.push_back(w.crtcId);
+        }
+    }
+    return off;
 }
 
 // ===== What the journal says (W1 to W6) =====
