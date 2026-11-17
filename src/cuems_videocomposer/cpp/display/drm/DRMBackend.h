@@ -305,6 +305,8 @@ public:
     const std::vector<OutputRegion>& getOutputRegions() const { return outputRegions_; }
     
 private:
+    void switchOffOutputsWithoutSurface();  // D6 of 1amfwm7hrv0
+
     // DRM management
     std::unique_ptr<DRMOutputManager> outputManager_;
     std::unique_ptr<DisplayConfigurationManager> configManager_;

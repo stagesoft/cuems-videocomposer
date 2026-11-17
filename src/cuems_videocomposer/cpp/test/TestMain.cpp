@@ -91,6 +91,10 @@ extern bool test_CanvasSize_AC16_ExceptionDrivesUnlistedAsToday();
 extern bool test_CanvasSize_AC16_ExceptionReportedError();
 extern bool test_CanvasSize_AC16_NotCustomKeepsUnlisted();
 extern bool test_CanvasSize_AC16_DisabledStillNoSurface();
+extern bool test_CanvasSize_D6_UnusedCrtcSwitchedOff();
+extern bool test_CanvasSize_D6_CrtcOfADrivenOutputLeftAlone();
+extern bool test_CanvasSize_D6_NoCrtcNothingToDo();
+extern bool test_CanvasSize_D6_EachCrtcOnce();
 
 // CPU upload same tick, once per layer (1amfwm7hg3u)
 extern bool test_CpuUpload_a_NewIdentityUploadsThisDraw();
@@ -473,6 +477,10 @@ int main() {
     TestFramework::instance().addTest("CanvasSize_AC16_ExceptionReportedError", test_CanvasSize_AC16_ExceptionReportedError);
     TestFramework::instance().addTest("CanvasSize_AC16_NotCustomKeepsUnlisted", test_CanvasSize_AC16_NotCustomKeepsUnlisted);
     TestFramework::instance().addTest("CanvasSize_AC16_DisabledStillNoSurface", test_CanvasSize_AC16_DisabledStillNoSurface);
+    TestFramework::instance().addTest("CanvasSize_D6_UnusedCrtcSwitchedOff", test_CanvasSize_D6_UnusedCrtcSwitchedOff);
+    TestFramework::instance().addTest("CanvasSize_D6_CrtcOfADrivenOutputLeftAlone", test_CanvasSize_D6_CrtcOfADrivenOutputLeftAlone);
+    TestFramework::instance().addTest("CanvasSize_D6_NoCrtcNothingToDo", test_CanvasSize_D6_NoCrtcNothingToDo);
+    TestFramework::instance().addTest("CanvasSize_D6_EachCrtcOnce", test_CanvasSize_D6_EachCrtcOnce);
     TestFramework::instance().addTest("CpuUpload_a_NewIdentityUploadsThisDraw", test_CpuUpload_a_NewIdentityUploadsThisDraw);
     TestFramework::instance().addTest("CpuUpload_b_SameIdentitySkips", test_CpuUpload_b_SameIdentitySkips);
     TestFramework::instance().addTest("CpuUpload_c_TextureRecreationForcesUpload", test_CpuUpload_c_TextureRecreationForcesUpload);

@@ -579,3 +579,28 @@ bool test_CanvasSize_AC16_DisabledStillNoSurface() {
     TEST_ASSERT_EQ(p.disabled[0], std::string("HDMI-A-2"));
     return true;
 }
+
+// ===== D6 (unit): a connected output without a surface is switched off =====
+
+bool test_CanvasSize_D6_UnusedCrtcSwitchedOff() {
+    // test2 node01, 2026-11-17: HDMI-A-2 unlisted, left on pipe B (crtc 82) by fbcon; the driven outputs on 31 and 133
+    const auto off = crtcsToSwitchOff({{"HDMI-A-2", 82}}, {31, 133});
+    TEST_ASSERT_EQ(off.size(), static_cast<size_t>(1));
+    TEST_ASSERT_EQ(off[0], 82u);
+    return true;
+}
+bool test_CanvasSize_D6_CrtcOfADrivenOutputLeftAlone() {
+    TEST_ASSERT(crtcsToSwitchOff({{"HDMI-A-2", 31}}, {31, 133}).empty());
+    return true;
+}
+bool test_CanvasSize_D6_NoCrtcNothingToDo() {
+    TEST_ASSERT(crtcsToSwitchOff({{"HDMI-A-2", 0}}, {31}).empty());
+    return true;
+}
+bool test_CanvasSize_D6_EachCrtcOnce() {
+    const auto off = crtcsToSwitchOff({{"HDMI-A-2", 82}, {"DP-1", 82}, {"DP-2", 90}}, {31});
+    TEST_ASSERT_EQ(off.size(), static_cast<size_t>(2));
+    TEST_ASSERT_EQ(off[0], 82u);
+    TEST_ASSERT_EQ(off[1], 90u);
+    return true;
+}

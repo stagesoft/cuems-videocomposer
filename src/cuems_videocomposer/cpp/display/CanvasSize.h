@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <set>
@@ -459,6 +460,26 @@ inline SurfacePlan surfacesToCreate(const std::vector<ConnectedOutput>& connecte
         }
     }
     return plan;
+}
+
+// ===== Switching off what gets no surface (D6) =====
+
+/** A connected output that gets no surface, and the CRTC the kernel has it on now (0 = none). */
+struct ConnectorCrtc {
+    std::string name;
+    uint32_t crtcId = 0;
+};
+
+/**
+ * The CRTCs to switch off at start so that a connected output without a surface (enabled=false, or unlisted under
+ * D4) is dark: otherwise it keeps what the kernel shows there, the text console (fbcon) on boxes that bind one. A
+ * CRTC one of the driven outputs uses is left alone: its modeset takes the CRTC over. Each CRTC once, in order.
+ */
+inline std::vector<uint32_t> crtcsToSwitchOff(const std::vector<ConnectorCrtc>& withoutSurface,
+                                              const std::vector<uint32_t>& drivenCrtcs) {
+    (void)withoutSurface;
+    (void)drivenCrtcs;
+    return {};  // rows first (D6, 2026-11-17): nothing is switched off yet
 }
 
 // ===== What the journal says (W1 to W6) =====

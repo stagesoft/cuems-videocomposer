@@ -37,6 +37,7 @@
 #include "../../osd/OSDManager.h"
 #include "../../utils/Logger.h"
 #include <cerrno>
+#include <cstring>
 #include <cmath>
 #include <limits>
 #include <set>
@@ -239,6 +240,8 @@ bool DRMBackend::openWindow() {
         outputOrder_.push_back(outputName);
     }
     
+    switchOffOutputsWithoutSurface();
+
     if (surfaces_.empty()) {
         LOG_ERROR << "DRMBackend: No surfaces could be created";
         outputManager_->cleanup();
@@ -1773,6 +1776,52 @@ void DRMBackend::initVAAPI() {
     
     LOG_INFO << "DRMBackend: VAAPI initialized (version " << major << "." << minor << ")";
 #endif
+}
+
+void DRMBackend::switchOffOutputsWithoutSurface() {
+    // D6 of 1amfwm7hrv0: a connected output that gets no surface (enabled=false, or unlisted under D4) is otherwise
+    // left as the kernel had it, which on a box with a framebuffer console is the text console (test2 node01,
+    // 2026-11-17: HDMI-A-2 scanning out an fb "allocated by [fbcon]"). Ask the kernel which CRTC each one is on now
+    // and switch those CRTCs off, except one a driven output uses (its own modeset takes it over).
+    const int fd = outputManager_->getFd();
+    std::vector<canvas::ConnectorCrtc> withoutSurface;
+    std::vector<std::string> names = surfacePlan_.disabled;
+    names.insert(names.end(), surfacePlan_.unlisted.begin(), surfacePlan_.unlisted.end());
+    for (const auto& name : names) {
+        const DRMConnector* conn = outputManager_->getConnectorByName(name);
+        uint32_t crtcId = 0;
+        if (conn) {
+            if (drmModeConnector* c = drmModeGetConnector(fd, conn->connectorId)) {
+                if (c->encoder_id) {
+                    if (drmModeEncoder* e = drmModeGetEncoder(fd, c->encoder_id)) {
+                        crtcId = e->crtc_id;
+                        drmModeFreeEncoder(e);
+                    }
+                }
+                drmModeFreeConnector(c);
+            }
+        }
+        withoutSurface.push_back(canvas::ConnectorCrtc{name, crtcId});
+    }
+    std::vector<uint32_t> drivenCrtcs;
+    for (const auto& [name, surface] : surfaces_) {
+        drivenCrtcs.push_back(surface->getCrtcId());
+    }
+    for (uint32_t crtcId : canvas::crtcsToSwitchOff(withoutSurface, drivenCrtcs)) {
+        std::string who;
+        for (const auto& w : withoutSurface) {
+            if (w.crtcId == crtcId) {
+                who += (who.empty() ? "" : ", ") + w.name;
+            }
+        }
+        const int ret = drmModeSetCrtc(fd, crtcId, 0, 0, 0, nullptr, 0, nullptr);
+        if (ret == 0) {
+            LOG_INFO << "DRMBackend: " << who << " switched off (CRTC " << crtcId << "): no surface, kept dark";
+        } else {
+            LOG_WARNING << "DRMBackend: could not switch off " << who << " (CRTC " << crtcId
+                        << "): " << std::strerror(errno) << " (" << ret << ") - it keeps what the kernel shows there";
+        }
+    }
 }
 
 bool DRMBackend::initVirtualCanvas() {
