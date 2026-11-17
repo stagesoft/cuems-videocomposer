@@ -216,12 +216,6 @@ public:
     void setCanvasSize(int width, int height);
     
     /**
-     * Calculate canvas size from outputs
-     */
-    void calculateCanvasSize(const std::vector<OutputInfo>& outputs,
-                            int& width, int& height) const;
-    
-    /**
      * Generate output regions based on layout and outputs
      */
     std::vector<OutputRegion> generateOutputRegions(
@@ -295,6 +289,12 @@ public:
     const DisplayConfigLoadReport& lastLoadReport() const { return loadReport_; }
     
     /**
+     * The text of the file the last successful loadFromFile() read, byte for byte (canvas::plainSections()
+     * classifies its sections, 1amfwm7hrv0). Empty after resetToDefaults().
+     */
+    const std::string& lastLoadedText() const { return loadedText_; }
+    
+    /**
      * Get default config file path
      */
     static std::string getDefaultConfigPath();
@@ -318,6 +318,7 @@ private:
     int nextListenerId_ = 0;
     bool resolutionPolicySpecified_ = false;  // set by loadFromFile() when resolution_policy= is present
     DisplayConfigLoadReport loadReport_;      // filled by loadFromFile()
+    std::string loadedText_;                  // filled by loadFromFile()
     
     void notifyListeners();
     void updateTimestamp();

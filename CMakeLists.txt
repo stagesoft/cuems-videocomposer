@@ -1026,6 +1026,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestPrimeDecode.cpp
         src/cuems_videocomposer/cpp/test/TestSoftwareDecodeLeak.cpp
         src/cuems_videocomposer/cpp/test/TestDisplayBackend.cpp
+        src/cuems_videocomposer/cpp/test/TestCanvasSize.cpp
         src/cuems_videocomposer/cpp/test/TestCpuUpload.cpp
     )
     

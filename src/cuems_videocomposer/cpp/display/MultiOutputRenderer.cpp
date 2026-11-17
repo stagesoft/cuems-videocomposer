@@ -78,6 +78,25 @@ bool MultiOutputRenderer::init(EGLDisplay eglDisplay, EGLContext eglContext) {
         return false;
     }
     
+    // The largest canvas this GPU can hold: a declared canvas beyond it is not attempted (1amfwm7hrv0)
+    {
+        GLint maxTexture = 0, maxRenderbuffer = 0;
+        GLint maxViewport[2] = {0, 0};
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
+        glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maxRenderbuffer);
+        glGetIntegerv(GL_MAX_VIEWPORT_DIMS, maxViewport);
+        int limit = 0;
+        for (GLint v : {maxTexture, maxRenderbuffer, maxViewport[0], maxViewport[1]}) {
+            if (v > 0 && (limit == 0 || v < limit)) {
+                limit = v;
+            }
+        }
+        canvasSizeLimit_ = limit;
+        LOG_INFO << "MultiOutputRenderer: largest canvas side this GPU allows: " << limit << " px (texture "
+                 << maxTexture << ", renderbuffer " << maxRenderbuffer << ", viewport " << maxViewport[0] << "x"
+                 << maxViewport[1] << ")";
+    }
+    
     initialized_ = true;
     
     LOG_INFO << "MultiOutputRenderer: Initialized with Virtual Canvas mode";
@@ -116,25 +135,39 @@ void MultiOutputRenderer::reconfigureCanvas() {
         return;
     }
     
-    int width, height;
-    calculateCanvasSize(width, height);
-    
-    if (width > 0 && height > 0) {
-        canvas_->configure(width, height);
-        LOG_INFO << "MultiOutputRenderer: Canvas configured to " << width << "x" << height;
-    }
-}
-
-void MultiOutputRenderer::calculateCanvasSize(int& width, int& height) const {
-    width = 0;
-    height = 0;
-    
+    std::vector<canvas::Driven> driven;
     for (const auto& output : outputs_) {
-        int right = output.region.canvasX + output.region.canvasWidth;
-        int bottom = output.region.canvasY + output.region.canvasHeight;
-        
-        if (right > width) width = right;
-        if (bottom > height) height = bottom;
+        const OutputRegion& r = output.region;
+        driven.push_back(canvas::Driven{r.name, canvas::Rect{r.canvasX, r.canvasY, r.canvasWidth, r.canvasHeight}});
+    }
+    
+    const canvas::CanvasChoice choice = canvas::canvasToConfigure(
+        declared_ ? &*declared_ : nullptr, driven, canvasSizeLimit_,
+        [this](int w, int h) { return canvas_->configure(w, h); });
+    
+    switch (choice.source) {
+        case canvas::CanvasSource::Driven:
+            LOG_INFO << "MultiOutputRenderer: Canvas configured to " << canvas::toString(choice.size);
+            break;
+        case canvas::CanvasSource::Declared:
+            LOG_INFO << "MultiOutputRenderer: Canvas configured to " << canvas::toString(choice.size)
+                     << " (declared by display.conf; the driven outputs cover " << canvas::toString(choice.driven)
+                     << ")";
+            break;
+        case canvas::CanvasSource::DrivenBeyondLimit:
+        case canvas::CanvasSource::DrivenAfterFailure:
+            LOG_ERROR << "MultiOutputRenderer: the canvas display.conf declares, " << canvas::toString(choice.wanted)
+                      << ", cannot be had: " << choice.reason << ". Using the driven outputs' "
+                      << canvas::toString(choice.driven)
+                      << " instead: the engine's canvas and this one differ, so cues are misplaced";
+            LOG_INFO << "MultiOutputRenderer: Canvas configured to " << canvas::toString(choice.size);
+            break;
+        case canvas::CanvasSource::None:
+            if (choice.driven.valid()) {
+                LOG_ERROR << "MultiOutputRenderer: no canvas could be allocated (the driven outputs need "
+                          << canvas::toString(choice.driven) << ")";
+            }
+            break;
     }
 }
 
