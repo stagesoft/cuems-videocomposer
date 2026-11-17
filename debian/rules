@@ -43,7 +43,7 @@ override_dh_auto_install:
 			break; \
 		fi; \
 	done; \
-	if [ -z "$$NDI_SDK_DIR" ] && [ $$NDI_FOUND -eq 0 ]; then \
+	if [ -n "$$NDI_SDK_DIR" ] && [ $$NDI_FOUND -eq 0 ]; then \
 		for ver in 6.2.1 6.1.1 6.1.0 6.0.0; do \
 			if [ -f "$$NDI_SDK_DIR/lib/x86_64-linux-gnu/libndi.so.$$ver" ]; then \
 				cp "$$NDI_SDK_DIR/lib/x86_64-linux-gnu/libndi.so.$$ver" \
@@ -67,9 +67,14 @@ override_dh_auto_install:
 		done; \
 	fi; \
 	if [ $$NDI_FOUND -eq 0 ]; then \
-		echo "WARNING: NDI SDK libraries not found. Package will be built without NDI support."; \
+		echo "WARNING: NDI SDK library not found: nothing is bundled."; \
 		echo "Set NDI_SDK_DIR environment variable or install NDI SDK to /opt/NDI SDK for Linux/"; \
 	fi
+	
+	# A binary linked against an NDI library cannot start without the bundled one, and
+	# CMake may have linked it from an SDK the loop above did not find. Stop the build
+	# here instead of shipping that package (1amfwm7j9r7; 0.1.2-1 and 0.1.2-3 shipped so).
+	sh debian/check-ndi-bundled debian/cuems-videocomposer
 	
 	# Install NDI compliance documentation
 	mkdir -p debian/cuems-videocomposer/usr/share/doc/cuems-videocomposer/NDI-COMPLIANCE
@@ -95,5 +100,8 @@ override_dh_shlibdeps:
 		fi'
 
 override_dh_strip:
-	dh_strip --exclude=libndi.so*
+	# The bundled NDI library ships byte for byte as the SDK provides it. --exclude matches
+	# a SUBSTRING of the file name, not a glob: the former "libndi.so*" matched nothing and
+	# the library was stripped in every package that bundled it, up to 0.1.2-14 (1amfwm7j9r7).
+	dh_strip --exclude=libndi.so
 
