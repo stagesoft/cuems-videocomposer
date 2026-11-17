@@ -43,11 +43,13 @@
 #include "OutputRegion.h"
 #include "VirtualCanvas.h"
 #include "OutputBlitShader.h"
+#include "CanvasSize.h"
 #include "OpenGLRenderer.h"
 #include "../layer/LayerManager.h"
 #include "../osd/OSDManager.h"
 #include <vector>
 #include <memory>
+#include <optional>
 #include <map>
 #include <functional>
 
@@ -161,10 +163,22 @@ public:
                           const std::vector<OutputSurface*>& surfaces);
     
     /**
-     * Reconfigure canvas size (call when outputs change)
-     * Automatically calculates combined size from output regions.
+     * Reconfigure canvas size (call when outputs change). The size is canvas::canvasToConfigure()'s: the driven
+     * regions, and the sections display.conf declares when set (1amfwm7hrv0).
      */
     void reconfigureCanvas();
+    
+    /**
+     * display.conf's sections, when this videocomposer uses the file's layout (canvas_layout=custom); nullopt
+     * otherwise. Set by the backend before the first configureOutputs(); kept for every later re-configuration.
+     */
+    void setDeclaredLayout(std::optional<canvas::DeclaredFile> declared) { declared_ = std::move(declared); }
+    
+    /**
+     * The largest canvas side this GPU allows (the smallest of its texture, renderbuffer and viewport limits), read
+     * at init(); 0 when unknown.
+     */
+    int canvasSizeLimit() const { return canvasSizeLimit_; }
     
     /**
      * Cleanup resources
@@ -308,6 +322,9 @@ private:
     
     bool initialized_ = false;
     
+    std::optional<canvas::DeclaredFile> declared_;  // setDeclaredLayout()
+    int canvasSizeLimit_ = 0;                       // read at init()
+    
     // ===== Private Methods =====
     
     /**
@@ -334,11 +351,6 @@ private:
      * Find output by name
      */
     int findOutputByName(const std::string& name) const;
-    
-    /**
-     * Calculate canvas size from output regions
-     */
-    void calculateCanvasSize(int& width, int& height) const;
 };
 
 } // namespace videocomposer

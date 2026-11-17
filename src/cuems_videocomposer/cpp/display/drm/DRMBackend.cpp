@@ -180,20 +180,40 @@ bool DRMBackend::openWindow() {
     // Record kernel enumeration order before storing into the sorted map
     outputOrder_.clear();
     
+    // Which connected outputs get a surface (canvas::surfacesToCreate). An output the operator turned off gets no
+    // surface at all - no GBM/EGL buffers, no CRTC, no modeset - so a connected but unwanted port stays dark and
+    // costs nothing; skipping it only in generateOutputRegions() would drop it from the canvas while still lighting
+    // it up (869efh2hr). Under the file's layout, a connected output the file does not list is treated the same way
+    // (D4 of 1amfwm7hrv0), unless no listed output is connected at all.
+    {
+        std::vector<canvas::ConnectedOutput> connected;
+        for (const auto& outputInfo : outputs) {
+            const OutputConfiguration* oc =
+                configManager_ ? configManager_->getOutputConfig(outputInfo.name) : nullptr;
+            connected.push_back(canvas::ConnectedOutput{outputInfo.name, oc != nullptr, oc ? oc->enabled : true});
+        }
+        const bool customLayout = configManager_ && configManager_->getCanvasLayout() == CanvasLayout::CUSTOM;
+        surfacePlan_ = canvas::surfacesToCreate(connected, customLayout);
+    }
+    auto inPlan = [](const std::vector<std::string>& names, const std::string& name) {
+        return std::find(names.begin(), names.end(), name) != names.end();
+    };
+    
     for (const auto& outputInfo : outputs) {
         const std::string& outputName = outputInfo.name;
 
-        // An output the operator turned off gets no surface at all - no GBM/EGL
-        // buffers, no CRTC, no modeset - so a connected but unwanted port stays
-        // dark and costs nothing. Skipping it only in generateOutputRegions()
-        // would drop it from the canvas while still lighting it up (869efh2hr).
-        if (configManager_) {
-            const OutputConfiguration* oc = configManager_->getOutputConfig(outputName);
-            if (oc && !oc->enabled) {
-                LOG_INFO << "DRMBackend: " << outputName
-                         << " disabled in display.conf - no surface created";
-                continue;
-            }
+        if (inPlan(surfacePlan_.disabled, outputName)) {
+            LOG_INFO << "DRMBackend: " << outputName
+                     << " disabled in display.conf - no surface created";
+            continue;
+        }
+        if (inPlan(surfacePlan_.unlisted, outputName)) {
+            LOG_INFO << "DRMBackend: " << outputName
+                     << " not listed in display.conf - no surface created";
+            continue;
+        }
+        if (!inPlan(surfacePlan_.create, outputName)) {
+            continue;
         }
 
         LOG_INFO << "DRMBackend: Creating surface for " << outputName;
@@ -1288,15 +1308,16 @@ bool DRMBackend::getCanvasSize(int& width, int& height) const {
         height = multiRenderer_->getCanvasHeight();
         return true;
     }
-    // Canvas not allocated yet: the bounding box of the regions is what it
-    // will be sized to.
-    width = 0;
-    height = 0;
+    // Canvas not allocated yet: what it will be sized to (the same rule as the renderer, 1amfwm7hrv0)
+    std::vector<canvas::Driven> driven;
     for (const auto& region : outputRegions_) {
-        width = std::max(width, region.canvasX + region.canvasWidth);
-        height = std::max(height, region.canvasY + region.canvasHeight);
+        driven.push_back(canvas::Driven{
+            region.name, canvas::Rect{region.canvasX, region.canvasY, region.canvasWidth, region.canvasHeight}});
     }
-    return width > 0 && height > 0;
+    const canvas::Size wanted = canvas::wantedCanvas(declaredLayout_ ? &*declaredLayout_ : nullptr, driven);
+    width = wanted.width;
+    height = wanted.height;
+    return wanted.valid();
 }
 
 size_t DRMBackend::getOutputCount() const {
@@ -1519,25 +1540,8 @@ bool DRMBackend::setOutputMode(const std::string& outputName, int width, int hei
             surfaces_.begin()->second->makeCurrent();
         }
         
-        // Recalculate total canvas size
-        int canvasWidth = 0, canvasHeight = 0;
-        for (const auto& region : outputRegions_) {
-            int right = region.canvasX + region.canvasWidth;
-            int bottom = region.canvasY + region.canvasHeight;
-            canvasWidth = std::max(canvasWidth, right);
-            canvasHeight = std::max(canvasHeight, bottom);
-        }
-        
-        // Resize virtual canvas if needed
-        VirtualCanvas* canvas = multiRenderer_->getCanvas();
-        if (canvas && (canvasWidth != canvas->getWidth() || 
-                       canvasHeight != canvas->getHeight())) {
-            LOG_INFO << "DRMBackend: Resizing virtual canvas to " 
-                     << canvasWidth << "x" << canvasHeight;
-            canvas->configure(canvasWidth, canvasHeight);
-        }
-        
-        // Reconfigure renderer with new regions (matching order)
+        // Reconfigure renderer with new regions (matching order). configureOutputs() sizes the canvas through the
+        // one rule (MultiOutputRenderer::reconfigureCanvas, 1amfwm7hrv0): the declared canvas stays the floor.
         std::vector<OutputSurface*> surfacePtrs;
         for (const auto& reg : outputRegions_) {
             surfacePtrs.push_back(surfaces_.at(reg.name).get());
@@ -1798,6 +1802,16 @@ bool DRMBackend::initVirtualCanvas() {
     return false;
 #endif
     
+    // The canvas follows display.conf, connected or not (1amfwm7hrv0): when this videocomposer uses the file's
+    // layout, the renderer gets the file's sections before the first configureOutputs(), including the ones a
+    // per-output mode request below reaches through setOutputMode().
+    if (configManager_ && configManager_->getCanvasLayout() == CanvasLayout::CUSTOM) {
+        declaredLayout_ = canvas::plainSections(configManager_->lastLoadedText());
+    } else {
+        declaredLayout_.reset();
+    }
+    multiRenderer_->setDeclaredLayout(declaredLayout_);
+    
     // Build default output regions based on kernel enumeration order.
     buildOutputRegions();
     
@@ -1807,17 +1821,11 @@ bool DRMBackend::initVirtualCanvas() {
     // buildOutputRegions() above already populated DRM-detected defaults
     // (side-by-side, kernel enumeration order).
     //
-    // Producer today: nobody writes this file in the current shipping
-    // stack (the previous cuems-generate-display-conf was retired
-    // 2026-04-23 after the project_mappings canvas_region was
-    // repurposed from a layout directive into a UI-template hint, so
-    // reading it as pixels became incorrect). Operators can still hand-
-    // author the file for custom arrangements.
-    //
-    // FUTURE (PHASE A — urgent): the load in openWindow() should become a
-    // load-or-generate-and-save so videocomposer itself owns display.conf
-    // generation on first boot and preserves operator edits on subsequent
-    // boots. See memory project_videocomposer_display_conf_phases for the plan.
+    // Producers: cuems-common's cuems-generate-display-conf (ExecStartPre of this service) writes it at every start,
+    // copying /etc/cuems/display.conf when that exists (written by cuems-display-setup or by hand) and otherwise
+    // generating it from default_mappings.xml for this node. The node engine reads the same file and places every
+    // cue by the canvas it declares, so the canvas below follows the file's sections, connected or not
+    // (1amfwm7hrv0).
     // display.conf was already parsed once in openWindow(); reuse that state here
     // (regions need surfaces, which exist now) instead of re-parsing the file.
     static const std::string startupConfPath = kStartupDisplayConf;
@@ -1851,6 +1859,25 @@ bool DRMBackend::initVirtualCanvas() {
                     setOutputMode(name, outConf->width, outConf->height,
                                   outConf->refreshRate);
                 }
+            }
+        }
+    }
+
+    // Where the engine's canvas and this one can still differ, said once at start (W1 to W6 of 1amfwm7hrv0)
+    {
+        std::vector<canvas::Driven> driven;
+        for (const auto& region : outputRegions_) {
+            driven.push_back(canvas::Driven{
+                region.name, canvas::Rect{region.canvasX, region.canvasY, region.canvasWidth, region.canvasHeight}});
+        }
+        const bool customLayout = configManager_ && configManager_->getCanvasLayout() == CanvasLayout::CUSTOM;
+        const canvas::DeclaredFile file =
+            configManager_ ? canvas::plainSections(configManager_->lastLoadedText()) : canvas::DeclaredFile{};
+        for (const auto& note : canvas::layoutNotes(file, customLayout, driven, surfacePlan_)) {
+            if (note.level == canvas::LayoutNote::Level::Error) {
+                LOG_ERROR << "DRMBackend: display.conf: " << note.text;
+            } else {
+                LOG_WARNING << "DRMBackend: display.conf: " << note.text;
             }
         }
     }
