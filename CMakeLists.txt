@@ -1027,6 +1027,7 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestSoftwareDecodeLeak.cpp
         src/cuems_videocomposer/cpp/test/TestDisplayBackend.cpp
         src/cuems_videocomposer/cpp/test/TestCpuUpload.cpp
+        src/cuems_videocomposer/cpp/test/TestSharedPromotion.cpp
     )
     
     # C++ implementation files needed by tests

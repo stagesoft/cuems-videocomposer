@@ -68,6 +68,14 @@ extern bool test_CpuUpload_PlaybackFrameGenerationBumpsOnEachLoad();
 extern bool test_CpuUpload_PlaybackSharedSecondaryFollowsDriverCache();
 extern bool test_CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite();
 extern bool test_CpuUpload_PlaybackFrameGenerationMonotonicAcrossPromotion();
+// Shared layers on software decode: frame memory across a driver's removal (1amfwm7j9r8)
+extern bool test_SharedPromotion_SecondaryIsAViewOfTheDriversPixels();
+extern bool test_SharedPromotion_PromotedLayerOwnsTheFrameMemory();
+extern bool test_SharedPromotion_OtherSecondariesKeepALivePicture();
+extern bool test_SharedPromotion_ChainOfPromotions();
+extern bool test_SharedPromotion_BackToBackRemovalsWithoutATick();
+extern bool test_SharedPromotion_BeforeTheFirstFrame();
+extern bool test_SharedPromotion_RemovingASecondaryChangesNothing();
 extern bool test_CpuUpload_LayerIncarnationDistinguishesLayers();
 
 extern bool test_Integration_LayerManagerWithMultipleLayers();
@@ -409,6 +417,13 @@ int main() {
     TestFramework::instance().addTest("CpuUpload_PlaybackSharedSecondaryFollowsDriverCache", test_CpuUpload_PlaybackSharedSecondaryFollowsDriverCache);
     TestFramework::instance().addTest("CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite", test_CpuUpload_DisplayPreparedGenerationBumpsOnEachWrite);
     TestFramework::instance().addTest("CpuUpload_PlaybackFrameGenerationMonotonicAcrossPromotion", test_CpuUpload_PlaybackFrameGenerationMonotonicAcrossPromotion);
+    TestFramework::instance().addTest("SharedPromotion_SecondaryIsAViewOfTheDriversPixels", test_SharedPromotion_SecondaryIsAViewOfTheDriversPixels);
+    TestFramework::instance().addTest("SharedPromotion_PromotedLayerOwnsTheFrameMemory", test_SharedPromotion_PromotedLayerOwnsTheFrameMemory);
+    TestFramework::instance().addTest("SharedPromotion_OtherSecondariesKeepALivePicture", test_SharedPromotion_OtherSecondariesKeepALivePicture);
+    TestFramework::instance().addTest("SharedPromotion_ChainOfPromotions", test_SharedPromotion_ChainOfPromotions);
+    TestFramework::instance().addTest("SharedPromotion_BackToBackRemovalsWithoutATick", test_SharedPromotion_BackToBackRemovalsWithoutATick);
+    TestFramework::instance().addTest("SharedPromotion_BeforeTheFirstFrame", test_SharedPromotion_BeforeTheFirstFrame);
+    TestFramework::instance().addTest("SharedPromotion_RemovingASecondaryChangesNothing", test_SharedPromotion_RemovingASecondaryChangesNothing);
     TestFramework::instance().addTest("CpuUpload_LayerIncarnationDistinguishesLayers", test_CpuUpload_LayerIncarnationDistinguishesLayers);
     
     TestFramework::instance().addTest("Integration_LayerManagerWithMultipleLayers", test_Integration_LayerManagerWithMultipleLayers);
