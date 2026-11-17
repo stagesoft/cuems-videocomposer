@@ -456,16 +456,17 @@ if(ENABLE_MIDI)
         endif()
     endif()
     
-    # libmtcmaster for MTC testing
-    if(ENABLE_ALSAMIDI AND PLATFORM_LINUX)
+    # libmtcmaster, for the MIDI test target only (cuems_videocomposer_midi_test, ENABLE_MIDI_TEST).
+    # Its headers may come from a checkout NEXT TO this repository, so nothing found here may reach
+    # another target: the include directory and HAVE_LIBMTCMASTER are set on that target below, never
+    # with include_directories() / add_definitions(). (1amfwm7j9r7: the 0.1.2-14 package was compiled
+    # with a sibling libmtcmaster checkout on the include path of the shipped binary.)
+    if(ENABLE_MIDI_TEST AND ENABLE_ALSAMIDI AND PLATFORM_LINUX)
         # Try pkg-config first
         pkg_check_modules(MTCMASTER libmtcmaster)
         if(MTCMASTER_FOUND)
-            add_definitions(-DHAVE_LIBMTCMASTER)
             set(MTCMASTER_LIBS ${MTCMASTER_LIBRARIES})
-            if(MTCMASTER_INCLUDE_DIRS)
-                include_directories(${MTCMASTER_INCLUDE_DIRS})
-            endif()
+            set(MTCMASTER_TEST_INCLUDE_DIRS ${MTCMASTER_INCLUDE_DIRS})
         else()
             # Fallback: check if library exists directly
             # Try different library name variations
@@ -480,14 +481,12 @@ if(ENABLE_MIDI)
                     PATHS 
                     ${CMAKE_SOURCE_DIR}/../libmtcmaster
                     ${CMAKE_SOURCE_DIR}/../../libmtcmaster
-                    /home/ion/src/cuems/libmtcmaster
                     /usr/local/include
                     /usr/include
                 )
                 if(MTCMASTER_INCLUDE_DIR)
-                    add_definitions(-DHAVE_LIBMTCMASTER)
                     set(MTCMASTER_LIBS ${MTCMASTER_LIB})
-                    include_directories(${MTCMASTER_INCLUDE_DIR})
+                    set(MTCMASTER_TEST_INCLUDE_DIRS ${MTCMASTER_INCLUDE_DIR})
                     # Mark as found if both library and headers are available
                     set(MTCMASTER_FOUND TRUE)
                     message(STATUS "Found libmtcmaster: ${MTCMASTER_LIB}")
@@ -546,9 +545,15 @@ if(ENABLE_EMBED_FONT)
     add_definitions(-DWITH_EMBEDDED_FONT)
 endif()
 
-# Include directories
-include_directories(${CMAKE_SOURCE_DIR})
-include_directories(${CMAKE_SOURCE_DIR}/src/cuems_videocomposer)
+# Include directories.
+# The source root and src/cuems_videocomposer are NOT on the include path, on purpose: a quoted
+# include that does not resolve from its own directory is tried against every entry here, and
+# `<source root>/../../x.h` is a file OUTSIDE the repository. With the root listed, the build took a
+# sibling checkout's header without any error (1amfwm7j916); no include needs either entry
+# (1amfwm7j9r7), so no target lists them. Do not add them back.
+# This narrows the hazard, it does not close it: an include with enough `../` to climb above the
+# source root through an entry that remains (four levels from src/cuems_videocomposer/cpp) would
+# still leave the repository. Nothing checks that at build time.
 include_directories(${CMAKE_SOURCE_DIR}/src/cuems_videocomposer/cpp)
 include_directories(${CMAKE_SOURCE_DIR}/external/stb)
 # cuems-mediadecoder includes (also propagated via PUBLIC interface)
@@ -912,7 +917,6 @@ endif()
 
 add_executable(cuems-videoindexer ${VIDEOINDEXER_SOURCES})
 target_include_directories(cuems-videoindexer PRIVATE
-    src/cuems_videocomposer
     src/cuems_videocomposer/cpp
     ${CMAKE_SOURCE_DIR}/src/cuems-mediadecoder/include
 )
@@ -1117,7 +1121,6 @@ if(BUILD_TESTS)
     # Test-only seams in production sources (e.g. VideoFileInput::failNextPrimeForTesting, 1amfwm7hk6j)
     target_compile_definitions(cuems_videocomposer_test PRIVATE CUEMS_VC_TESTING)
     target_include_directories(cuems_videocomposer_test PRIVATE
-        src/cuems_videocomposer
         src/cuems_videocomposer/cpp
     )
     # Add HAP include directory for tests (use same logic as main build)
@@ -1199,10 +1202,10 @@ if(BUILD_TESTS)
         
         add_executable(cuems_videocomposer_midi_test ${MIDI_TEST_SOURCES} ${MIDI_TEST_CPP_SOURCES})
         target_include_directories(cuems_videocomposer_midi_test PRIVATE
-            src/cuems_videocomposer
             src/cuems_videocomposer/cpp
-            ${MTCMASTER_INCLUDE_DIR}
+            ${MTCMASTER_TEST_INCLUDE_DIRS}
         )
+        target_compile_definitions(cuems_videocomposer_midi_test PRIVATE HAVE_LIBMTCMASTER)
         target_link_libraries(cuems_videocomposer_midi_test
             ${ALSA_LIBS}
             ${MTCMASTER_LIBS}
