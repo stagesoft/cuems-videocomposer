@@ -604,3 +604,32 @@ bool test_CanvasSize_D6_EachCrtcOnce() {
     TEST_ASSERT_EQ(off[1], 90u);
     return true;
 }
+
+// ===== External change review of 2026-11-17 (Codex), findings 2 and 3 =====
+
+/** A space right after '=' (any key) leaves the plain form: the rule is "no space around the '='". */
+bool test_CanvasSize_Review_SpaceAfterEqualsNotPlain() {
+    return ac1bVector("[output:HDMI-A-2]\nresolution= 1920x1080\ncanvas_region=1920,0,1920,1080\n", "space after");
+}
+/** W3 for a driven section with a width of 0 also when the section is outside the plain form (here a repeated key). */
+bool test_CanvasSize_Review_W3ForDrivenNonPlainSection() {
+    const std::string text = "canvas_layout=custom\n[output:HDMI-A-1]\ncanvas_region=0,0,1920,1080\n"
+                             "[output:HDMI-A-2]\nrefresh=60\nrefresh=60\ncanvas_region=1920,0,0,1080\n";
+    const auto notes = notesFor(text, named({"HDMI-A-1", "HDMI-A-2"}));
+    if (!hasNote(notes, "W3", "HDMI-A-2") || !hasNote(notes, "W2", "HDMI-A-2")) {
+        printNotes(notes);
+        return false;
+    }
+    return true;
+}
+/** No W3 for a region the engine cannot read as four integers: that section is W2's case only. */
+bool test_CanvasSize_Review_NoW3ForUnparseableRegion() {
+    const std::string text = "canvas_layout=custom\n[output:HDMI-A-1]\ncanvas_region=0,0,1920,1080\n"
+                             "[output:HDMI-A-2]\ncanvas_region=not-a-region\n";
+    const auto notes = notesFor(text, named({"HDMI-A-1", "HDMI-A-2"}));
+    if (hasNote(notes, "W3") || !hasNote(notes, "W2", "HDMI-A-2")) {
+        printNotes(notes);
+        return false;
+    }
+    return true;
+}

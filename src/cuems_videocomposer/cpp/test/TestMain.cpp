@@ -95,6 +95,9 @@ extern bool test_CanvasSize_D6_UnusedCrtcSwitchedOff();
 extern bool test_CanvasSize_D6_CrtcOfADrivenOutputLeftAlone();
 extern bool test_CanvasSize_D6_NoCrtcNothingToDo();
 extern bool test_CanvasSize_D6_EachCrtcOnce();
+extern bool test_CanvasSize_Review_SpaceAfterEqualsNotPlain();
+extern bool test_CanvasSize_Review_W3ForDrivenNonPlainSection();
+extern bool test_CanvasSize_Review_NoW3ForUnparseableRegion();
 
 // CPU upload same tick, once per layer (1amfwm7hg3u)
 extern bool test_CpuUpload_a_NewIdentityUploadsThisDraw();
@@ -494,6 +497,9 @@ int main() {
     TestFramework::instance().addTest("CanvasSize_D6_CrtcOfADrivenOutputLeftAlone", test_CanvasSize_D6_CrtcOfADrivenOutputLeftAlone);
     TestFramework::instance().addTest("CanvasSize_D6_NoCrtcNothingToDo", test_CanvasSize_D6_NoCrtcNothingToDo);
     TestFramework::instance().addTest("CanvasSize_D6_EachCrtcOnce", test_CanvasSize_D6_EachCrtcOnce);
+    TestFramework::instance().addTest("CanvasSize_Review_SpaceAfterEqualsNotPlain", test_CanvasSize_Review_SpaceAfterEqualsNotPlain);
+    TestFramework::instance().addTest("CanvasSize_Review_W3ForDrivenNonPlainSection", test_CanvasSize_Review_W3ForDrivenNonPlainSection);
+    TestFramework::instance().addTest("CanvasSize_Review_NoW3ForUnparseableRegion", test_CanvasSize_Review_NoW3ForUnparseableRegion);
     TestFramework::instance().addTest("CpuUpload_a_NewIdentityUploadsThisDraw", test_CpuUpload_a_NewIdentityUploadsThisDraw);
     TestFramework::instance().addTest("CpuUpload_b_SameIdentitySkips", test_CpuUpload_b_SameIdentitySkips);
     TestFramework::instance().addTest("CpuUpload_c_TextureRecreationForcesUpload", test_CpuUpload_c_TextureRecreationForcesUpload);
