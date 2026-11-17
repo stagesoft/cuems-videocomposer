@@ -44,6 +44,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <map>
 #include <set>
@@ -108,8 +109,8 @@ struct DeclaredSection {
     bool enabled = true;          // as both readers read it: the last "enabled=" line, only "true" or "1" keep it on
     bool hasRegion = false;       // a canvas_region of four integers in the plain form
     Rect region;                  // as written (a width or height <= 0 is kept as written, as the engine keeps it)
-    bool engineRegion = false;    // the section's own last canvas_region, read the engine's way (four integers)
-    Rect engineRect;              // that region, whatever the form of the section (W3)
+    bool vcRegion = false;        // this videocomposer read a canvas_region line for this section (exact key)
+    Rect vcRect;                  // what it read, exactly as DisplayConfigurationManager::loadFromFile does (W3)
 };
 
 struct DeclaredFile {
@@ -152,49 +153,6 @@ inline bool isPlainKey(const std::string& key) {
             return false;
         }
     }
-    return true;
-}
-
-/**
- * The engine's reading of a canvas_region value: split on ',', exactly four parts, each an integer once spaces and
- * tabs (and the CR of a CRLF line) around it are stripped (Python's int(): an optional sign and digits; up to 7
- * digits here).
- */
-inline bool parseEngineRegion(const std::string& value, Rect& out) {
-    int nums[4] = {0, 0, 0, 0};
-    size_t start = 0;
-    for (int n = 0; n < 4; ++n) {
-        const size_t comma = value.find(',', start);
-        if ((n < 3) != (comma != std::string::npos)) {
-            return false;
-        }
-        std::string part = value.substr(start, n < 3 ? comma - start : std::string::npos);
-        const size_t a = part.find_first_not_of(" \t\r");
-        const size_t b = part.find_last_not_of(" \t\r");
-        if (a == std::string::npos) {
-            return false;
-        }
-        part = part.substr(a, b - a + 1);
-        size_t i = 0;
-        bool negative = false;
-        if (part[0] == '-' || part[0] == '+') {
-            negative = part[0] == '-';
-            i = 1;
-        }
-        if (i == part.size() || part.size() - i > 7) {
-            return false;
-        }
-        long v = 0;
-        for (; i < part.size(); ++i) {
-            if (!std::isdigit(static_cast<unsigned char>(part[i]))) {
-                return false;
-            }
-            v = v * 10 + (part[i] - '0');
-        }
-        nums[n] = static_cast<int>(negative ? -v : v);
-        start = comma + 1;
-    }
-    out = Rect{nums[0], nums[1], nums[2], nums[3]};
     return true;
 }
 
@@ -255,6 +213,12 @@ inline DeclaredFile plainSections(const std::string& text) {
         if (s.notPlainBecause.empty()) {
             s.notPlainBecause = why;
         }
+    };
+    // canvas_region as this videocomposer's loader reads it: the same sscanf into the same fields, so a partial
+    // match keeps the earlier values and the last line wins (W3 is judged on what this videocomposer uses).
+    auto readLikeTheVc = [](DeclaredSection& s, const std::string& value) {
+        s.vcRegion = true;
+        std::sscanf(value.c_str(), "%d,%d,%d,%d", &s.vcRect.x, &s.vcRect.y, &s.vcRect.width, &s.vcRect.height);
     };
 
     std::vector<std::string> lines;
@@ -325,6 +289,7 @@ inline DeclaredFile plainSections(const std::string& text) {
             }
             const std::string key = line.substr(0, eq);
             if (key == "canvas_region") {
+                readLikeTheVc(s, line.substr(eq + 1));
                 notPlain(s, "a canvas_region line under a later '[' header, which this videocomposer reads into this "
                             "section and the engine does not");
             } else if (key == "enabled") {
@@ -369,9 +334,7 @@ inline DeclaredFile plainSections(const std::string& text) {
             s.enabled = (value == "true" || value == "1");
         } else if (key == "canvas_region") {
             Rect r;
-            Rect er;
-            s.engineRegion = detail::parseEngineRegion(value, er);  // the last line wins, as for the engine
-            s.engineRect = s.engineRegion ? er : Rect{};
+            readLikeTheVc(s, value);
             if (detail::parsePlainRegion(value, r)) {
                 s.hasRegion = true;
                 s.region = r;
@@ -585,11 +548,12 @@ inline std::vector<LayoutNote> layoutNotes(const DeclaredFile& file, bool custom
                                (drivenHere ? "counted in the canvas because it is driven"
                                            : "left out of the canvas because it is not driven"));
             }
-            const Rect& er = s.engineRect;
-            if (drivenHere && s.engineRegion && (er.width <= 0 || er.height <= 0)) {
-                warn("W3", "[output:" + s.name + "] canvas_region=" + toString(er) + " has a width or height " +
-                               "of zero or less: the engine takes it as written, this videocomposer uses the output's " +
-                               "own size, so the two canvases can differ");
+            const Rect& vr = s.vcRect;
+            if (drivenHere && s.vcRegion && (vr.width <= 0 || vr.height <= 0)) {
+                warn("W3", "[output:" + s.name + "] canvas_region read as " + toString(vr) + " has a width or height " +
+                               "of zero or less: this videocomposer uses the output's own size there" +
+                               (s.plain ? std::string(", the engine takes it as written, so the two canvases differ")
+                                        : std::string("; how the engine reads this section is not known here (W2)")));
             }
         }
         for (const auto& name : surfaces.unlisted) {
