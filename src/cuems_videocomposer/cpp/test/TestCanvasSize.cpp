@@ -662,3 +662,18 @@ bool test_CanvasSize_Review_W3FromTheVcsOwnReading() {
     }
     return true;
 }
+/** The loader reads a canvas_region under a later non-output header into the section: W3 from it, W2 for the form. */
+bool test_CanvasSize_Review_W3FromARegionUnderAnotherHeader() {
+    const std::string text = "canvas_layout=custom\n[output:HDMI-A-1]\ncanvas_region=0,0,1920,1080\n"
+                             "[output:HDMI-A-2]\nresolution=1920x1080\n[other]\ncanvas_region=1920,0,0,1080\n";
+    const auto notes = notesFor(text, named({"HDMI-A-1", "HDMI-A-2"}));
+    if (!hasNote(notes, "W3", "1920,0,0,1080") || !hasNote(notes, "W2", "HDMI-A-2")) {
+        printNotes(notes);
+        return false;
+    }
+    return true;
+}
+/** A tab right after '=' leaves the plain form too. */
+bool test_CanvasSize_Review_TabAfterEqualsNotPlain() {
+    return ac1bVector("[output:HDMI-A-2]\nresolution=\t1920x1080\ncanvas_region=1920,0,1920,1080\n", "space after");
+}

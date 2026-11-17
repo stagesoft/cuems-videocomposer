@@ -215,7 +215,8 @@ inline DeclaredFile plainSections(const std::string& text) {
         }
     };
     // canvas_region as this videocomposer's loader reads it: the same sscanf into the same fields, so a partial
-    // match keeps the earlier values and the last line wins (W3 is judged on what this videocomposer uses).
+    // match keeps the earlier values and the last line wins (W3 is judged on what this videocomposer uses). An
+    // out-of-range number behaves here exactly as in the loader, which is the point: this mirrors it on purpose.
     auto readLikeTheVc = [](DeclaredSection& s, const std::string& value) {
         s.vcRegion = true;
         std::sscanf(value.c_str(), "%d,%d,%d,%d", &s.vcRect.x, &s.vcRect.y, &s.vcRect.width, &s.vcRect.height);
@@ -552,7 +553,7 @@ inline std::vector<LayoutNote> layoutNotes(const DeclaredFile& file, bool custom
             if (drivenHere && s.vcRegion && (vr.width <= 0 || vr.height <= 0)) {
                 warn("W3", "[output:" + s.name + "] canvas_region read as " + toString(vr) + " has a width or height " +
                                "of zero or less: this videocomposer uses the output's own size there" +
-                               (s.plain ? std::string(", the engine takes it as written, so the two canvases differ")
+                               (s.plain ? std::string(", the engine takes it as written, so the two canvases can differ")
                                         : std::string("; how the engine reads this section is not known here (W2)")));
             }
         }

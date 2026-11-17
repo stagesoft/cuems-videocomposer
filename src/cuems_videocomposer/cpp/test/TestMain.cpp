@@ -100,6 +100,8 @@ extern bool test_CanvasSize_Review_W3ForDrivenNonPlainSection();
 extern bool test_CanvasSize_Review_UnreadableRegionW3SaysEngineUnknown();
 extern bool test_CanvasSize_Review_SpacedKeyNoW3();
 extern bool test_CanvasSize_Review_W3FromTheVcsOwnReading();
+extern bool test_CanvasSize_Review_W3FromARegionUnderAnotherHeader();
+extern bool test_CanvasSize_Review_TabAfterEqualsNotPlain();
 
 // CPU upload same tick, once per layer (1amfwm7hg3u)
 extern bool test_CpuUpload_a_NewIdentityUploadsThisDraw();
@@ -504,6 +506,8 @@ int main() {
     TestFramework::instance().addTest("CanvasSize_Review_UnreadableRegionW3SaysEngineUnknown", test_CanvasSize_Review_UnreadableRegionW3SaysEngineUnknown);
     TestFramework::instance().addTest("CanvasSize_Review_SpacedKeyNoW3", test_CanvasSize_Review_SpacedKeyNoW3);
     TestFramework::instance().addTest("CanvasSize_Review_W3FromTheVcsOwnReading", test_CanvasSize_Review_W3FromTheVcsOwnReading);
+    TestFramework::instance().addTest("CanvasSize_Review_W3FromARegionUnderAnotherHeader", test_CanvasSize_Review_W3FromARegionUnderAnotherHeader);
+    TestFramework::instance().addTest("CanvasSize_Review_TabAfterEqualsNotPlain", test_CanvasSize_Review_TabAfterEqualsNotPlain);
     TestFramework::instance().addTest("CpuUpload_a_NewIdentityUploadsThisDraw", test_CpuUpload_a_NewIdentityUploadsThisDraw);
     TestFramework::instance().addTest("CpuUpload_b_SameIdentitySkips", test_CpuUpload_b_SameIdentitySkips);
     TestFramework::instance().addTest("CpuUpload_c_TextureRecreationForcesUpload", test_CpuUpload_c_TextureRecreationForcesUpload);
