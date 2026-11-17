@@ -13,6 +13,8 @@ Multi-layer video compositor for live production: hardware-decoded video renderi
 
 **DRM/KMS is THE path** — it is what every deployed node runs and the only backend kept current. `X11Display` and `WaylandDisplay` are **legacy, left in the tree but outdated**: they still compile and can come up on a dev desktop, but they are not maintained and must not be treated as reference behaviour. When the backends disagree, DRM is right and the other two are stale — never "fix" DRM to match them, and never rely on something X11/Wayland happen to do (see the hardware-decoder probe gotcha below for a bug that hid exactly there). `HeadlessDisplay` is a last-resort fallback when DRM fails, not a selectable mode.
 
+**The backend is chosen by a flag, never by the environment (1amfwm7hjze).** The VC starts on DRM whatever `DISPLAY` or `WAYLAND_DISPLAY` say; before this, either variable leaking into the service (a desktop session on the box, a hand start, an env file) silently put it on X11/Wayland with one INFO line as the trace. A desktop backend runs only with **`--display-backend=x11`** or **`--display-backend=wayland`** (also `=drm`; case-insensitive), and logs `WARNING display backend <x>: not maintained, not for production`. There is **no `auto`**: `auto`, an unknown value or a missing one stops the start (stderr names the flag and `drm, x11, wayland`, exit 1). An explicitly chosen desktop backend that fails is **one ERROR and exit 1**, no fallback to the other desktop backend (the old Wayland → X11 step is gone) nor to DRM; under the unit, `Restart=on-failure` makes that a loud restart loop on purpose. DRM → Headless is unchanged. Write the flag **only in the `=` form**: an older VC treats `--display-backend x11` as the flag (an unrecognized-option WARNING) plus a movie file called `x11`, while `--display-backend=x11` is only WARNed about and the old env-based choice applies. It is not advertised in cuems-common's `videocomposer-flags.env.example`: the desktop backends are for development, and their removal is ClickUp 1amfwm7hjzf. Code: `display/DisplayBackendChoice.*`, `ConfigurationManager::parseCommandLine`, `VideoComposerApplication::initializeDisplay`.
+
 Vendored git submodules: `mtcreceiver`, `oscreceiver` (+ others). Run `git submodule update --init` after cloning.
 
 ## Build
@@ -28,6 +30,19 @@ Deploy binaries with the **stop → cp → start** discipline (the player is a s
 The engine→VC protocol is documented once in the cuems-RELATIONS CLAUDE.md ("Video Cue Lifecycle"). VC's half: receive `/videocomposer/layer/load <file> <cueId>` on arm; on run, honor `/offset`, `/visible`, `/loop`, `/mtcfollow`; lock playback to MTC; auto-unload the layer on end (if enabled); `/videocomposer/reset` clears all state between projects. Default OSC port **7000**.
 
 `LayerPlayback` clamps an overshooting media frame to `totalFrames-1` while `wraparound_` is false, and wraps (`% totalFrames`) once it's true. `wraparound_` is enabled by the engine's `/loop=1` — for infinite loops the engine now sends `/loop` **before** `/mtcfollow` (see field notes).
+
+### `visible_at`: the self-gated reveal (869feynrj, caps token `visible_at`)
+
+Plan `cuems-RELATIONS/Plans/2026-11-03-audio-first-pass-head-869feynrj.md` §4.6. `/videocomposer/layer/<id>/visible_at 1` keeps the layer invisible and makes it visible **in the `update()` whose poll gives a raw content frame ≥ 0** (offset applied, *before* the loop period and the clamp: after them a pre-start position is frame 0 or the file's tail) **with that frame's pixels in the buffer**. The flip and frame 0 thus go in one submission and land on the vblank the cadence engine picked for content time 0 (tgt of the two-deep loop); there is no second clock read. A decode miss on that poll defers the reveal to the poll that delivers its frame (never the tail, never a stale frame): the gate checks `InputSource::deliveredFrame()`, because the hardware async queue (`VideoFileInput::readFrameToTexture`) and the async HAP decoder report success while *holding* the previous texture on a queue miss. Covered: VideoFileInput hardware path (`lastTransferredFrame_`, set only on a real transfer, to the number `AsyncDecodeQueue::getFrame` reports for the frame it returned: on a miss it falls back to the closest *earlier* queued frame, and before 1amfwm7hk6j the requested number was recorded instead, so the gate could trust a stale frame), HAPVideoInput (its `currentFrame_`, moved only by a decode/upload, and by `seek`), shared secondaries (the shared input's delivered frame **and** the driver cache's frame number). Software VideoFileInput and other inputs: a successful read delivered the frame (default). Not covered: a `seek()` followed by a read of the same frame, which on VideoFileInput (software) and HAP returns the old buffer through the "same frame" early return (pre-existing; only after a failed load or a full-frame SYSEX). After a held miss the layer does not re-request that frame, so the reveal then comes with the next frame (frame 1). It never goes through `awaitingFrame` (that waits for a frame *change* and would show frame 1 on a layer parked at 0).
+
+- `visible_at 0`: drops a pending reveal, or hides a layer the gate already revealed (the engine's cancel is final, D5). Nothing pending or gate-revealed: ignored, logged.
+- `/visible 1` while the gate is pending is covered by it (no early flip, no `awaitingFrame`) **as long as the layer has an MTC position** (`LayerPlayback::hasContentFrame()`: following, an MTC frame, the offset placed). Without one the gate cannot fire, so the 1 is the engine's healer: the gate is dropped and the layer shown at once as before visible_at (`awaitingFrame`), INFO `… visible_at pending without an MTC position: visible 1 shows it now`. After a reveal `/visible 1` changes nothing. `/visible 0` drops a pending gate. Without `visible_at`, `/visible` is unchanged.
+- A gate still pending after **6 s** (`VideoLayer::kVisibleAtPendingWarnMs`) logs one WARNING per gate, `… visible_at pending for <ms> ms without a frame at content time >= 0 (following <0|1>, MTC position <0|1>)`. The engine arms the gate at start − F (~0.1 s) and sets a video layer up at most ~5 s before its start, so past 6 s the start is not coming (lost `/mtcfollow`, MTC stopped, offset never placed).
+- Code: `VideoLayer::setVisibleAt` / `setVisible` and the gate in `VideoLayer::update()`; `LayerPlayback` only exposes `contentStarted()` / `contentFrame()`.
+- **Journal lines are a contract** (`remote/JournalContract.h`; the engine's rig rows grep them): `layer <id> visible at content <ms> ms` per reveal (0 = frame 0), `layer <id> visible_at cancelled after <ms> ms visible` (WARNING), `… visible_at cancelled before the reveal`, `… visible_at 0 ignored: no reveal pending or done`, `… visible_at dropped by visible 0`, plus the healer and pending lines above.
+- Limits: coupled pacing, one gate per layer (not per output). In the drop regime (content faster than the output) the cadence may never present frame 0; the reveal then shows frame 1 and logs its content time.
+- **CPU-uploaded content** (software-decoded codecs, NDI; not hardware h264/HEVC, not HAP, which arrive as GPU textures) reaches the texture **on the tick its frame is chosen** (1amfwm7hg3u): `OpenGLRenderer::uploadCpuFrame` binds the layer's single PBO, orphans it (`glBufferData(NULL)`), maps, copies this tick's prepared frame, unmaps and `glTexSubImage2D`s from offset 0, all in the same `renderLayer` call. Before it, a double PBO uploaded the *previous* call's buffer: every CPU frame was one refresh late and the first draw after a hidden period or a texture recreation could be uninitialised or stale (visible_at and `/visible 1` alike). The upload happens once per frame identity (`display/CpuUploadPolicy.h`: source generation, frame-load generation, prepared-pixel generation, texture generation), so a held frame or a second surface in the same tick reuses the texture, and a panorama pan on a held frame still re-uploads. A NULL map or a GL_FALSE unmap uploads that frame straight from the CPU buffer, is not recorded (the next draw retries the PBO) and logs `CPU upload: layer <id> staging buffer map failed|unmap returned GL_FALSE; …` at most once per layer per 10 s. With `VIDEOCOMPOSER_CADENCE_STATS=1` also, per CPU-uploaded layer every 60 s (and a `final` one when the layer goes): `CpuUploadStats: layer=<id> size=WxH n=… mean=…ms p95=…ms max=…ms direct=<n>`, the CPU-side cost from the PBO bind to the return of `glTexSubImage2D` over the window, `direct` = uploads that bypassed the PBO. The RECTANGLE fixed-function fallback (no shaders) always uploaded directly in the same call and is unchanged.
+- Tests: `test/TestVisibleAt.cpp` replays the model fixtures (`test/fixtures/cadence/`, plus 25/30 Hz outputs in `test/fixtures/visible_at/`, made by its `gen_fixtures.py` from the same model; `va_res_*` = the five 30 fps offset residues of 1amfwm7h924's phase, with the model run on the phase-shifted clock).
 
 ## NDI input and the montaje preview (from deb 0.1.2-7)
 
@@ -49,9 +64,9 @@ ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-previe
 ## Frame pacing (0.1.2-10): coupled by default, per-surface opt-in
 
 - **Default = coupled**: every output presents on the slowest CRTC's vblank, one atomic commit for all.
-  This is the model the cadence smoother in `FramerateConverterSyncSource` was written against
-  ("pollFrame is called once per vsync") and the one the stutter-free pulldown work (25/30 fps on
-  50/60 Hz, 4K at 30) was validated on.
+  This is the model the legacy cadence smoother in `FramerateConverterSyncSource` was written against
+  ("pollFrame is called once per vsync") and the one the vblank-tick engine below needs (it reads the
+  pacing CRTC's vblank, so it does not depend on the poll cadence).
 - **Per-surface pacing** (PR #8, 869emcrwa: each refresh-rate class flips on its own vblank) is
   **opt-in**: `VIDEOCOMPOSER_PER_SURFACE_PACING=1` in the service environment
   (`/etc/cuems/videocomposer-flags.env`). It shipped as the default in 0.1.2-9 and regressed playback:
@@ -75,6 +90,62 @@ ClickUp 869ekxuez / 869few41p; plan `cuems-RELATIONS/Plans/2026-10-08-ndi-previe
   zero. `VIDEOCOMPOSER_COUPLED_PACING=1` is still honoured and forces coupled; `=0` no longer selects
   per-surface (it did on 0.1.2-9), the startup line `frame pacing = …` always states the model in force.
 
+- **CadenceStats** (opt-in, `VIDEOCOMPOSER_CADENCE_STATS=1` in the service environment; plan R9 step S1):
+  one INFO line per output and layer every 60 s, and a `final` line when the layer leaves or the VC stops:
+  `CadenceStats: output=HDMI-A-1 layer=1 fps=29.970 hz=30.000 presents=… changes=… holds{1:…,2:…}
+  outsideA=0 minority=… expected=… skipped=0 back=0 wraps=0 disc=0`. A *hold* is how many vsyncs a frame
+  stayed on screen, counted from the msc of the flip events; `outsideA` counts holds outside
+  {floor(r), ceil(r)}, r = hz / fps (the "3 then 1" irregular pairs); `minority` vs `expected` is the
+  inherent drift the rate predicts (29.97 on 30 Hz: one 2-hold per ~1000 frames). Coupled path only;
+  in coupled mode every visible layer is counted on every output (one shared composite). Read the
+  journal as root (`sudo journalctl -u cuems-videocomposer | grep CadenceStats`): cuems-admin is not
+  in `systemd-journal` and sees nothing. First rig reading, test2 node01 Panera 2×4K30 2026-10-21:
+  `holds{1:7186,2:7} outsideA=0 minority=7 expected=7.2` per output after 4 min.
+
+### The vblank-tick cadence engine (1amfwm7gpz7; coupled path)
+
+Replaces the time-based smoother of `FramerateConverterSyncSource::pollFrame` whenever the DRM backend publishes a
+vblank tick; the legacy smoother is kept verbatim behind "no tick". Design, model and measurements:
+`cuems-RELATIONS/Plans/2026-11-04-vc-cadence-exact-ratio-min-hold-1amfwm7gpz7.md`, executable reference model and
+fixtures in `cuems-RELATIONS/baselines/test3-saltitos-20261104/model/` (the C++ tests replay those fixtures:
+`test/fixtures/cadence/*.txt`, `TestFramerateConverter.cpp`).
+
+- **The tick** (`sync/PresentTick.h`): the last completed flip (msc, ust, period) of the pacing CRTC, published in
+  `DRMBackend::render()` right after the wait for pending flips. The pacing CRTC is the enabled output with the longest
+  vsync period; on a tie, the one whose flip completes last most often over the first 120 renders, then **frozen
+  until a mode change** (the CRTCs' sequence counters have unrelated bases: a per-frame choice mixes them).
+- **The current vblank** (`currentVblank()`, sampled once per `updateLayers()`): `drmCrtcGetSequence` on the pacing
+  CRTC (amdgpu and i915 both answer) and `prevLanding`, the vblank the previous submit lands on. The frame chosen now
+  is shown at `tgt = max(prevLanding, now) + 1` (two-deep loop: normally tick + 2). `prevLanding` = the sequence read
+  right after the commit + 1, + 1 more when the commit was issued past the driver's **flip deadline**, learnt in flight
+  from each submit's real depth (64 bins of the period, misclassification minimum; test3 amdgpu: made the next vblank
+  up to 6 ms into the 16.7 ms period, missed it from 9.4 ms). Without that term every decode stall (loop wrap) showed
+  3,2,1 instead of 3,1.
+- **The engine**: r = content period / vsync period; |r − round r| ≤ 0.02 snaps to an integer hold N (30p/60, 25p/50,
+  29.97p/60), else a Bresenham pattern (25p/60 = 2,3,2,3,2), r < 0.98 the drop regime. The frame for `tgt` follows a
+  grid anchored once on the smooth MTC clock (`getTimeMsAt(ust of tgt)`, advanced once per tick for every layer).
+  The phase against the clock is low-passed over 16 vblanks; outside ±0.60 of a hold one **correction** shortens
+  (`corr-`) or lengthens (`corr+`) a single hold by one vsync, at least 30 vsyncs apart. A panel off nominal needs
+  them (test3: 79 ppm, one every ~215 s at 30p/60): that is the physical pulldown, not jitter. A stall is caught up at
+  once (one 3,1 event, `stall`); a jump ≥ 2 frames re-anchors.
+- **Logs.** INFO at start per layer: `cadence: path=tick now=ioctl` and `cadence: layer=c<id> fps 30, vsync 16.6667 ms,
+  r 2 -> hold 2 (exact) H=0.6 filter=16`. With `VIDEOCOMPOSER_CADENCE_STATS=1` also `cadence-event layer=c<id>
+  kind=corr-|corr+|skip|stall|reanchor …` (≤ 20/s) and once a minute `cadence-lag layer=c<id> … corrections(-/+)=a/b
+  skips= drops= stalls= reanchors= phiMax= eps=` (cumulative; `eps` = clock drift against the grid over the last
+  60 s). `VIDEOCOMPOSER_CADENCE_TRACE=1` adds a `cadence-poll` and a `cadence-flip … late= depth=` line per frame
+  (debug only: ~4 lines per vsync). Healthy, 30p on 60 Hz with a looping clip: `holds{1}` = `corr-` + stalls,
+  `holds{3}` = `corr+` + stalls, stalls = loop wraps, `reanchors=0`, no `anti-drift SNAP` after the GO.
+  `cuems-RELATIONS/baselines/test3-saltitos-20261104/model/cadence_parse.py <journal>` judges a run against the
+  model's prediction. The rule-1 line carries `cue=<id>` after `layer=c<id>` (1amfwm7gq3y), so it joins the
+  layer-load advice line of the "Refresh rule" section below.
+- **Kill switch**: `VIDEOCOMPOSER_CADENCE_LEGACY=1` in `/etc/cuems/videocomposer-flags.env`, then restart the VC with no
+  project loaded (and restart `cuems-node-engine`: it does not notice a VC restart, 869f8jn34). One INFO line says so;
+  every layer runs the legacy smoother. Per-surface pacing, `renderLegacy`, X11 and headless publish no tick and run
+  the legacy smoother too.
+- **Measured** (test3 FP530, 4 × 1080p 30p on 60 Hz): the mid-clip 1/3 pairs of the released smoother (42–62 per
+  minute per output) are gone; what is left is one 3,1 per loop wrap (the decode stall, 1amfwm7gq3x) and the
+  panel's correction every ~2 min.
+
 ## Resolution control
 
 Precedence (after the DRMBackend patch on `main`/`rc_1`): **`--resolution` CLI flag > `resolution_policy` in `/run/cuems/display.conf` (general) > built-in 1080p default**, with **per-output `resolution=WxH` lines always overriding on top**. So this works:
@@ -83,11 +154,259 @@ Precedence (after the DRMBackend patch on `main`/`rc_1`): **`--resolution` CLI f
 resolution_policy=native
 canvas_layout=custom
 [output:HDMI-A-1]
-  canvas_region=0,0,1920,1080
-  resolution=1920x1080     # per-output exception (pin a 4K panel to 1080p)
+canvas_region=0,0,1920,1080
+resolution=1920x1080
 ```
 
+Here `resolution=1920x1080` is the per-output exception: it pins a 4K panel to 1080p while the others run native.
+
+**`display.conf` syntax as the VC parser reads it** (`DisplayConfigurationManager::loadFromFile`): the key is everything before the first `=`, **untrimmed**, and the value is everything after it. So:
+- **keys start at column 0.** An indented or spaced key (`  canvas_region=…`, `canvas_region = …`) is a different, unknown key, and unknown keys are ignored silently. The engine reads the same file with `configparser`, which strips keys, so it honours a line the VC ignores and the two then disagree on the canvas;
+- **no inline comments.** `#` starts a comment only in column 0. `resolution_policy=native  # x` is an unknown policy, and `color_gamma=1.05 # warm` is an unparsable value;
+- `[output:<connector>]` headers start at column 0, and global keys (`resolution_policy`, `canvas_layout`, `canvas_size`) go before the first section: every key after a header belongs to that output.
+
+An earlier version of this example had indented keys and an inline comment. The VC ignored both of those keys.
+
 The patch lives in `cpp/display/drm/DRMBackend.cpp` (`openWindow`/`initializeVirtualCanvas`): load display.conf before the global modeset (unless `-r` was explicit); the per-output override block applies unconditionally. **Deploy gotcha:** `cuems-generate-display-conf` does NOT emit `resolution_policy=`, so a fresh node with no operator override falls back to the 1080p default.
+
+**Interlaced modes (R11, ClickUp 1amfwm7evfj).** The VC's rate of a mode is the FRAME rate (`clock/(htotal·vtotal)`),
+so 1080i60 reads 30 Hz; every monitor on the rigs offers 1080 at 25/29.97/30 only as interlaced. Since this fix a
+`refresh=` never selects an interlaced mode unless asked for: a progressive mode within 0.5 Hz wins; if the rate does
+not exist in progressive the native progressive mode of that size is used with an ERROR naming both
+(`… 1920x1080@30 does not exist as a progressive mode on this monitor; using the native progressive …`); an
+interlaced mode is taken only with `refresh=<field rate>i` (e.g. `refresh=60i`, matched against the field rate that
+`modetest` shows) or when the size has no progressive mode at all (WARNING). Auto-selection and refresh
+harmonization skip interlaced modes too. `/videocomposer/display/mode` follows the same rule in its pre-check: a rate
+that exists only interlaced at a size with progressive modes is refused (`=== MODE NOT AVAILABLE ===`, the list marks
+the interlaced modes). At equal distance the first mode listed wins. The `i` of `refresh=60i` is found past a trailing
+space or the carriage return of a CRLF file.
+
+### Refresh rule: content fps against output Hz (1amfwm7gq3y)
+
+Smooth playback needs the output refresh to be a whole multiple of the content fps: each frame is then held the same
+number of vsyncs. Plan: `cuems-RELATIONS/Plans/2026-11-06-refresh-rule-and-warning-1amfwm7gq3y.md` (§4.1, rig rows in
+§5.1); sink lists from the manuals in `Plans/2026-11-04-vc-stutter-free-playback-research.md` §D.10.
+
+| content fps | exact | a regular pattern (visible judder) | near miss: one single-vsync step every … |
+|---|---|---|---|
+| 23.976 | 47.95 (rare on sinks) | 59.94 / 60 (2,3) | 24.000: ~42 s |
+| 24 | 48 (rare) | 60 / 59.94 / 59.95 (2,3) | — |
+| 25 | **50** | 60 / 59.94 / 59.95 (2,3,2,3,2) | — |
+| 29.97 | **59.94** (the 148.352 MHz CEA mode: exact) | 50 (1,2) | 60.000: ~17 s · 59.95: ~99 s |
+| 30 | **60.000** | 50 (1,2) | **59.94: ~17 s** (many TVs) · **59.95: ~20 s** (every 1920x1200 "60", CVT-RB) · 59.79 (the Acer V193HQV 1366x768): ~4.8 s |
+| 50 | 50 | 60 (1,2) | — |
+| 60 | 60.000 | 50 (drop regime: 1 frame in 6 never shown) | 59.94 / 59.95: a skipped frame every ~17–20 s |
+
+- **Every output of a node at the same rate.** Coupled pacing paces every output at the slowest CRTC, so a 59.94 output
+  next to 60.000 ones makes the 60 Hz ones repeat a vsync every ~17 s (DRMBackend says so at start, below). Until a
+  per-output engine exists this holds for the whole node, not only for overlapping outputs.
+- **The traps are the near misses**, because nothing announces them: "60" is 59.95 on every 1920x1200 CVT-RB mode
+  (Epson EB-L690: 1920x1200 **only** at 59.95; no 1080p25 on the EB-L690 / EB-815E) and 59.94 on many TVs.
+- **Pinning a rate**: `refresh=` per `[output:…]` in `/etc/cuems/display.conf` (the generator never writes it; see
+  cuems-common "display.conf authoring"), then restart the VC **and** `cuems-node-engine` with nothing loaded
+  (869f8jn34). `findMode` takes a progressive mode within 0.5 Hz of the pin, else the native progressive mode of that
+  size with an ERROR (the interlaced rules above), so a pin is a request, not a guarantee: read the journal.
+- **How visible a near miss is** (and so whether the layer-load line below is a WARNING or an INFO): **decided
+  from the 1amfwm7gpz7 eye test (Ion, 2026-11-10): `cadence::kNearIntegerWarnIntervalS = 60` s.** On panels a
+  single-vsync correction was seen every 4.8 s (Acer 59.79 Hz) and every 16.2 s (LG at 59.94 Hz, 30p); at 60.000 Hz
+  (one every few minutes) it was not. A projector at 59.95 Hz hid it because it re-times the signal, so the
+  59.94/59.95 class (the 1920x1200 "60" trap) is a WARNING. Record: cuems-RELATIONS
+  `baselines/test3-saltitos-20261104/RESULTS.md`, "D2 of 1amfwm7gq3y, measured".
+
+Journal lines (grep `cadence: cue=`, `not available at`, `near-equal refresh`):
+
+```
+cadence: cue=<id> file=<name> 30 fps on 60.000 Hz: ratio 2.0000 -> hold 2 (exact) [tick]                       INFO
+cadence: cue=<id> file=<name> 25 fps on 60.000 Hz: non-integer ratio 2.4000 -> 2,3 pulldown (a regular judder
+  by construction); exact would be 50.000 Hz [tick]                                                           WARNING
+cadence: cue=<id> file=<name> 29.97 fps on 60.000 Hz: near-integer ratio 2.0020 (the output runs 60.000 Hz, not
+  59.940): hold 2 with one single-vsync correction every ~17 s; use a 59.940 Hz mode or content at 30 fps (exact)
+                                                         WARNING below kNearIntegerWarnIntervalS, INFO above
+display: [output:HDMI-A-1] refresh=75.000 not available at 1920x1080: using 1920x1080@60.000 Hz; the sink offers
+  23.976, 24.000, 29.970, 30.000, 50.000, 59.934, 59.940, 60.000 Hz at that resolution (display.conf)       WARNING
+DRMBackend: near-equal refresh rates on enabled outputs (openWindow): HDMI-A-1=59.940Hz, HDMI-A-2=60.000Hz, …
+  -- one atomic commit paces them all at the slowest (59.940 Hz), so the faster outputs repeat one vsync every
+  ~17 s; give every output the same mode (same refresh= in display.conf)                                    WARNING
+```
+
+- **The layer-load line** (`cadence::advise`, `sync/CadenceAdvice.{h,cpp}`, a pure function; hooked in
+  `VideoComposerApplication::setupLayerWithInputSource` on every load path) is logged once per load, **before the
+  GO**, from the tick's period (`[tick]`) or, before the first render, the slowest enabled output's mode (`[output
+  mode]`). Live inputs (NDI) are skipped; an unknown fps logs `fps unknown: no cadence advice`. It changes nothing: the
+  cadence engine decides on its own at reveal. Exact = within 10 ppm (below the clocks' own drift). A standard content
+  rate is suggested only when it brings the corrections under the threshold (none helps on 59.79 Hz).
+- **`refresh= … not available`**: a pinned rate that differs from the chosen mode by more than 0.005 Hz (so `refresh=60`
+  on a 59.95-only sink is caught), from `setMode` and from `/videocomposer/output/mode`. It lists **progressive rates
+  only**: an interlaced mode's frame rate (1080i60 = 30) is not on offer to a bare `refresh=`. An interlaced mode that
+  was chosen (asked for with `refresh=60i`, or the only kind at that size) has its own line and never this one;
+  `refresh=60i` that ended on a progressive mode logs `refresh=60.000i not available … the sink offers … Hz
+  progressive` (`refreshPinNotHonoured`, `offeredRefreshRates` in `display/ModeSelect.h`).
+- **`harmonizeRefreshRates()`** (outputs without a pin) gives each output its matched mode's own rate and lists the
+  rates in its summary; it returns early when the free outputs already agree within 0.5 Hz, so with identical sinks
+  it logs nothing at INFO.
+
+## Per-output color (phase 3)
+
+Per-output trims and a 3D LUT, applied in the output blit pass on the DRM virtual canvas. The use is matching projectors and calibrating a device. Branch `feat/output-color`, not in a released deb yet. The contract part (`get_state.outputs[].color`, the `output_color` cap) is on `feat/output-color-contract`; see `docs/contract-v1.md` there. Plan `cuems-RELATIONS/Plans/2026-10-22-vc-output-colour-phase3.md`; ClickUp 1amfwm7eyq5. Code: `display/OutputColor.h`, `OutputColorConfig.h`, `CubeLut.*`, `OutputLutTexture.*`, `OutputBlitGlsl.h`, `ShowLock.h`, `remote/OutputColorCommands.*`, `DRMBackend::applyOutputColorFromConfig`.
+
+### `display.conf` keys
+
+There are six optional keys per `[output:<connector>]`, in any subset. Keys start at column 0 and there are no inline comments (see "Resolution control" above). Example:
+
+```
+[output:HDMI-A-2]
+canvas_region=3840,0,3840,2160
+color_brightness=0.02
+color_contrast=1.08
+color_hue=-3
+color_gamma=1.05
+color_lut=p2-christie.cube
+```
+
+| Key | Range | Identity | Meaning |
+|---|---|---|---|
+| `color_brightness` | −1 … 1 | 0 | added to R, G and B |
+| `color_contrast` | 0 … 2 | 1 | scaled around 0.5 |
+| `color_saturation` | 0 … 2 | 1 | 0 = grey (Rec.601 luma) |
+| `color_hue` | degrees | 0 | **folded** into −180 … 180 (540 → 180), never clamped |
+| `color_gamma` | 0.1 … 3 | 1 | `pow(x, 1/g)`: **g > 1 brightens** the mid-tones. A projector's "gamma 2.4" uses the opposite sign convention |
+| `color_lut` | path | none | 3D `.cube`, see below |
+
+- These are the same ranges and the same maths as the per-layer color trims. The order is brightness → contrast → saturation → hue → gamma, and `OutputColor::apply()` is the CPU reference.
+- **How the shaders compute them (rev 4).** Brightness, contrast, saturation and hue are affine with no clamp between them, so the CPU composes them into one matrix per draw: `rgb' = M · rgb + off` (`display/ColorMatrix.h`, `composeColorMatrix`). The shader then applies gamma (`pow`, skipped when `invGamma == 1`) and the clamp (`applyColorMatrix` in `ColorCorrectionGlsl.h`). Layers, the master and program B all use it: uniforms `uColorMatrix` (column-major `mat3`), `uColorOffset` and `uInvGamma`, with names shared by GLSL and C++. Against the old per-pixel chain, the linear part agrees within 1e-5 and the 8-bit output within one level. That level can appear near black with a strong gamma. The matrix costs much less GPU (K1c, 2026-10-27, N97 2×1080p60, GPU work vs no color): trims only ×1.64 → ×1.22, trims + 65³ LUT ×1.95 → ×1.45.
+- **HAP Q / HAP Q Alpha layers** (`HapShaders.h`) have no color uniforms: layer color does nothing on them (an old gap). Each HAP program logs its `Uniform '…' not found` WARNINGs once: the enable flag at its first draw, the three matrix uniforms at its first colored draw.
+- Values: surrounding whitespace and the `\r` of a CRLF file are stripped, one leading `+` is allowed, and numbers are read with `std::from_chars`, so the locale plays no part and `1,08` is refused.
+- **Out of range → clamped, with a WARNING**: `OutputColor: HDMI-A-2 color_contrast=2.5 in /run/cuems/display.conf: out of range (0 to 2) — using 2`.
+- **Unparsable or non-finite (`abc`, `nan`, `inf`, empty) → ERROR**, and the field keeps its default: `OutputColor: HDMI-A-2 color_gamma=1.05 # warm in /run/cuems/display.conf: not a finite number — ignored, color_gamma stays 1`. In both cases the rest of the file still loads. A typo never takes the canvas down.
+- Color is applied once at start, after the output regions are final, under **every** `canvas_layout`. `blend=`, by contrast, only reaches a region under `custom`. Each output with color logs one INFO line in `display.conf` syntax: `OutputColor: HDMI-A-2 color_contrast=1.08 color_gamma=1.05 color_lut=p2-christie.cube (ok, 33^3, parsed in 12 ms)`.
+- **Connector mismatch**: a section with color keys whose output is not connected gets nothing and says so (WARNING): `OutputColor: [output:HDMI-A-3] has color_* keys but no such output is connected — not applied (connected: HDMI-A-1)`. This bit on the first try on .111, where a monitor had moved from HDMI-A-3 to HDMI-A-1. `enabled=false` sections are skipped silently.
+- The VC reads **`/run/cuems/display.conf`**, the file `cuems-generate-display-conf` writes at every VC start. The log lines name that path, not `/etc`.
+
+### LUT files
+
+- **Format**: `.cube`, **3D only**, `LUT_3D_SIZE` 2–65 (33 is the recommended size).
+  - Optional header lines: `TITLE`, `DOMAIN_MIN r g b` / `DOMAIN_MAX r g b`, and `LUT_3D_INPUT_RANGE lo hi`. `LUT_3D_INPUT_RANGE` is Resolve's way of writing a uniform domain; if it contradicts `DOMAIN_*` the file is refused as an ambiguous domain.
+  - Also accepted: a UTF-8 BOM, CRLF, tabs, `#` comment lines and scientific notation.
+  - The data is exactly N³ lines of three numbers, red varying fastest.
+- **Refused**, with nothing applied and a reason that names the line:
+  - `LUT_1D_SIZE`, and any other keyword. For example `LUT_IN_VIDEO_RANGE` is refused, because a LUT must never be applied with a domain we do not implement;
+  - `DOMAIN_MAX ≤ DOMAIN_MIN`;
+  - a line with the wrong number of values, or a non-numeric or non-finite value;
+  - too few or too many data lines, or data before `LUT_3D_SIZE`.
+- Data values outside [0, 1] (HDR-authored LUTs) are clamped and counted, with one WARNING per file: `… data value(s) outside [0, 1] clamped (an HDR-authored LUT? the outputs are SDR)`.
+- **File safety**: the file is opened `O_NONBLOCK|O_CLOEXEC|O_NOCTTY`, then `fstat` is run on the descriptor.
+  - It must be a regular file. A FIFO, device or socket is refused before a byte is read.
+  - The size cap is 16 MiB; a 65³ file is about 6–10 MB.
+  - The table is uploaded as an `RGBA16F` 3D texture on texture unit 2, sampled on texel centres.
+- **Paths in `display.conf`** (`color_lut=`):
+  - a relative path resolves under **`/etc/cuems/luts/`**, so `p2.cube` and `site/p2.cube` both work;
+  - any `..` component is refused;
+  - an absolute path is used as written.
+- **Paths over OSC**: **bare names only**. No `/`, no `..` anywhere, and the name must end in `.cube`; it resolves to `/etc/cuems/luts/<name>`. The OSC port is unauthenticated UDP, so it never takes a path. A LUT in a subdirectory can therefore only be set from `display.conf`.
+- Files are mode 0644 and readable by `cuems`. The VC never writes there. They are site data: keep them with the site's `display.conf` in cuems-fleet.
+- **Failure**: an ERROR, and the output runs with its trims only: `OutputColor: HDMI-A-2 color_lut=p2.cube NOT APPLIED: /etc/cuems/luts/p2.cube: cannot open: No such file or directory — output runs with trims only`. `lut_status` is then `missing` or `invalid`.
+- Parse time: a 65³ file takes 80 ms on an N97, on the render thread, once per load.
+
+### Creating the override: copy first, then add keys
+
+A file with **only** color keys is wrong:
+- with no `canvas_region`, the engine's `read_display_conf()` raises `DisplayConfNotFoundError` and the node engine's project load fails;
+- the VC loses `canvas_layout=custom`.
+
+The VC warns about that shape: `OutputColor: [output:X] in … has color_* keys but no canvas_region — a color-only override breaks the engine's canvas and the custom layout. Copy /run/cuems/display.conf to /etc/cuems/display.conf while the videocomposer is running, then add the color_* keys to that copy`. The procedure:
+
+1. **While the VC is running**, run `cp /run/cuems/display.conf /etc/cuems/display.conf`. `/run/cuems` is the VC unit's `RuntimeDirectory=cuems`, and systemd removes it when the service stops, so a stopped VC leaves nothing to copy.
+2. Add the `color_*` lines under the right `[output:…]` sections.
+3. With **no project loaded**, restart the VC (`systemctl restart cuems-videocomposer`).
+4. Grep the journal for `OutputColor:`.
+5. Reload the project. The engine does not notice a VC restart (869f8jn34).
+
+**The freeze cost.** Once `/etc/cuems/display.conf` exists, `cuems-generate-display-conf` copies it verbatim and **no longer reads `default_mappings.xml`**. Any output added or remapped later (in the XML or with `cuems-display-setup --update-mappings`) is ignored until the override is edited or removed. Record the override in cuems-fleet.
+
+### Where it sits: trims → LUT → blend ramp
+
+- The blit pass computes canvas color → the five trims → the LUT → the edge-blend ramp. The ramp code (`smoothstep` + `pow(alpha, gamma)`) is unchanged.
+- The trims come before the LUT: the LUT is the device characterisation, and the trims are the on-site adjustment on top of it.
+- The ramp multiplies the **corrected** color, so an overlap of outputs A and B shows `T_A(c)·w_A + T_B(c)·w_B`.
+- **Offsets double in the overlap.** Anything a transform adds to black (`color_brightness > 0`, or a LUT that lifts black) is multiplied by both ramps and summed, so black in the overlap is lifted twice. This is inherent to edge blending. There is no black-level compensation of the non-overlap zone yet.
+- **The canvas is 8-bit** (`VirtualCanvas` is `GL_RGBA8`). Layer trims run on the decoded texture, and output trims run on the already-quantised canvas. The same numbers give the same picture **up to 8-bit rounding**, but a strong contrast or gamma on an output amplifies banding that the same trim on a layer would not. Use output color for matching devices, and layer color for grading.
+
+### Two blit programs and the one-shot draw check
+
+- **Program A** is the original blit. Its text is byte-identical to `rc_1`, pinned by `OutputBlitShader_ProgramATextUnchanged`. It draws every output **without** color, so an output with no color runs exactly the code it ran before.
+- **Program B** is A plus the layer's color GLSL (`ColorCorrectionGlsl.h`, shared with `VideoShaders.h`: the matrix uniforms and `applyColorMatrix`) and a `sampler3D` LUT. When no LUT is loaded, a 1×1×1 placeholder texture is bound. B is used for an output with active trims or a loaded LUT.
+- If B fails to compile or link, init logs an ERROR: `OutputBlitShader: color program unavailable (<reason>) — every output runs without color`. Each configured output then logs `OutputColor: <conn> color configured but the color program is unavailable — running without color`. The outputs run on A and the canvas layout is kept. After linking, every uniform B uses must have a location. A missing one would be a silent no-op (a zero matrix gives a black output), so B is then not used: `OutputBlitShader: color program unavailable (uniform not found: uColorMatrix) — every output runs without color`. On success: `OutputBlitShader: Color program compiled and linked`.
+- **One-shot draw check.** The first B draw on each output after each color change is bracketed by `glGetError()`. A program can link and still fail every draw: two sampler types on one texture unit, for example, would give a black output. On an error the line is `OutputColor: <conn> color program draw failed (GL 0x0502) — this output runs without color`, and that output goes back to A until its next color change. It reports `applied=no`.
+- Build check: `tools/dump_blit_glsl` writes the A/B text, plus the four layer fragments, the layer vertex shader and the master shaders (which share B's color text since rev 4). `glslangValidator` validates them all as part of `ALL` when it is installed. If it is not installed you get a CMake WARNING; `-DVC_REQUIRE_GLSLANG=ON` makes that fatal.
+- B's first real compile was on i915, on .111 on 2026-10-22. Mesa on i915 prints an informational `FINISHME … CCS for 3D textures` line, which is harmless.
+
+### OSC: `/videocomposer/display/color`
+
+```
+/videocomposer/display/color <connector> brightness|contrast|saturation|hue|gamma <value>
+/videocomposer/display/color <connector> lut <name.cube>
+/videocomposer/display/color <connector> lut none
+/videocomposer/display/color <connector> reset
+/videocomposer/display/color <connector> dump
+/videocomposer/display/color dump
+```
+
+`lut none` clears only the LUT and keeps the trims. `reset` sets the five trims to identity and clears the LUT. Both `dump` forms are read-only; the one without a connector covers every output.
+
+e.g. `oscsend localhost 7000 /videocomposer/display/color ssf HDMI-A-1 brightness 0.25`
+
+- Values follow the `display.conf` rules.
+  - Out of range: WARNING, applied clamped: `display/color: HDMI-A-1 contrast=5 out of range (0 to 2) — using 2`.
+  - Non-finite: WARNING, nothing changed: `display/color: HDMI-A-1 gamma 'abc' is not a finite number — nothing changed`.
+  - Unknown connector: WARNING `display/color: Unknown output 'HDMI-A-3' (outputs: HDMI-A-1)`.
+  - Backend without the virtual canvas (legacy X11/Wayland, headless, DRM legacy mode): ERROR `display/color: per-output color is not supported by this display backend`.
+- **OSC changes are volatile.** The VC runs as `cuems` under `ProtectSystem=full` and cannot write `/etc/cuems`. Every change therefore logs the output's **paste-ready** line: `OutputColor: HDMI-A-1 color_brightness=0.25 (applied live — volatile: paste into /etc/cuems/display.conf to keep it)`. Persisting means pasting those keys into the override, at column 0. After a `reset` the line says `identity, no color_* keys (… remove this output's color_* keys …)`.
+- `lut`:
+  - on success: `OutputColor: HDMI-A-1 color_lut=p2.cube loaded (ok, 33^3, parsed in 12 ms)`, then the paste-ready line;
+  - **a failed change keeps the previous LUT** (ERROR): `OutputColor: HDMI-A-1 color_lut=p3.cube NOT APPLIED: /etc/cuems/luts/p3.cube: <reason> — previous LUT p2.cube kept`;
+  - a name with a path (WARNING): `display/color: HDMI-A-1 lut '../x.cube' REFUSED: LUT name must be a bare file name ending in .cube (no '/', no '..'), under /etc/cuems/luts — nothing changed`.
+- `dump` logs one line per output: `OutputColor: HDMI-A-1 color_lut=smoke-red.cube (dump: lut_status=ok applied=yes)`. It repeats the `NOT APPLIED` ERROR for a LUT that is `missing`/`invalid`, and the `color configured but not on screen` ERROR when `applied=no`.
+- Applied hot, on the render thread between frames, with no FBO reallocation, so sliding a value at 10 Hz is cheap. A LUT change parses on the render thread (up to 80 ms once, for 65³). That is acceptable only because the show lock (below) already restricts it to "no project loaded".
+- **Per-output color survives `/videocomposer/reset`.** `resetAll()` clears the layers and the master properties (master color included) but never touches the output regions. So per-output color survives a project load/unload/STOP, and master color does not.
+- It also survives `display/blend`, `display/region` and `display/mode`. `DRMBackend::outputRegions_` is the single owner of color, and every renderer rebuild copies it wholesale. This was checked on .111: a color set over OSC, then a `display/blend`, kept its color.
+- `display/save` writes `~/.config/cuems-videocomposer/display.conf` (XDG), which nothing reads. It carries the color loaded at start, not OSC changes. `display/load` re-applies only the resolution policy, never color, regions or blend.
+- Wire strings (connector, parameter, LUT name) are sanitised before logging: printable ASCII only, anything else becomes `?`.
+- There is no reply on the wire; the journal is the answer. The engine's ossia tree does not mirror `display/color`.
+
+### Show lock: display commands refused while a project is loaded
+
+Until the VC has an edit mode, these handlers refuse while **`/tmp/cuems.show.lock`** exists. The check is in the handler (`display/ShowLock.h`), before any backend call, so a refusal is never logged as `Unknown output`. The gated commands:
+- `display/color` (every form except `dump`);
+- `display/blend`, `display/region`, `display/mode`;
+- `display/resolution_mode` (its no-argument help form still answers);
+- `display/load`.
+
+Anything at that path counts, including a dangling symlink. A stat error other than "does not exist" also refuses. Nothing changes on screen. The refusal is a WARNING:
+
+```
+display/blend REFUSED: /tmp/cuems.show.lock exists — a project is loaded, or the lock was left by an engine older than cuems-engine 0.1.0rc6-6 or by a crashed engine; unload the project (engine ≥ rc6-6) or stop the engines, then retry; color is also applied from display.conf at the next start
+```
+
+- **Not gated**: `display/color … dump`, `output/list`, `display/list`, `display/modes`, `display/save`, and `display/assign` (a log-only no-op).
+- **Behaviour change**: `display/blend`, `region`, `mode`, `resolution_mode` and `load` were not gated before this branch.
+- **Prerequisite: cuems-engine ≥ 0.1.0rc6-6 on every box of the cluster.** On ≤ rc6-5 an unload does not remove the lock; only stopping the engines does. Every gated command is then refused from the first load until the engines stop.
+- On a controller the lock is the union of both engines: either engine writes it on load, and both remove it on unload.
+- A crashed engine leaves a stale lock, which reads as loaded.
+- An OSC command sent while the VC is still starting is buffered and applied when the main loop starts.
+
+### `output/list` and the journal
+
+- `output/list` adds one line per output, **after** the `region` lines (which are unchanged, because the power-bridge NDI preview parses them): `output_color HDMI-A-1 color_lut=smoke-red.cube lut_status=ok applied=yes`.
+  - `lut_status` is `none|ok|missing|invalid`.
+  - `applied=no` means the color program is unavailable or this output's first draw failed.
+  - The line never starts with `region`; `OutputList_ColorLineNeverMatchesRegionRegex` pins that.
+  - It is informational, not a journal contract.
+- Grep: `journalctl -u cuems-videocomposer | grep -E 'OutputColor|OutputBlitShader|REFUSED'`.
+  - At start, per configured output: `OutputColor: <conn> <keys> (ok, N^3, parsed in M ms)`.
+  - The ERRORs and WARNINGs quoted above.
+  - DRM in legacy mode: `OutputColor: <conn> color configured but this display backend has no per-output color (DRM legacy mode, no virtual canvas) — running without color`.
+  - DRM failed to open (headless fallback): `… color configured but the DRM backend failed to open (the headless fallback has no per-output color) — running without color`.
+- An older VC ignores the color keys silently (unknown keys). On such a VC there are no `OutputColor:` lines.
 
 ## Branch layout (after 2026-07-02 cleanup)
 
@@ -100,6 +419,7 @@ The patch lives in `cpp/display/drm/DRMBackend.cpp` (`openWindow`/`initializeVir
 
 ## Field notes / gotchas
 
+- **A software-decoded layer is primed at load (1amfwm7hk6j).** Software decodes (ProRes, any codec without VAAPI) have no background decoder, so the first follow poll used to seek, fill FFmpeg's frame-thread pipeline, set up the scaler and convert on the **render thread** (test3, 1080p ProRes: a 373 ms stall, reveal at content 367 ms, every layer of the node frozen meanwhile). `AsyncVideoLoader::createInputSourceAsync` now calls `VideoFileInput::primeSoftwareDecode()` after a successful `open()`: `readFrame(0)` once on the loader worker, keeping the decoded frame (`frame_`, ~8 MB at 1080p 4:2:2 10-bit, ~33 MB at 4K, per loaded software layer, D2), so the first poll takes the same-frame early return (one `sws_scale`) and frames 1, 2, … are sequential. Journal: `AsyncVideoLoader: primed frame 0 of '<file>' in <ms> ms`; the existing `Loaded … in <ms>ms` includes it. A failed prime logs one WARNING `priming frame 0 failed for <file>` and resets `currentFrame_`, `lastDecodedPTS_`/`lastDecodedFrameNo_` and flushes the codec (`seek()` had already set `currentFrame_`, which would make the next `readFrame(0)` skip its seek); the load still succeeds and the first poll decodes as before. Not primed: hardware (async queue), index-only opens, HAP, NDI. A cue that starts elsewhere than frame 0 pays one wasted decode at load. Frames after 0 still decode on the render thread (out of scope; options 2/3 of the plan). Tests: `test/TestPrimeDecode.cpp` (prores_ks via ffmpeg; `demuxSeekCount()` counts demuxer seeks; `failNextPrimeForTesting()` exists only in the test build, `CUEMS_VC_TESTING`). Plan `cuems-RELATIONS/Plans/2026-11-11-vc-prime-software-decode-at-load.md`.
 - **A layer can claim hardware decode and run on the CPU — defect 6(b) (FIXED, `feat/g8-truth-in-reporting` `5e3b753`).** `AsyncDecodeQueue::isHardwareDecoding()` answers from `useHardware_`, which `open()` sets from *"a VAAPI device attached and the codec is whitelisted"* — a statement of **intent**, decided before any frame exists. A **4:2:2 8-bit** clip satisfies every one of those conditions and FFmpeg then decodes it on the CPU regardless, so the layer reported `Health::ok` **and hardware** while the GPU's decode engine sat at zero. Pre-existing, not an F2 regression.
   The truthful signal was already being computed and thrown away: the decode thread compares `decodeFrame_->format == AV_PIX_FMT_VAAPI` at two sites and simply took the other branch when they disagreed. `noteDecodedFormat()` now latches that on the **first decoded frame of each `open()`** (so a recovery reopen re-arms it — a reopen can land on a different path), logs it once at **ERROR** naming the real pixel format, and `VideoFileInput::getHealth()` **derives** `sw_fallback` from it.
   Three things to know before touching this:
@@ -147,3 +467,4 @@ The patch lives in `cpp/display/drm/DRMBackend.cpp` (`openWindow`/`initializeVir
   - On test2 (`cuems-RELATIONS/baselines/869f8j1ja/`), `/layer/remove 2dead000-…_0` for a cue that was never loaded **silently deleted the live layer 2** mid-play.
   - An unresolved name is now ignored and reported through `RemoteCommandRouter::reportUnknownLayer`, at WARNING on miss 1, 10, 100… and VERBOSE otherwise. A successful `/layer/remove` logs at INFO.
   - What still produces stale cue ids in practice is a videocomposer restart mid-show, which the engine does not detect (869f8jn34).
+- **An integer layer `/offset` is an engine time and is day-aligned (1amfwm7fbqy).** `/videocomposer/layer/<id>/offset <int>` is read as −start in 25 fps MTC frames of the *engine's* 24h-extended MTC day and converted into this process's day (`sync/DayAlign.h`, nearest whole day, 12 h rule) before use; it waits, not shown, until the mtcreceiver head is authoritative. A test tool that hand-sends small absolute frame numbers past 12 h of head gets them realigned by a day: send hand-made offsets as an SMPTE string (`"hh:mm:ss:ff"`), which is not day-aligned. Journal: `MTC day-align: on|off …` at start, `MTC day realign k=…` once per k.

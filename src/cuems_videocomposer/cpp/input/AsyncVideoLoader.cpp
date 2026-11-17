@@ -340,7 +340,19 @@ std::unique_ptr<InputSource> AsyncVideoLoader::createInputSourceAsync(const std:
         LOG_ERROR << "AsyncVideoLoader: Failed to open " << filepath;
         return nullptr;
     }
-    
+
+    // 1amfwm7hk6j: a software decode has no background decoder, so decode its
+    // frame 0 here, on this worker, instead of on the render thread at the first
+    // follow poll (seek + pipeline fill + scaler setup: a 373 ms render-thread
+    // stall on 1080p ProRes, test3 2026-11-11). Hardware inputs return
+    // NotApplicable. A failure is logged by the input and the load succeeds.
+    const auto primeStart = std::chrono::steady_clock::now();
+    if (videoInput->primeSoftwareDecode() == VideoFileInput::PrimeResult::Primed) {
+        const auto primeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - primeStart).count();
+        LOG_INFO << "AsyncVideoLoader: primed frame 0 of '" << filepath << "' in " << primeMs << " ms";
+    }
+
     return videoInput;
 }
 

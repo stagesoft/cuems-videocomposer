@@ -104,6 +104,7 @@ bool OSCRemoteControl::initialize(int port) {
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/position", "ff", handleOSCMessage, userData_);  // Float position (smooth)
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/opacity", "f", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/visible", "i", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/visible_at", "i", handleOSCMessage, userData_);  // 869feynrj
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/zorder", "i", handleOSCMessage, userData_);
     
     // New file loading commands
@@ -116,6 +117,9 @@ bool OSCRemoteControl::initialize(int port) {
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/autounload", "i", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop", "i", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop", "ii", handleOSCMessage, userData_);
+    // The engine's loop period (869ejxng3): num den frames, or num den (own count)
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/period", "iii", handleOSCMessage, userData_);
+    lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/period", "ii", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/region", "ii", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/region", "iii", handleOSCMessage, userData_);
     lo_server_add_method(oscServer_, "/videocomposer/layer/*/loop/region/disable", "", handleOSCMessage, userData_);

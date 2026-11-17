@@ -29,6 +29,7 @@
 #include "../guard/SaturationSignals.h"
 #include "../utils/ExitReporter.h"
 #include "../utils/Logger.h"
+#include <algorithm>
 #include <chrono>
 
 extern "C" {
@@ -363,8 +364,9 @@ AVFrame* AsyncDecodeQueue::borrowFrame(AVFrame* src) {
     return borrowedFrame_;
 }
 
-AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
+AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame, int maxWaitMs) {
     std::unique_lock<std::mutex> lock(queueMutex_);
+    returnedFrame = -1;
 
     // Update target so decode thread knows what we need
     targetFrame_ = frameNumber;
@@ -373,7 +375,9 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
     int64_t tf = totalFrames_.load();
     for (auto& qf : frameQueue_) {
         if (qf.frameNumber == frameNumber && qf.ready) {
-            return borrowFrame(qf.frame);
+            AVFrame* hit = borrowFrame(qf.frame);
+            returnedFrame = hit ? frameNumber : -1;
+            return hit;
         }
     }
 
@@ -382,7 +386,9 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
         int64_t virtualNum = tf + frameNumber;
         for (auto& qf : frameQueue_) {
             if (qf.frameNumber == virtualNum && qf.ready) {
-                return borrowFrame(qf.frame);
+                AVFrame* hit = borrowFrame(qf.frame);
+                returnedFrame = hit ? frameNumber : -1;
+                return hit;
             }
         }
     }
@@ -401,7 +407,9 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
             // Check again (exact match)
             for (auto& qf : frameQueue_) {
                 if (qf.frameNumber == frameNumber && qf.ready) {
-                    return borrowFrame(qf.frame);
+                    AVFrame* hit = borrowFrame(qf.frame);
+                    returnedFrame = hit ? frameNumber : -1;
+                    return hit;
                 }
             }
             // Also check virtual match
@@ -409,7 +417,9 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
                 int64_t virtualNum = tf + frameNumber;
                 for (auto& qf : frameQueue_) {
                     if (qf.frameNumber == virtualNum && qf.ready) {
-                        return borrowFrame(qf.frame);
+                        AVFrame* hit = borrowFrame(qf.frame);
+                        returnedFrame = hit ? frameNumber : -1;
+                        return hit;
                     }
                 }
             }
@@ -418,6 +428,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
 
     // Frame not available - return closest earlier frame if available
     AVFrame* closest = nullptr;
+    int64_t closestNumber = -1;
     int64_t closestDiff = INT64_MAX;
 
     for (auto& qf : frameQueue_) {
@@ -426,11 +437,18 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int maxWaitMs) {
             if (diff < closestDiff) {
                 closestDiff = diff;
                 closest = qf.frame;
+                closestNumber = qf.frameNumber;
             }
         }
     }
 
-    return borrowFrame(closest);
+    // Report what is returned, not what was asked for (1amfwm7hk6j): a virtual
+    // (loop pre-buffer) entry is totalFrames_ + its real frame number.
+    AVFrame* borrowed = borrowFrame(closest);
+    if (borrowed) {
+        returnedFrame = (tf > 0 && closestNumber >= tf) ? closestNumber - tf : closestNumber;
+    }
+    return borrowed;
 }
 
 void AsyncDecodeQueue::seek(int64_t frameNumber) {

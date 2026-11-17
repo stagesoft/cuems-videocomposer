@@ -24,10 +24,13 @@
 
 #include "../input/InputSource.h"
 #include "../sync/SyncSource.h"
+#include "../sync/DayAlign.h"
+#include "LoopPeriod.h"
 #include "../video/FrameBuffer.h"
 #include "../video/GPUTextureFrameBuffer.h"
 #include <memory>
 #include <cstdint>
+#include <string>
 
 namespace videocomposer {
 
@@ -65,7 +68,7 @@ public:
     // Shared decoder flags
     bool isSharedLayer() const { return isSharedLayer_; }
     bool isDecodeDriver() const { return isDecodeDriver_; }
-    void setDecodeDriver(bool v) { isDecodeDriver_ = v; }
+    void setDecodeDriver(bool v);
 
     // Playback control
     bool play();
@@ -94,14 +97,43 @@ public:
     FrameInfo getFrameInfo() const;
     
     // Time-scaling (applied to sync source frames)
-    void setTimeOffset(int64_t offset) { timeOffset_ = offset; }
+    // Any writer here replaces a pending engine offset (latest wins).
+    void setTimeOffset(int64_t offset) { timeOffset_ = offset; engineOffset_.clear(); }
     int64_t getTimeOffset() const { return timeOffset_; }
+
+    // The engine's integer /offset (25 fps MTC frames in the ENGINE's MTC
+    // day). Held until the MTC head is authoritative, then converted into
+    // this process's day (DayAlign.h) and applied once; until then the layer
+    // does not follow MTC. `tag` names the layer in the log lines.
+    void setEngineTimeOffset(int64_t rawFrames, const std::string& tag);
+    bool hasPendingEngineOffset() const { return engineOffset_.pending(); }
+    const dayalign::EngineOffsetLatch& engineOffsetState() const { return engineOffset_; }
     
     void setTimeScale(double scale) { timeScale_ = scale; }
     double getTimeScale() const { return timeScale_; }
     
     void setWraparound(bool enabled) { wraparound_ = enabled; }
     bool getWraparound() const { return wraparound_; }
+
+    // The engine's loop period (869ejxng3 section 4.4, /loop/period):
+    // P = num / den s, `frames` = the engine's frame count of the video
+    // stream (0 = not sent: this source's own count is used, J12). While
+    // wraparound is on and a period is set, the layer wraps on P (the audio
+    // player's period) instead of totalFrames, counts its passes and holds
+    // the last frame after a finite loop's last pass. Idempotent: the engine
+    // re-sends it every pass. num = den = 0 clears it, as do /loop 0, a new
+    // load and a reset. `tag` names the layer in the log lines.
+    void setLoopPeriod(int64_t num, int64_t den, int64_t frames, const std::string& tag);
+    void clearLoopPeriod();
+    bool hasLoopPeriod() const { return loopPeriod_.valid(); }
+    // The period path's decision for the current position: draw nothing (a
+    // tail beyond HOLD_TAIL_MAX_MS, or the end of a finite loop after one;
+    // D15, R2). VideoLayer bridges it into LayerProperties::tailBlank.
+    bool tailBlank() const { return tailBlank_; }
+    const loopperiod::Period& getLoopPeriod() const { return loopPeriod_; }
+    // Passes of a full-file loop (/loop 1 <passes>); <= 0 = forever.
+    void setLoopPasses(int passes) { loopPasses_ = passes; }
+    int getLoopPasses() const { return loopPasses_; }
     
     // MTC follow control (enable/disable MTC following for this layer).
     // No effect on a live source (NDI): it always shows its newest frame.
@@ -115,13 +147,45 @@ public:
     // Returns true if playback has ended, false otherwise
     bool checkPlaybackEnd() const;
 
+    // visible_at (869feynrj): this update's poll gave a raw content frame
+    // (offset applied, before the loop period and the clamp) >= 0, and the
+    // frame it chose is the one whose pixels are in the buffer.
+    // contentFrame() = that raw frame; hasContentFrame(): this update had an
+    // MTC position at all (following, MTC frame, offset placed).
+    bool contentStarted() const { return contentStarted_; }
+    int64_t contentFrame() const { return contentFrame_; }
+    bool hasContentFrame() const { return contentFrame_ != INT64_MIN; }
+
+    // CPU upload identity (1amfwm7hg3u, display/CpuUploadPolicy.h). sourceGeneration moves on every
+    // setInputSource; frameGeneration on every successful frame load, and for a shared secondary also on
+    // every frame its driver caches (its buffer is a view of the driver's, rewritten in place).
+    uint64_t sourceGeneration() const { return sourceGeneration_; }
+    uint64_t frameGeneration() const;
+    uint64_t incarnation() const { return incarnation_; }  // process-unique per object
+
 private:
     std::shared_ptr<InputSource> inputSource_;
     std::shared_ptr<SyncSource> syncSource_;
 
     // Shared decoder flags (NOT derived from use_count — explicit)
     bool isSharedLayer_ = false;   // true when sharing an InputSource with other layers
+    int  phaseMismatchPolls_ = 0;  // a shared secondary whose offset phase differs from its driver's (1amfwm7h924)
     bool isDecodeDriver_ = false;  // true when this layer drives decode (calls readFrame/readFrameToTexture)
+
+    // Start probe (1amfwm7h924): once per engine offset, from the first vsync whose frame reaches the cue's start,
+    // how far the shown frame is behind where the start puts the clock, averaged over 60 vsyncs; one INFO line.
+    // Only with VIDEOCOMPOSER_CADENCE_STATS=1.
+    // Re-arms when the offset value changes (a re-sent identical offset is not measured again); with an engine
+    // before rc6-7, which re-sends the offset on every loop pass, that is one line per pass.
+    void startProbe(int64_t frame, class FramerateConverterSyncSource* c, double srcFps, double fps);
+    void resetStartProbe();
+    int     startProbeSkipped_ = 0;
+    double  startProbeLastClock_ = 0.0;
+    int64_t startProbeOffset_ = 0;
+    bool    startProbeArmed_ = false;
+    int     startProbeN_ = 0;
+    int64_t startProbeFirst_ = 0;
+    double  startProbeClock0_ = 0.0, startProbeSum_ = 0.0, startProbeMin_ = 0.0, startProbeMax_ = 0.0;
     int hwMissLogCount_ = 0;       // per-layer throttle for hardware queue-miss warnings
     
     // Playback state
@@ -130,6 +194,7 @@ private:
     int64_t lastSyncFrame_;
     int64_t liveFrames_ = 0;  // Frames delivered by a live source (no timeline)
     int64_t timeOffset_;  // Time offset applied to sync frames
+    dayalign::EngineOffsetLatch engineOffset_;  // engine /offset not yet day-aligned
     double timeScale_;    // Time multiplier (default: 1.0)
     bool wraparound_;     // Enable wrap-around/loop (seeks to 0 when playback ends)
     bool mtcFollow_;      // Enable/disable MTC following. Default FALSE: a layer
@@ -152,15 +217,46 @@ private:
     GPUTextureFrameBuffer gpuFrameBuffer_;
     bool frameOnGPU_;     // True if current frame is in GPU buffer
     
+    // Loop period state (869ejxng3 section 4.4)
+    loopperiod::Period loopPeriod_;
+    int loopPasses_ = -1;
+    std::string loopTag_;
+    bool loopLogged_ = false;          // the load line (both counts, the tail) is out
+    bool loopMismatchLogged_ = false;  // ERROR once: engine and own count > 2 apart
+    bool loopCutLogged_ = false;       // once: a period shorter than the video (INFO/ERROR)
+    bool tailBlank_ = false;           // the current position is in a tail not drawn
+    bool loopNoFramesLogged_ = false;  // WARNING once: no frame count at all
+    bool loopEndLogged_ = false;       // INFO once: a finite loop ended
+    int64_t loopLastPass_ = -2;        // last pass seen (pass-boundary lines)
+    bool contentStarted_ = false;      // visible_at gate (869feynrj)
+    uint64_t sourceGeneration_ = 0;    // CPU upload identity (1amfwm7hg3u): setInputSource
+    uint64_t loadGeneration_ = 0;      // CPU upload identity (1amfwm7hg3u): successful frame loads
+    // The driver-cache term of frameGeneration() while a shared secondary: the cache generation counted
+    // from cacheAttach_, plus cacheBase_, what earlier secondary periods counted. Folded into cacheBase_
+    // whenever the role or the source changes, so the sum never goes back (review, 1amfwm7hg3u).
+    uint64_t cacheBase_ = 0;
+    uint64_t cacheAttach_ = 0;
+    static uint64_t nextIncarnation();
+    uint64_t incarnation_ = nextIncarnation();  // CPU upload identity: unique per LayerPlayback in the process
+    bool readsDriverCache() const { return isSharedLayer_ && !isDecodeDriver_ && inputSource_ != nullptr; }
+    void foldDriverCache();            // before a role/source change
+    void attachDriverCache();          // after it
+    int64_t contentFrame_ = INT64_MIN;
+
     // Internal methods
     void updateFromSyncSource();
+    // The period's shown frame for `adjustedFrame`; false when the period
+    // cannot be applied (no rate, no frame count): the totalFrames wrap then.
+    bool applyLoopPeriod(int64_t& adjustedFrame, int64_t syncFrame);
+    void resolveEngineOffset();  // day-align a pending engine offset (main loop)
 
     /**
      * True when this layer's input decodes on the GPU, so a failed load means
      * "the decode queue had nothing this vsync" rather than "decoding failed".
      */
     bool isHardwareDecodeLayer() const;
-    bool loadFrame(int64_t frameNumber);
+    bool loadFrame(int64_t frameNumber);       // loadFrameInto + the load generation
+    bool loadFrameInto(int64_t frameNumber);
     bool copyFromDriverCache(int64_t frameNumber);  // For shared secondary layers
 };
 

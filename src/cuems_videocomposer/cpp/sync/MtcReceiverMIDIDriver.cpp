@@ -24,6 +24,7 @@
  */
 
 #include "MtcReceiverMIDIDriver.h"
+#include "DayAlign.h"
 #include "../utils/Logger.h"
 #include <cmath>
 #include <algorithm>
@@ -80,6 +81,7 @@ bool MtcReceiverMIDIDriver::open(const std::string& portId) {
             mtcReceiver_->setNetworkMode(true);
 
             errorFlag = false;
+            dayalign::mtcReceiverDrivers().fetch_add(1);  // engine offsets day-align on its head
 
             // mtcreceiver constructor opens port 0 automatically
             LOG_INFO << "MTC: mtcreceiver initialized successfully, port opened";
@@ -115,6 +117,7 @@ void MtcReceiverMIDIDriver::close() {
     
     if (mtcReceiver_) {
         mtcReceiver_.reset();
+        dayalign::mtcReceiverDrivers().fetch_sub(1);
         if (verbose_) {
             LOG_INFO << "MTC: mtcreceiver closed";
         }
