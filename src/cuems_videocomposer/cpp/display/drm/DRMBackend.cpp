@@ -1317,10 +1317,14 @@ bool DRMBackend::getCanvasSize(int& width, int& height) const {
         driven.push_back(canvas::Driven{
             region.name, canvas::Rect{region.canvasX, region.canvasY, region.canvasWidth, region.canvasHeight}});
     }
-    const canvas::Size wanted = canvas::wantedCanvas(declaredLayout_ ? &*declaredLayout_ : nullptr, driven);
-    width = wanted.width;
-    height = wanted.height;
-    return wanted.valid();
+    // The same choice as the renderer's, with an allocation that always succeeds: a declared canvas past the
+    // GPU's limit reports the driven size here too (change review of 2026-11-17)
+    const int limit = multiRenderer_ ? multiRenderer_->canvasSizeLimit() : 0;
+    const canvas::CanvasChoice choice = canvas::canvasToConfigure(
+        declaredLayout_ ? &*declaredLayout_ : nullptr, driven, limit, [](int, int) { return true; });
+    width = choice.size.width;
+    height = choice.size.height;
+    return choice.size.valid();
 }
 
 size_t DRMBackend::getOutputCount() const {

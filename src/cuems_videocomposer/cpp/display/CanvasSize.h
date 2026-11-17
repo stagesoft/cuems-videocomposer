@@ -526,8 +526,8 @@ inline std::vector<LayoutNote> layoutNotes(const DeclaredFile& file, bool custom
             const bool drivenHere = isDriven(s.name);
             if (s.plain && !drivenHere) {
                 warn("W1", "[output:" + s.name + "] canvas_region=" + toString(s.region) + " is listed but no output " +
-                               "is driven on " + s.name + " (not connected, or no surface): it stays in the canvas, " +
-                               toString(canvas) + " as the engine's, and its region stays dark");
+                               "is driven on " + s.name + " (not connected, or no surface): it is counted in the declared " +
+                               "canvas, " + toString(canvas) + " as the engine's, and its region stays dark");
             } else if (!s.plain) {
                 warn("W2", "[output:" + s.name + "] is not written in the plain form (" + s.notPlainBecause +
                                "): the engine may read it differently. It is " +
