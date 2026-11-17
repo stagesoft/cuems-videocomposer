@@ -30,6 +30,10 @@ using namespace videocomposer;
 using namespace videocomposer::test;
 
 // Mock InputSource for testing
+// Each test file has its own MockInputSource: keep it file-local, or the
+// three definitions collide (ODR) and Debug/ASan builds destroy the wrong type.
+namespace {
+
 class MockInputSource : public InputSource {
 public:
     bool open(const std::string& source) override { return true; }
@@ -62,6 +66,8 @@ public:
     mutable int64_t lastSeekFrame_ = -1;  // Make mutable to allow modification in const contexts
     mutable int64_t lastReadFrame_ = -1;
 };
+
+}  // namespace
 
 // Mock SyncSource for testing
 class MockSyncSource : public SyncSource {
