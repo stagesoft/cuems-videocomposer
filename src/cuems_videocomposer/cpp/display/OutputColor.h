@@ -26,6 +26,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -126,6 +127,33 @@ inline float foldHue(float hue) {
     if (h > 180.0) h -= 360.0;
     else if (h < -180.0) h += 360.0;
     return static_cast<float>(h);
+}
+
+/**
+ * One hue argument of /videocomposer/layer/<id>/hue or /videocomposer/master/hue to the
+ * angle the handler stores (1amfwm7eyq5). A finite value is folded into [-180, 180] in
+ * constant time, with the result the handlers' loop gave wherever that loop was exact
+ * (|h| < 2^27): a value already inside the range comes back untouched, -0 included, and a
+ * multiple of 360 gives +0, as the loop's own subtraction did.
+ *
+ * The argument is still read as the handlers read it today, with std::atof: a leading
+ * number is taken and the rest ignored, text and an empty string are 0, and "inf" and
+ * "nan" are accepted and returned as they are. The rows that ask for a refusal fail on
+ * this; the next commit makes it strict.
+ */
+inline bool parseHueDegrees(std::string_view text, float& out) {
+    const float value = static_cast<float>(std::atof(std::string(text).c_str()));
+    if (!std::isfinite(value)) {
+        out = value;
+        return true;
+    }
+    if (value >= -180.0f && value <= 180.0f) {
+        out = value;
+        return true;
+    }
+    const float folded = foldHue(value);
+    out = (folded == 0.0f) ? 0.0f : folded;
+    return true;
 }
 
 /**

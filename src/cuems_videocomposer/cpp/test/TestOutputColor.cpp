@@ -44,7 +44,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <random>
@@ -401,6 +403,166 @@ bool test_OutputColor_HueFoldNeverLoops() {
     float v = 0.0f;
     TEST_ASSERT_FALSE(parseFiniteFloat("inf", v));
     TEST_ASSERT_FALSE(parseFiniteFloat("NaN", v));
+    return true;
+}
+
+// ---- The hue argument of /layer/<id>/hue and /master/hue (1amfwm7eyq5) ----
+
+namespace {
+
+// An OSC float argument as OSCRemoteControl::convertOSCArgs hands it to the handlers
+std::string oscFloatText(float f) {
+    std::ostringstream oss;
+    oss << f;
+    return oss.str();
+}
+
+// The handlers' loop, with a cap: a wrong input fails the row instead of hanging the suite.
+// 2^27 / 360 is under 373 000 steps, the longest run the rows below ask for.
+bool oldHueLoop(float hue, float& out) {
+    int steps = 0;
+    while (hue > 180.0f) {
+        hue -= 360.0f;
+        if (++steps > 500000) return false;
+    }
+    while (hue < -180.0f) {
+        hue += 360.0f;
+        if (++steps > 500000) return false;
+    }
+    out = hue;
+    return true;
+}
+
+std::uint32_t floatBits(float f) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &f, sizeof(bits));
+    return bits;
+}
+
+// Nine significant digits bring a float back exactly
+std::string exactFloatText(float f) {
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%.9g", static_cast<double>(f));
+    return buf;
+}
+
+}  // namespace
+
+// inf and nan hung the render thread (inf) or were stored (nan): the argument is refused
+// and the caller's value is left alone
+bool test_OutputColor_HueArgRefusesNonFinite() {
+    const float inf = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const std::string texts[] = {
+        "inf", "-inf", "+inf", "infinity", "-infinity", "INF", "nan", "NaN", "-nan",
+        oscFloatText(inf), oscFloatText(-inf), oscFloatText(nan), oscFloatText(-nan),
+        "1e39",    // finite as a double, beyond a float: std::atof made it inf
+        "-1e39",
+        "1e999",
+    };
+    for (const auto& text : texts) {
+        float hue = 12.5f;
+        TEST_ASSERT_FALSE(parseHueDegrees(text, hue));
+        TEST_ASSERT(hue == 12.5f);
+    }
+    return true;
+}
+
+// Text is not an angle: std::atof read it as 0, or took a leading number and dropped the rest
+bool test_OutputColor_HueArgRefusesUnparseable() {
+    const char* texts[] = {"abc", "", " ", "\t\r\n", "12abc", "1,5", "1 2", "--3", "0x10", "1e", "."};
+    for (const char* text : texts) {
+        float hue = 12.5f;
+        TEST_ASSERT_FALSE(parseHueDegrees(text, hue));
+        TEST_ASSERT(hue == 12.5f);
+    }
+    return true;
+}
+
+// A finite value of any size is folded at once; ordinary values come out as before
+bool test_OutputColor_HueArgFoldsFinite() {
+    float hue = 0.0f;
+    TEST_ASSERT(parseHueDegrees("0", hue) && hue == 0.0f);
+    TEST_ASSERT(parseHueDegrees("90", hue) && hue == 90.0f);
+    TEST_ASSERT(parseHueDegrees("-90.5", hue) && hue == -90.5f);
+    TEST_ASSERT(parseHueDegrees("180", hue) && hue == 180.0f);
+    TEST_ASSERT(parseHueDegrees("-180", hue) && hue == -180.0f);
+    TEST_ASSERT(parseHueDegrees("190", hue) && hue == -170.0f);
+    TEST_ASSERT(parseHueDegrees("-190", hue) && hue == 170.0f);
+    TEST_ASSERT(parseHueDegrees("360", hue) && hue == 0.0f);
+    TEST_ASSERT(parseHueDegrees("540", hue) && hue == 180.0f);
+    TEST_ASSERT(parseHueDegrees("-540", hue) && hue == -180.0f);
+    TEST_ASSERT(parseHueDegrees("900", hue) && hue == 180.0f);
+    // Surrounding whitespace and one leading '+' were read before and still are
+    TEST_ASSERT(parseHueDegrees(" 90", hue) && hue == 90.0f);
+    TEST_ASSERT(parseHueDegrees("90 \r\n", hue) && hue == 90.0f);
+    TEST_ASSERT(parseHueDegrees("+90", hue) && hue == 90.0f);
+
+    // The values that never left the loop: 8.6e9 is where x - 360 == x begins for a float
+    const char* huge[] = {"8.6e9", "-8.6e9", "1e11", "1e30", "-1e30", "3.4e38", "-3.4e38"};
+    for (const char* text : huge) {
+        hue = 999.0f;
+        TEST_ASSERT(parseHueDegrees(text, hue));
+        TEST_ASSERT(std::isfinite(hue) && hue >= -180.0f && hue <= 180.0f);
+    }
+    // 2^33 is a multiple of 360 plus 152, and exact as a float
+    TEST_ASSERT(parseHueDegrees("8589934592", hue) && hue == 152.0f);
+
+    // The same numbers as an OSC float argument reaches the handlers ("1e+30", "8.6e+09")
+    const float sent[] = {0.0f, 90.0f, -90.5f, 180.0f, -180.0f, 540.0f, 8.6e9f, 1e30f, -1e30f};
+    for (float f : sent) {
+        hue = 999.0f;
+        TEST_ASSERT(parseHueDegrees(oscFloatText(f), hue));
+        TEST_ASSERT(std::isfinite(hue) && hue >= -180.0f && hue <= 180.0f);
+    }
+    TEST_ASSERT(parseHueDegrees(oscFloatText(540.0f), hue) && hue == 180.0f);
+    TEST_ASSERT(parseHueDegrees(oscFloatText(-90.5f), hue) && hue == -90.5f);
+    return true;
+}
+
+// Below 2^27 a float step is at most 8, 360 is a multiple of it and the handlers' loop was
+// exact: the fold must give the loop's result bit for bit there
+bool test_OutputColor_HueArgMatchesTheOldLoop() {
+    std::vector<float> values = {
+        0.0f, 1.0f, -1.0f, 179.99998f, 180.0f, 180.00002f, -179.99998f, -180.0f, -180.00002f,
+        359.99997f, 360.0f, 360.00003f, -360.0f, 539.99994f, 540.0f, 540.00006f, -540.0f,
+        720.0f, 1000.1f, -1000.1f, 123456.79f, -123456.79f, 1e6f, -1e6f,
+        134217720.0f, -134217720.0f,   // the last float below 2^27
+    };
+    std::mt19937 rng(20261116u);
+    std::uniform_real_distribution<float> small(-2000.0f, 2000.0f);
+    std::uniform_real_distribution<float> medium(-1.0e6f, 1.0e6f);
+    std::uniform_real_distribution<float> large(67108864.0f, 134217720.0f);   // 2^26 .. 2^27
+    for (int i = 0; i < 4000; ++i) values.push_back(small(rng));
+    for (int i = 0; i < 4000; ++i) values.push_back(medium(rng));
+    for (int i = 0; i < 24; ++i) {
+        const float v = large(rng);
+        values.push_back(v);
+        values.push_back(-v);
+    }
+
+    for (float v : values) {
+        float expected = 0.0f;
+        TEST_ASSERT(oldHueLoop(v, expected));
+        float got = 999.0f;
+        TEST_ASSERT(parseHueDegrees(exactFloatText(v), got));
+        if (floatBits(got) != floatBits(expected)) {
+            std::cerr << "hue " << exactFloatText(v) << ": loop " << exactFloatText(expected)
+                      << ", fold " << exactFloatText(got) << std::endl;
+        }
+        TEST_ASSERT(floatBits(got) == floatBits(expected));
+    }
+    return true;
+}
+
+// The sign of zero is the loop's too: -0 was never touched, and 360 - 360 is +0
+bool test_OutputColor_HueArgKeepsTheLoopsZeroSign() {
+    float hue = 1.0f;
+    TEST_ASSERT(parseHueDegrees("-0", hue) && hue == 0.0f && std::signbit(hue));
+    TEST_ASSERT(parseHueDegrees("0", hue) && hue == 0.0f && !std::signbit(hue));
+    TEST_ASSERT(parseHueDegrees("360", hue) && hue == 0.0f && !std::signbit(hue));
+    TEST_ASSERT(parseHueDegrees("-360", hue) && hue == 0.0f && !std::signbit(hue));
+    TEST_ASSERT(parseHueDegrees("-720", hue) && hue == 0.0f && !std::signbit(hue));
     return true;
 }
 
