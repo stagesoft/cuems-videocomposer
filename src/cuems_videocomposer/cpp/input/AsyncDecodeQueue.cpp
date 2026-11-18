@@ -326,6 +326,7 @@ void AsyncDecodeQueue::close() {
     if (borrowedFrame_) {
         av_frame_free(&borrowedFrame_);
     }
+    borrowedExported_.reset();
 
     // Cleanup FFmpeg
     if (swsCtx_) {
@@ -348,19 +349,25 @@ void AsyncDecodeQueue::close() {
     ready_ = false;
 }
 
-AVFrame* AsyncDecodeQueue::borrowFrame(AVFrame* src) {
-    if (!src) return nullptr;
-    // Release previous borrowed frame
+AVFrame* AsyncDecodeQueue::borrowFrame(const QueuedFrame* src) {
+    // The only setter of the borrowed pair (1amfwm7gq3x): the frame and its
+    // export are taken or dropped together, so the caller can never see one
+    // frame with another frame's export. A miss drops both; the previous
+    // frame's pointer was only valid until this call anyway.
+    borrowedExported_.reset();
     if (borrowedFrame_) {
         av_frame_unref(borrowedFrame_);
-    } else {
+    }
+    if (!src || !src->frame) return nullptr;
+    if (!borrowedFrame_) {
         borrowedFrame_ = av_frame_alloc();
         if (!borrowedFrame_) return nullptr;
     }
     // Create a ref-counted copy (increments surface refcount for VAAPI)
-    if (av_frame_ref(borrowedFrame_, src) < 0) {
+    if (av_frame_ref(borrowedFrame_, src->frame) < 0) {
         return nullptr;
     }
+    borrowedExported_ = src->exported;
     return borrowedFrame_;
 }
 
@@ -375,7 +382,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
     int64_t tf = totalFrames_.load();
     for (auto& qf : frameQueue_) {
         if (qf.frameNumber == frameNumber && qf.ready) {
-            AVFrame* hit = borrowFrame(qf.frame);
+            AVFrame* hit = borrowFrame(&qf);
             returnedFrame = hit ? frameNumber : -1;
             return hit;
         }
@@ -386,7 +393,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
         int64_t virtualNum = tf + frameNumber;
         for (auto& qf : frameQueue_) {
             if (qf.frameNumber == virtualNum && qf.ready) {
-                AVFrame* hit = borrowFrame(qf.frame);
+                AVFrame* hit = borrowFrame(&qf);
                 returnedFrame = hit ? frameNumber : -1;
                 return hit;
             }
@@ -407,7 +414,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
             // Check again (exact match)
             for (auto& qf : frameQueue_) {
                 if (qf.frameNumber == frameNumber && qf.ready) {
-                    AVFrame* hit = borrowFrame(qf.frame);
+                    AVFrame* hit = borrowFrame(&qf);
                     returnedFrame = hit ? frameNumber : -1;
                     return hit;
                 }
@@ -417,7 +424,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
                 int64_t virtualNum = tf + frameNumber;
                 for (auto& qf : frameQueue_) {
                     if (qf.frameNumber == virtualNum && qf.ready) {
-                        AVFrame* hit = borrowFrame(qf.frame);
+                        AVFrame* hit = borrowFrame(&qf);
                         returnedFrame = hit ? frameNumber : -1;
                         return hit;
                     }
@@ -427,7 +434,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
     }
 
     // Frame not available - return closest earlier frame if available
-    AVFrame* closest = nullptr;
+    const QueuedFrame* closest = nullptr;
     int64_t closestNumber = -1;
     int64_t closestDiff = INT64_MAX;
 
@@ -436,7 +443,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
             int64_t diff = frameNumber - qf.frameNumber;
             if (diff < closestDiff) {
                 closestDiff = diff;
-                closest = qf.frame;
+                closest = &qf;
                 closestNumber = qf.frameNumber;
             }
         }
@@ -880,28 +887,9 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                     if (qf.frame) {
                         av_frame_move_ref(qf.frame, decodeFrame_);
                         qf.ready = true;
-
-                        {
-                            std::lock_guard<std::mutex> lock(queueMutex_);
-                            bool inserted = false;
-                            for (auto it = frameQueue_.begin(); it != frameQueue_.end(); ++it) {
-                                if (it->frameNumber == drainFrameNum) {
-                                    if (it->frame) av_frame_free(&(it->frame));
-                                    it->frame = qf.frame;
-                                    it->ready = true;
-                                    qf.frame = nullptr;
-                                    inserted = true;
-                                    break;
-                                } else if (it->frameNumber > drainFrameNum) {
-                                    frameQueue_.insert(it, std::move(qf));
-                                    inserted = true;
-                                    break;
-                                }
-                            }
-                            if (!inserted) {
-                                frameQueue_.push_back(std::move(qf));
-                            }
-                        }
+                        // Outside queueMutex_, as in the normal path below.
+                        qf.exported = exportForQueue(qf.frame, drainFrameNum);
+                        insertSorted(std::move(qf));
 
                         lastDecodedFrame_ = drainFrameNum;
                         drainCount++;
@@ -1031,31 +1019,14 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     // Move frame data (avoids copy for hardware frames)
     av_frame_move_ref(qf.frame, decodeFrame_);
     qf.ready = true;
-    
+
+    // Export before taking queueMutex_: the export is the slow driver call
+    // this change moves off the render thread, and holding the queue lock
+    // across it would make getFrame() wait on it instead (1amfwm7gq3x).
+    qf.exported = exportForQueue(qf.frame, frameNum);
+
     // Add to queue (deduplicated, sorted)
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        
-        bool inserted = false;
-        for (auto it = frameQueue_.begin(); it != frameQueue_.end(); ++it) {
-            if (it->frameNumber == frameNum) {
-                // Duplicate: replace existing frame with newer decode
-                if (it->frame) av_frame_free(&(it->frame));
-                it->frame = qf.frame;
-                it->ready = qf.ready;
-                qf.frame = nullptr;  // Prevent double-free in moved-from QueuedFrame
-                inserted = true;
-                break;
-            } else if (it->frameNumber > frameNum) {
-                frameQueue_.insert(it, std::move(qf));
-                inserted = true;
-                break;
-            }
-        }
-        if (!inserted) {
-            frameQueue_.push_back(std::move(qf));
-        }
-    }
+    insertSorted(std::move(qf));
     
     lastDecodedFrame_ = frameNum;
     
@@ -1063,6 +1034,35 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     queueCond_.notify_all();
     
     return true;
+}
+
+void AsyncDecodeQueue::insertSorted(QueuedFrame&& qf) {
+    // One copy of the sorted, deduplicated insert for the drain path and the
+    // normal path (they used to be two copies, 1amfwm7gq3x).
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    for (auto it = frameQueue_.begin(); it != frameQueue_.end(); ++it) {
+        if (it->frameNumber == qf.frameNumber) {
+            // Duplicate: the newer decode replaces the entry, frame and export
+            // together - the old export belongs to the old frame.
+            *it = std::move(qf);
+            return;
+        }
+        if (it->frameNumber > qf.frameNumber) {
+            frameQueue_.insert(it, std::move(qf));
+            return;
+        }
+    }
+    frameQueue_.push_back(std::move(qf));
+}
+
+std::shared_ptr<const ExportedSurface> AsyncDecodeQueue::exportForQueue(const AVFrame* frame,
+                                                                        int64_t frameNum) {
+    if (!exporter_ || !frame) return nullptr;
+    // A frame below the trim window is dropped by the trim right after this
+    // decode (post-seek catch-up from a keyframe, up to a GOP of them): no
+    // export for it. Virtual loop frames (totalFrames_ + n) are always above.
+    if (frameNum < targetFrame_.load() - 2) return nullptr;
+    return exporter_(frame);
 }
 
 bool AsyncDecodeQueue::seekInternal(int64_t frameNumber) {

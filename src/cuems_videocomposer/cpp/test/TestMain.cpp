@@ -390,6 +390,15 @@ extern bool test_Prime_FailedPrimeResetsAndNextReadIsFrameZero();
 extern bool test_Prime_IndexOnlyIsNotPrimed();
 extern bool test_SoftwareDecode_ReadFrameDoesNotLeakPackets();
 extern bool test_DecodeQueue_GetFrameReportsReturnedFrame();
+extern bool test_ExportedSurface_ClosesOwnedFds();  // 1amfwm7gq3x
+extern bool test_ExportedSurface_LastCopyCloses();  // 1amfwm7gq3x
+extern bool test_ExportedSurface_SkipsInvalidAndClamps();  // 1amfwm7gq3x
+extern bool test_ExportedSurface_IsForChecksSurface();  // 1amfwm7gq3x
+extern bool test_ExportQueue_BorrowSitesCarryTheExport();  // 1amfwm7gq3x
+extern bool test_ExportQueue_ShiftsAndDedupKeepPairs();  // 1amfwm7gq3x
+extern bool test_ExportQueue_MoveCarriesExport();  // 1amfwm7gq3x
+extern bool test_ExportQueue_DecodePathsPairAndRelease();  // 1amfwm7gq3x
+extern bool test_ExportQueue_UnexportedFramesStillPlay();  // 1amfwm7gq3x
 extern bool test_VisibleAt_Onset_30at60();
 extern bool test_VisibleAt_Onset_25at50();
 extern bool test_VisibleAt_Onset_25at60();
@@ -781,6 +790,15 @@ int main() {
     TestFramework::instance().addTest("Prime_IndexOnlyIsNotPrimed", test_Prime_IndexOnlyIsNotPrimed);
     TestFramework::instance().addTest("SoftwareDecode_ReadFrameDoesNotLeakPackets", test_SoftwareDecode_ReadFrameDoesNotLeakPackets);
     TestFramework::instance().addTest("DecodeQueue_GetFrameReportsReturnedFrame", test_DecodeQueue_GetFrameReportsReturnedFrame);
+    TestFramework::instance().addTest("ExportedSurface_ClosesOwnedFds", test_ExportedSurface_ClosesOwnedFds);
+    TestFramework::instance().addTest("ExportedSurface_LastCopyCloses", test_ExportedSurface_LastCopyCloses);
+    TestFramework::instance().addTest("ExportedSurface_SkipsInvalidAndClamps", test_ExportedSurface_SkipsInvalidAndClamps);
+    TestFramework::instance().addTest("ExportedSurface_IsForChecksSurface", test_ExportedSurface_IsForChecksSurface);
+    TestFramework::instance().addTest("ExportQueue_BorrowSitesCarryTheExport", test_ExportQueue_BorrowSitesCarryTheExport);
+    TestFramework::instance().addTest("ExportQueue_ShiftsAndDedupKeepPairs", test_ExportQueue_ShiftsAndDedupKeepPairs);
+    TestFramework::instance().addTest("ExportQueue_MoveCarriesExport", test_ExportQueue_MoveCarriesExport);
+    TestFramework::instance().addTest("ExportQueue_DecodePathsPairAndRelease", test_ExportQueue_DecodePathsPairAndRelease);
+    TestFramework::instance().addTest("ExportQueue_UnexportedFramesStillPlay", test_ExportQueue_UnexportedFramesStillPlay);
     TestFramework::instance().addTest("CapsFile_WrittenAndUnlinked", test_CapsFile_WrittenAndUnlinked);
     TestFramework::instance().addTest("VisibleAt_Onset_30at60", test_VisibleAt_Onset_30at60);
     TestFramework::instance().addTest("VisibleAt_Onset_25at50", test_VisibleAt_Onset_25at50);

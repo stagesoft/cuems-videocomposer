@@ -24,6 +24,7 @@
 
 #include "../video/FrameBuffer.h"
 #include "../video/GPUTextureFrameBuffer.h"
+#include "../hwdec/ExportedSurface.h"
 #include <string>
 #include <memory>
 #include <thread>
@@ -231,6 +232,32 @@ public:
     AVFrame* getFrame(int64_t frameNumber, int64_t& returnedFrame, int maxWaitMs = 0);
 
     /**
+     * The DRM PRIME export of the frame the last getFrame() returned, or null
+     * (1amfwm7gq3x). It is null after a miss and for a frame the decode thread
+     * did not export (the caller then exports it itself, as before). Same
+     * thread and same lifetime as getFrame()'s frame: valid until the next
+     * getFrame() or close(). A shared_ptr copy keeps the fds open longer.
+     */
+    const std::shared_ptr<const ExportedSurface>& borrowedExport() const { return borrowedExported_; }
+
+    /**
+     * Exports one decoded frame on the decode thread (1amfwm7gq3x). Called
+     * outside queueMutex_, never for a frame the post-seek catch-up trims at
+     * once. Returns null when the frame is not exported.
+     */
+    using Exporter = std::function<std::shared_ptr<const ExportedSurface>(const AVFrame*)>;
+
+#ifdef CUEMS_VC_TESTING
+    /**
+     * Test seam: every frame the decode thread keeps goes through fn, whatever
+     * its pixel format, so the queue paths can be driven by software decode
+     * with pipe fds standing in for DRM PRIME fds. Set it before open(); it is
+     * read by the decode thread without a lock.
+     */
+    void setExporterForTesting(Exporter fn) { exporter_ = std::move(fn); }
+#endif
+
+    /**
      * Seek to a new position (flushes queue)
      * @param frameNumber Target frame number
      */
@@ -306,12 +333,20 @@ public:
     int64_t getNewestFrame() const;
 
 private:
+#ifdef CUEMS_VC_TESTING
+    friend struct AsyncDecodeQueueTestAccess;
+#endif
+
     // Decoded frame in queue
     struct QueuedFrame {
         int64_t frameNumber;
         AVFrame* frame;  // Owned by this struct
         bool ready;
-        
+        // The frame's DRM PRIME export, or null (1amfwm7gq3x). It belongs to
+        // `frame` and must travel with it: the deque shifts entries on insert
+        // and remove_if, and both go through the move operations below.
+        std::shared_ptr<const ExportedSurface> exported;
+
         QueuedFrame() : frameNumber(-1), frame(nullptr), ready(false) {}
         ~QueuedFrame() {
             if (frame) {
@@ -321,7 +356,8 @@ private:
         
         // Move-only
         QueuedFrame(QueuedFrame&& other) noexcept 
-            : frameNumber(other.frameNumber), frame(other.frame), ready(other.ready) {
+            : frameNumber(other.frameNumber), frame(other.frame), ready(other.ready),
+              exported(std::move(other.exported)) {
             other.frame = nullptr;
         }
         QueuedFrame& operator=(QueuedFrame&& other) noexcept {
@@ -330,6 +366,7 @@ private:
                 frameNumber = other.frameNumber;
                 frame = other.frame;
                 ready = other.ready;
+                exported = std::move(other.exported);
                 other.frame = nullptr;
             }
             return *this;
@@ -345,6 +382,17 @@ private:
     
     // Internal decode (called from thread)
     bool decodeNextFrame();
+
+    // Queue a decoded entry in frame order. An entry with the same number is
+    // replaced, frame and export together. Takes queueMutex_.
+    void insertSorted(QueuedFrame&& qf);
+
+    // The decode thread's export of a frame it is about to queue (1amfwm7gq3x).
+    // Outside queueMutex_. Null when not exported.
+    std::shared_ptr<const ExportedSurface> exportForQueue(const AVFrame* frame, int64_t frameNum);
+
+    // Decode-thread exporter; empty = no decode-thread export.
+    Exporter exporter_;
     bool seekInternal(int64_t frameNumber);
     
     // FFmpeg objects (owned by decode thread)
@@ -457,10 +505,14 @@ private:
     // while the render thread is still using a frame for GPU transfer.
     // Valid until the next getFrame() call (always from the same thread).
     AVFrame* borrowedFrame_ = nullptr;
+    // The export that belongs to borrowedFrame_ (1amfwm7gq3x). Set and cleared
+    // only by borrowFrame(), together with it.
+    std::shared_ptr<const ExportedSurface> borrowedExported_;
 
-    // Ref the found frame into borrowedFrame_ and return it.
+    // Ref the found entry's frame into borrowedFrame_, take its export into
+    // borrowedExported_, and return the frame. Null (a miss) drops both.
     // Must be called while queueMutex_ is held.
-    AVFrame* borrowFrame(AVFrame* src);
+    AVFrame* borrowFrame(const QueuedFrame* src);
 
     // Synchronization
     std::condition_variable seekCond_;
