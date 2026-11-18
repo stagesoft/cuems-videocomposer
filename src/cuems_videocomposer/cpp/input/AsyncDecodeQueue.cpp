@@ -31,6 +31,7 @@
 #include "../utils/Logger.h"
 #include <algorithm>
 #include <chrono>
+#include <sys/stat.h>
 
 extern "C" {
 #include <libavutil/imgutils.h>
@@ -96,6 +97,15 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     // looked" would report the previous attempt's answer forever.
     softDespiteHwClaim_ = false;
     firstDecodedPixFmt_ = AV_PIX_FMT_NONE;
+
+    // The decode-thread export's warm-up record belongs to one decoder
+    // (1amfwm7gq3x): a reopen builds a new pool.
+    warmInode_.clear();
+    warmSurfaces_ = 0;
+    warmFailed_ = 0;
+    loggedNoWarmRecord_ = false;
+    loggedExportFailed_ = false;
+    loggedInodeChanged_ = false;
 
     eofReached_ = false;
     virtualOffset_ = 0;
@@ -223,6 +233,14 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         // not free: it is VRAM reserved per layer against a carve-out that the
         // eviction-storm hang is measured against.
         codecCtx_->extra_hw_frames = extraHwFrames_;
+
+        // 1amfwm7gq3x: with the decode-thread export on, the pool is built
+        // in get_format so every surface can be exported once before any
+        // decode targets it (buildWarmPool).
+        if (decodeThreadExport_) {
+            codecCtx_->opaque = this;
+            codecCtx_->get_format = &AsyncDecodeQueue::getFormatCallback;
+        }
     }
     
     // Open codec
@@ -323,6 +341,7 @@ void AsyncDecodeQueue::close() {
         std::lock_guard<std::mutex> lock(queueMutex_);
         frameQueue_.clear();
     }
+    warmInode_.clear();   // the decode thread, its only other user, is joined
     if (borrowedFrame_) {
         av_frame_free(&borrowedFrame_);
     }
@@ -1057,12 +1076,125 @@ void AsyncDecodeQueue::insertSorted(QueuedFrame&& qf) {
 
 std::shared_ptr<const ExportedSurface> AsyncDecodeQueue::exportForQueue(const AVFrame* frame,
                                                                         int64_t frameNum) {
-    if (!exporter_ || !frame) return nullptr;
+    if (!frame) return nullptr;
     // A frame below the trim window is dropped by the trim right after this
     // decode (post-seek catch-up from a keyframe, up to a GOP of them): no
     // export for it. Virtual loop frames (totalFrames_ + n) are always above.
     if (frameNum < targetFrame_.load() - 2) return nullptr;
-    return exporter_(frame);
+    if (exporter_) return exporter_(frame);   // test seam, any pixel format
+    if (!decodeThreadExport_ || !useHardware_ || frame->format != AV_PIX_FMT_VAAPI) return nullptr;
+    return exportVaapi(frame);
+}
+
+AVPixelFormat AsyncDecodeQueue::getFormatCallback(AVCodecContext* ctx, const AVPixelFormat* fmts) {
+    // The format FFmpeg would pick without a callback (VAAPI when the device
+    // context matches, else the software format). Only the pool changes.
+    const AVPixelFormat chosen = avcodec_default_get_format(ctx, fmts);
+    auto* self = static_cast<AsyncDecodeQueue*>(ctx->opaque);
+    if (chosen == AV_PIX_FMT_VAAPI && self) {
+        self->buildWarmPool(ctx);
+    }
+    return chosen;
+}
+
+void AsyncDecodeQueue::buildWarmPool(AVCodecContext* ctx) {
+    // ff_get_format drops the previous hwaccel and its frames context before
+    // it calls get_format, and ff_decode_get_hw_frames_ctx keeps a frames
+    // context set here (FFmpeg 5.1 decode.c:961, :1097). Any failure below
+    // leaves hw_frames_ctx unset: FFmpeg then builds its own pool exactly as
+    // before, and no surface has a warm-up record, so nothing is exported on
+    // this thread.
+    warmInode_.clear();
+    warmSurfaces_ = 0;
+    warmFailed_ = 0;
+    if (!ctx->hw_device_ctx || ctx->hw_frames_ctx) return;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    AVBufferRef* ref = nullptr;
+    int ret = avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, AV_PIX_FMT_VAAPI, &ref);
+    if (ret < 0 || !ref) {
+        LOG_WARNING << "AsyncDecodeQueue: VAAPI frame parameters unavailable (" << ret
+                    << ") for " << filename_ << " - decoder builds its own pool, no decode-thread export";
+        return;
+    }
+    auto* fc = reinterpret_cast<AVHWFramesContext*>(ref->data);
+    // The 3 base work surfaces ff_decode_get_hw_frames_ctx adds on top
+    // (decode.c:987-991): the same pool FFmpeg would build.
+    if (fc->initial_pool_size) fc->initial_pool_size += 3;
+    ret = av_hwframe_ctx_init(ref);
+    if (ret < 0) {
+        av_buffer_unref(&ref);
+        LOG_WARNING << "AsyncDecodeQueue: VAAPI pool init failed (" << ret << ") for " << filename_
+                    << " - decoder builds its own pool, no decode-thread export";
+        return;
+    }
+    auto* vfc = static_cast<AVVAAPIFramesContext*>(fc->hwctx);
+    auto* vdc = static_cast<AVVAAPIDeviceContext*>(fc->device_ctx->hwctx);
+
+    int failed = 0;
+    for (int i = 0; vfc->surface_ids && i < vfc->nb_surfaces; ++i) {
+        const VASurfaceID id = vfc->surface_ids[i];
+        // The first export of a surface is where a driver may reallocate it
+        // (Mesa 22.3.6 surface.c:1428-1453, an interlaced buffer made
+        // progressive and weave-copied); here nothing is pending on it. The
+        // buffer it returns is the one every later export must return too.
+        auto e = ExportedSurface::exportFrom(vdc->display, id);
+        struct stat st{};
+        if (!e || e->descriptor().num_objects == 0 ||
+            fstat(e->descriptor().objects[0].fd, &st) != 0) {
+            ++failed;
+            continue;
+        }
+        warmInode_[id] = st.st_ino;
+    }
+    warmSurfaces_ = static_cast<int>(warmInode_.size());
+    warmFailed_ = failed;
+    ctx->hw_frames_ctx = ref;
+
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0).count();
+    LOG_INFO << "AsyncDecodeQueue: VAAPI pool of " << vfc->nb_surfaces << " surfaces for "
+             << filename_ << ", warm-up export: " << warmSurfaces_.load() << " ok, "
+             << failed << " failed, " << static_cast<int>(ms + 0.5) << " ms";
+}
+
+std::shared_ptr<const ExportedSurface> AsyncDecodeQueue::exportVaapi(const AVFrame* frame) {
+    const VASurfaceID id = static_cast<VASurfaceID>(reinterpret_cast<uintptr_t>(frame->data[3]));
+    auto warm = warmInode_.find(id);
+    if (warm == warmInode_.end() || !frame->hw_frames_ctx) {
+        if (!loggedNoWarmRecord_) {
+            loggedNoWarmRecord_ = true;
+            LOG_INFO << "AsyncDecodeQueue: surface " << id << " of " << filename_
+                     << " has no warm-up record - the render thread exports it";
+        }
+        return nullptr;
+    }
+    auto* fc = reinterpret_cast<AVHWFramesContext*>(frame->hw_frames_ctx->data);
+    auto* vdc = static_cast<AVVAAPIDeviceContext*>(fc->device_ctx->hwctx);
+
+    VAStatus status = VA_STATUS_SUCCESS;
+    auto exported = ExportedSurface::exportFrom(vdc->display, id, &status);
+    if (!exported || exported->descriptor().num_objects == 0) {
+        if (!loggedExportFailed_) {
+            loggedExportFailed_ = true;
+            LOG_WARNING << "AsyncDecodeQueue: decode-thread vaExportSurfaceHandle failed (" << status
+                        << ") for " << filename_ << " - the render thread exports instead";
+        }
+        return nullptr;
+    }
+    // The buffer must be the one the warm-up left. A different one means the
+    // driver reallocated it now, right after a decode: not trusted here.
+    struct stat st{};
+    if (fstat(exported->descriptor().objects[0].fd, &st) != 0 || st.st_ino != warm->second) {
+        if (!loggedInodeChanged_) {
+            loggedInodeChanged_ = true;
+            LOG_WARNING << "AsyncDecodeQueue: surface " << id << " of " << filename_
+                        << " changed buffer after its warm-up export - the render thread exports it";
+        }
+        warm->second = st.st_ino;
+        return nullptr;
+    }
+    return exported;
 }
 
 bool AsyncDecodeQueue::seekInternal(int64_t frameNumber) {

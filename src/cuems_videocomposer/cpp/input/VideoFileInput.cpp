@@ -316,6 +316,12 @@ bool VideoFileInput::open(const std::string& source) {
         std::string tier4Reason;   // non-empty -> the load has failed outright
 
         asyncDecodeQueue_ = std::make_unique<AsyncDecodeQueue>();
+#ifdef HAVE_VAAPI_INTEROP
+        // These frames go to the display through EGL dma-buf import: export
+        // them on the decode thread, never on the render thread (1amfwm7gq3x).
+        // Kept across recovery reopens of the same queue.
+        asyncDecodeQueue_->setDecodeThreadExport(true);
+#endif
         if (asyncDecodeQueue_->open(currentFile_, hwDeviceCtx_,
                                     AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,
                                     AsyncDecodeQueue::MAX_QUEUE_SIZE)) {

@@ -399,6 +399,7 @@ extern bool test_ExportQueue_ShiftsAndDedupKeepPairs();  // 1amfwm7gq3x
 extern bool test_ExportQueue_MoveCarriesExport();  // 1amfwm7gq3x
 extern bool test_ExportQueue_DecodePathsPairAndRelease();  // 1amfwm7gq3x
 extern bool test_ExportQueue_UnexportedFramesStillPlay();  // 1amfwm7gq3x
+extern bool test_ExportQueue_VaapiWarmUpAndDecodeThreadExport();  // 1amfwm7gq3x
 extern bool test_VisibleAt_Onset_30at60();
 extern bool test_VisibleAt_Onset_25at50();
 extern bool test_VisibleAt_Onset_25at60();
@@ -799,6 +800,7 @@ int main() {
     TestFramework::instance().addTest("ExportQueue_MoveCarriesExport", test_ExportQueue_MoveCarriesExport);
     TestFramework::instance().addTest("ExportQueue_DecodePathsPairAndRelease", test_ExportQueue_DecodePathsPairAndRelease);
     TestFramework::instance().addTest("ExportQueue_UnexportedFramesStillPlay", test_ExportQueue_UnexportedFramesStillPlay);
+    TestFramework::instance().addTest("ExportQueue_VaapiWarmUpAndDecodeThreadExport", test_ExportQueue_VaapiWarmUpAndDecodeThreadExport);
     TestFramework::instance().addTest("CapsFile_WrittenAndUnlinked", test_CapsFile_WrittenAndUnlinked);
     TestFramework::instance().addTest("VisibleAt_Onset_30at60", test_VisibleAt_Onset_30at60);
     TestFramework::instance().addTest("VisibleAt_Onset_25at50", test_VisibleAt_Onset_25at50);

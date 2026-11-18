@@ -34,6 +34,8 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <unordered_map>
+#include <sys/types.h>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -247,6 +249,33 @@ public:
      */
     using Exporter = std::function<std::shared_ptr<const ExportedSurface>(const AVFrame*)>;
 
+    /**
+     * Export VAAPI frames on the decode thread (1amfwm7gq3x). Off by default;
+     * set by the owner whose frames go to a display through EGL dma-buf
+     * import (VideoFileInput), never by the indexer. Set it before open();
+     * it is kept across reopens.
+     *
+     * When on, the queue builds the decoder's VAAPI surface pool itself in
+     * get_format (same size FFmpeg would build) and exports every surface of
+     * it once there, before any decode targets it, so a driver that must
+     * reallocate a surface on its first export (Mesa radeonsi: interlaced to
+     * progressive) does it with nothing pending. A frame on a surface without
+     * that warm-up record is not exported here; the render thread exports it
+     * as before.
+     */
+    void setDecodeThreadExport(bool on) { decodeThreadExport_ = on; }
+    bool decodeThreadExport() const { return decodeThreadExport_; }
+
+    /** The last get_format warm-up: surfaces exported, and failed exports.
+     *  Zero until one ran. (Whether the driver reallocated a surface cannot be
+     *  read from the export: Mesa reallocates inside it, before it exports the
+     *  handle, so even the first export already returns the kept buffer.) */
+    struct WarmUpStats {
+        int surfaces = 0;
+        int failed = 0;
+    };
+    WarmUpStats warmUpStats() const { return {warmSurfaces_.load(), warmFailed_.load()}; }
+
 #ifdef CUEMS_VC_TESTING
     /**
      * Test seam: every frame the decode thread keeps goes through fn, whatever
@@ -391,8 +420,26 @@ private:
     // Outside queueMutex_. Null when not exported.
     std::shared_ptr<const ExportedSurface> exportForQueue(const AVFrame* frame, int64_t frameNum);
 
-    // Decode-thread exporter; empty = no decode-thread export.
+    // Test-seam exporter (setExporterForTesting); empty in production.
     Exporter exporter_;
+
+    // The production decode-thread export (1amfwm7gq3x), see setDecodeThreadExport().
+    bool decodeThreadExport_ = false;
+    // get_format: pick the format as FFmpeg would; for VAAPI with the export
+    // on, build the pool here and warm it up.
+    static AVPixelFormat getFormatCallback(AVCodecContext* ctx, const AVPixelFormat* fmts);
+    void buildWarmPool(AVCodecContext* ctx);
+    std::shared_ptr<const ExportedSurface> exportVaapi(const AVFrame* frame);
+    // Surface -> dma-buf inode after its warm-up export. Decode thread only
+    // (get_format runs inside the decoder calls of that thread); cleared by
+    // open() and close().
+    std::unordered_map<VASurfaceID, ino_t> warmInode_;
+    std::atomic<int> warmSurfaces_{0};
+    std::atomic<int> warmFailed_{0};
+    // One line per open() for each way the decode-thread export can fall back.
+    bool loggedNoWarmRecord_ = false;
+    bool loggedExportFailed_ = false;
+    bool loggedInodeChanged_ = false;
     bool seekInternal(int64_t frameNumber);
     
     // FFmpeg objects (owned by decode thread)

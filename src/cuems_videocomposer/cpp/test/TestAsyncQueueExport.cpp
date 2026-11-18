@@ -59,6 +59,7 @@
 
 extern "C" {
 #include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
 }
 
 namespace videocomposer {
@@ -507,6 +508,123 @@ bool test_ExportQueue_UnexportedFramesStillPlay() {
         q.close();
     }
     TEST_ASSERT_EQ(fdCount(), start);
+    const std::string rm = "rm -rf " + dir;
+    (void)std::system(rm.c_str());
+    return true;
+}
+
+namespace {
+
+bool haveX264Encoder() {
+    return std::system("ffmpeg -version >/dev/null 2>&1") == 0 &&
+           std::system("ffmpeg -hide_banner -encoders 2>/dev/null | grep -q ' libx264 '") == 0;
+}
+
+// 640x360, 25 fps, 3 s = 75 frames, h264 high with 2 B-frames and a 25-frame
+// GOP: the codec and structure of the rig's loop clips, small.
+std::string makeH264Clip(const std::string& dir) {
+    const std::string path = dir + "/h264gop25.mp4";
+    const std::string cmd =
+        "ffmpeg -nostdin -hide_banner -loglevel error -y "
+        "-f lavfi -i testsrc=s=640x360:r=25:d=3 "
+        "-c:v libx264 -profile:v high -pix_fmt yuv420p -g 25 -bf 2 " + path;
+    return std::system(cmd.c_str()) == 0 ? path : std::string();
+}
+
+// One walk over the clip; counts the frames that came with an export that
+// belongs to them (isFor) and the VAAPI frames without one.
+struct WalkResult {
+    int frames = 0;
+    int vaapi = 0;
+    int ownExport = 0;
+    int foreignExport = 0;
+};
+
+WalkResult walk(AsyncDecodeQueue& q, int64_t frames) {
+    WalkResult r;
+    for (int64_t n = 0; n < frames; ++n) {
+        int64_t got = -1;
+        AVFrame* f = q.getFrame(n, got, 2000);
+        if (!f || got != n) continue;
+        ++r.frames;
+        if (f->format == AV_PIX_FMT_VAAPI) ++r.vaapi;
+        const auto& e = q.borrowedExport();
+        if (e && e->isFor(f)) ++r.ownExport;
+        else if (e) ++r.foreignExport;
+    }
+    return r;
+}
+
+} // namespace
+
+// The production decode-thread export on the real driver (needs a VAAPI
+// render node and libx264; skipped otherwise): with the export on, the pool is
+// built and warmed up in get_format and every frame handed out carries its own
+// export (no later export changed a surface's buffer after its warm-up, or the
+// frame would come without one); with
+// it off (the default, and the indexer) nothing is exported. Every fd returns.
+bool test_ExportQueue_VaapiWarmUpAndDecodeThreadExport() {
+    if (!haveX264Encoder()) {
+        std::cout << "(skipped: no ffmpeg/libx264) ";
+        return true;
+    }
+    AVBufferRef* dev = nullptr;
+    if (av_hwdevice_ctx_create(&dev, AV_HWDEVICE_TYPE_VAAPI, "/dev/dri/renderD128", nullptr, 0) < 0) {
+        std::cout << "(skipped: no VAAPI device at /dev/dri/renderD128 for this user) ";
+        return true;
+    }
+    const std::string dir = exportTempDir();
+    TEST_ASSERT_FALSE(dir.empty());
+    const std::string clip = makeH264Clip(dir);
+    TEST_ASSERT_FALSE(clip.empty());
+
+    const int start = fdCount();
+    {
+        AsyncDecodeQueue q;   // default: no decode-thread export
+        TEST_ASSERT_FALSE(q.decodeThreadExport());
+        TEST_ASSERT_TRUE(q.open(clip, dev, AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,
+                                AsyncDecodeQueue::MAX_QUEUE_SIZE));
+        TEST_ASSERT_TRUE(q.isHardwareDecoding());
+        const WalkResult off = walk(q, 40);
+        TEST_ASSERT_EQ(off.frames, 40);
+        if (off.vaapi == 0) {
+            std::cout << "(skipped: h264 decoded in software here) ";
+            q.close();
+            av_buffer_unref(&dev);
+            return true;
+        }
+        TEST_ASSERT_EQ(off.ownExport + off.foreignExport, 0);
+        TEST_ASSERT_EQ(q.warmUpStats().surfaces, 0);
+        q.close();
+    }
+    TEST_ASSERT_EQ(fdCount(), start);
+
+    {
+        AsyncDecodeQueue q;
+        q.setDecodeThreadExport(true);
+        TEST_ASSERT_TRUE(q.open(clip, dev, AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,
+                                AsyncDecodeQueue::MAX_QUEUE_SIZE));
+        const WalkResult on = walk(q, 75);
+        const auto ws = q.warmUpStats();
+        std::cout << "(pool " << ws.surfaces << ", failed " << ws.failed << ") ";
+        TEST_ASSERT_TRUE(ws.surfaces >= static_cast<int>(AsyncDecodeQueue::MAX_QUEUE_SIZE));
+        TEST_ASSERT_EQ(ws.failed, 0);
+        TEST_ASSERT_EQ(on.frames, 75);
+        TEST_ASSERT_EQ(on.vaapi, 75);
+        TEST_ASSERT_EQ(on.foreignExport, 0);
+        TEST_ASSERT_EQ(on.ownExport, 75);   // incl. the drained B-frames at the end
+
+        // a reopen (recovery) keeps the switch and warms up the new pool
+        TEST_ASSERT_TRUE(q.open(clip, dev, AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,
+                                AsyncDecodeQueue::MAX_QUEUE_SIZE));
+        TEST_ASSERT_TRUE(q.decodeThreadExport());
+        const WalkResult again = walk(q, 30);
+        TEST_ASSERT_EQ(again.ownExport, 30);
+        TEST_ASSERT_TRUE(q.warmUpStats().surfaces >= static_cast<int>(AsyncDecodeQueue::MAX_QUEUE_SIZE));
+        q.close();
+    }
+    TEST_ASSERT_EQ(fdCount(), start);
+    av_buffer_unref(&dev);
     const std::string rm = "rm -rf " + dir;
     (void)std::system(rm.c_str());
     return true;
