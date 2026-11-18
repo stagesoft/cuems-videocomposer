@@ -172,6 +172,7 @@ private:
     std::unique_ptr<AsyncHapDecoder> asyncHapDecoder_;
     bool useAsyncHapDecode_ = false;
     int asyncMissCount_ = 0;
+    int64_t lastMissedFrame_ = -1;   // async path: last request not delivered; its retry never waits (1amfwm7jme2)
 #endif
 };
 

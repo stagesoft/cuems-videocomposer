@@ -345,6 +345,7 @@ private:
     bool ignoreStartOffset_;
     int64_t currentFrame_;
     int64_t lastTransferredFrame_ = -1;  // hardware path: the frame in the caller's texture (869feynrj X1)
+    int64_t lastMissedFrame_ = -1;       // hardware path: last request not delivered; its retry never waits (1amfwm7jme2)
     PrimeResult primeResult_ = PrimeResult::NotTried;   // 1amfwm7hk6j
     int64_t demuxSeeks_ = 0;
 #ifdef CUEMS_VC_TESTING
