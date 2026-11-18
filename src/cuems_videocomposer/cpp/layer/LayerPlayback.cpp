@@ -560,7 +560,8 @@ void LayerPlayback::updateFromSyncSource() {
                 } else {
                     LOG_WARNING << "Failed to seek to frame " << adjustedFrame << " for full frame update";
                 }
-            } else if (loadFrame(adjustedFrame)) {
+            } else if (const bool loaded = loadFrame(adjustedFrame);
+                       loaded && !heldPreviousFrame(adjustedFrame)) {
                 // Normal update - loadFrame() handles seek optimization internally
                 // (no seek for consecutive frames, seeks for backwards/non-consecutive)
                 currentFrame_ = adjustedFrame;
@@ -575,6 +576,13 @@ void LayerPlayback::updateFromSyncSource() {
                 }
                 lastFrameChangeVsync_ = vsyncCount_;
                 lastVideoFrame_ = adjustedFrame;
+            } else if (loaded) {
+                // 1amfwm7jme2: the async decoder (VAAPI queue, HAP) missed and held the
+                // previous texture while reporting success. Not a load: currentFrame_ and
+                // lastSyncFrame_ stay on what is on screen, so the next vsync asks for this
+                // frame again (the retry never waits, AsyncWaitPolicy.h). Recording it as
+                // loaded made the layer skip it for good: a warm restart showed frame 1.
+                signals::frameMissed();
             } else if (isSharedLayer_ && !isDecodeDriver_) {
                 // Shared secondary: cache not ready yet — skip seek (would corrupt driver's decoder)
                 signals::frameMissed();

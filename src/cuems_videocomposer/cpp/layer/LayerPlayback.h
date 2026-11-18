@@ -262,6 +262,13 @@ private:
     bool isHardwareDecodeLayer() const;
     bool loadFrame(int64_t frameNumber);       // loadFrameInto + the load generation
     bool loadFrameInto(int64_t frameNumber);
+    // 1amfwm7jme2: a successful load whose pixels are not `frameNumber` (an async decode
+    // miss that held the previous texture). Shared secondaries read the driver's cache
+    // and are judged on it elsewhere.
+    bool heldPreviousFrame(int64_t frameNumber) const {
+        return !(isSharedLayer_ && !isDecodeDriver_) && inputSource_ &&
+               inputSource_->deliveredFrame(frameNumber) != frameNumber;
+    }
     bool copyFromDriverCache(int64_t frameNumber);  // For shared secondary layers
 };
 

@@ -20,6 +20,7 @@
  */
 
 #include "VideoFileInput.h"
+#include "AsyncWaitPolicy.h"
 #include "../../ffcompat.h"
 #include "../utils/CLegacyBridge.h"
 #include "../utils/Logger.h"
@@ -291,6 +292,7 @@ bool VideoFileInput::open(const std::string& source) {
     ready_ = true;
     currentFrame_ = -1;
     lastTransferredFrame_ = -1;
+    lastMissedFrame_ = -1;
     demuxSeeks_ = 0;
     primeResult_ = PrimeResult::NotTried;
     
@@ -429,6 +431,7 @@ void VideoFileInput::close() {
     ready_ = false;
     currentFrame_ = -1;
     lastTransferredFrame_ = -1;
+    lastMissedFrame_ = -1;
     frameInfo_ = {};
     
     // NOTE: Don't reset C globals here. In multi-layer scenarios,
@@ -2000,10 +2003,14 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         // avoid falling through to the synchronous decoder; there is nothing to
         // fall through to now, so wait a fraction of a frame and simply retry on
         // the next vsync - the queue keeps cold-starting in the background
-        // either way.
-        const int waitMs = textureBuffer.isValid() ? 5 : 20;
+        // either way. A retry of the frame that just missed only looks (0 ms):
+        // LayerPlayback asks for it again on every vsync until it is delivered
+        // (1amfwm7jme2), and waiting each time would stall every output.
+        const bool retry = frameNumber == lastMissedFrame_;
+        const int waitMs = asyncwait::waitMs(textureBuffer.isValid(), retry, 20);
         int64_t queuedNumber = -1;
         AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, queuedNumber, waitMs);
+        lastMissedFrame_ = frameNumber;   // cleared below when this very frame lands
 
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
@@ -2014,6 +2021,9 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
                 // visible_at gate must not take it for the requested one (869feynrj X1,
                 // 1amfwm7hk6j).
                 lastTransferredFrame_ = queuedNumber;
+                if (queuedNumber == frameNumber) {
+                    lastMissedFrame_ = -1;
+                }
                 return true;
             }
             LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;
@@ -2357,6 +2367,7 @@ void VideoFileInput::cleanup() {
     scanComplete_ = false;
     currentFrame_ = -1;
     lastTransferredFrame_ = -1;
+    lastMissedFrame_ = -1;
     useHardwareDecoding_ = false;
     hwDecoderType_ = HardwareDecoder::Type::NONE;
 }
