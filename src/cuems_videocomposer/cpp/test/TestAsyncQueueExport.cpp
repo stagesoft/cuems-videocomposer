@@ -613,6 +613,22 @@ bool test_ExportQueue_VaapiWarmUpAndDecodeThreadExport() {
         TEST_ASSERT_EQ(on.vaapi, 75);
         TEST_ASSERT_EQ(on.foreignExport, 0);
         TEST_ASSERT_EQ(on.ownExport, 75);   // incl. the drained B-frames at the end
+        TEST_ASSERT_EQ(ws.builds, 1);
+
+        // a seek flushes the h264 decoder, which asks get_format again: the
+        // same pool comes back (no new surfaces, no second warm-up), and the
+        // frames still carry their own export
+        q.seek(10);
+        int afterSeek = 0;
+        for (int64_t n = 10; n < 40; ++n) {
+            int64_t got = -1;
+            AVFrame* f = q.getFrame(n, got, 2000);
+            const auto& e = q.borrowedExport();
+            if (f && got == n && e && e->isFor(f)) ++afterSeek;
+        }
+        TEST_ASSERT_EQ(afterSeek, 30);
+        TEST_ASSERT_EQ(q.warmUpStats().builds, 1);
+        TEST_ASSERT_TRUE(q.warmUpStats().reuses >= 1);
 
         // a reopen (recovery) keeps the switch and warms up the new pool
         TEST_ASSERT_TRUE(q.open(clip, dev, AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,

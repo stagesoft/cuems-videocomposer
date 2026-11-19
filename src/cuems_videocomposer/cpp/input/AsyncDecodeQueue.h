@@ -273,8 +273,12 @@ public:
     struct WarmUpStats {
         int surfaces = 0;
         int failed = 0;
+        int builds = 0;   // pools built since open(); a reused pool does not count
+        int reuses = 0;   // get_format calls that got the existing pool back
     };
-    WarmUpStats warmUpStats() const { return {warmSurfaces_.load(), warmFailed_.load()}; }
+    WarmUpStats warmUpStats() const {
+        return {warmSurfaces_.load(), warmFailed_.load(), poolBuilds_.load(), poolReuses_.load()};
+    }
 
 #ifdef CUEMS_VC_TESTING
     /**
@@ -436,6 +440,13 @@ private:
     std::unordered_map<VASurfaceID, ino_t> warmInode_;
     std::atomic<int> warmSurfaces_{0};
     std::atomic<int> warmFailed_{0};
+    std::atomic<int> poolBuilds_{0};
+    std::atomic<int> poolReuses_{0};
+    // The pool buildWarmPool() last built, kept for the next get_format: the
+    // h264 decoder asks again after every flush (h264_decode_flush clears
+    // context_initialized, FFmpeg 5.1 h264dec.c:488; h264_slice.c:1125-1143),
+    // i.e. at every loop EOF and every seek. Released by close().
+    AVBufferRef* warmPool_ = nullptr;
     // One line per open() for each way the decode-thread export can fall back.
     bool loggedNoWarmRecord_ = false;
     bool loggedExportFailed_ = false;

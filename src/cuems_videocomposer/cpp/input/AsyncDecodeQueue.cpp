@@ -103,6 +103,8 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     warmInode_.clear();
     warmSurfaces_ = 0;
     warmFailed_ = 0;
+    poolBuilds_ = 0;
+    poolReuses_ = 0;
     loggedNoWarmRecord_ = false;
     loggedExportFailed_ = false;
     loggedInodeChanged_ = false;
@@ -342,6 +344,7 @@ void AsyncDecodeQueue::close() {
         frameQueue_.clear();
     }
     warmInode_.clear();   // the decode thread, its only other user, is joined
+    av_buffer_unref(&warmPool_);   // our ref; the codec context (freed below) drops its own
     if (borrowedFrame_) {
         av_frame_free(&borrowedFrame_);
     }
@@ -1104,15 +1107,13 @@ void AsyncDecodeQueue::buildWarmPool(AVCodecContext* ctx) {
     // leaves hw_frames_ctx unset: FFmpeg then builds its own pool exactly as
     // before, and no surface has a warm-up record, so nothing is exported on
     // this thread.
-    warmInode_.clear();
-    warmSurfaces_ = 0;
-    warmFailed_ = 0;
     if (!ctx->hw_device_ctx || ctx->hw_frames_ctx) return;
 
     const auto t0 = std::chrono::steady_clock::now();
     AVBufferRef* ref = nullptr;
     int ret = avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, AV_PIX_FMT_VAAPI, &ref);
     if (ret < 0 || !ref) {
+        warmInode_.clear();
         LOG_WARNING << "AsyncDecodeQueue: VAAPI frame parameters unavailable (" << ret
                     << ") for " << filename_ << " - decoder builds its own pool, no decode-thread export";
         return;
@@ -1121,6 +1122,36 @@ void AsyncDecodeQueue::buildWarmPool(AVCodecContext* ctx) {
     // The 3 base work surfaces ff_decode_get_hw_frames_ctx adds on top
     // (decode.c:987-991): the same pool FFmpeg would build.
     if (fc->initial_pool_size) fc->initial_pool_size += 3;
+
+    // Same parameters as the pool already built: hand that one back. The
+    // h264 decoder asks again after every flush (loop EOF, seek); building a
+    // new pool there meant 31 new surfaces under the display's lock and a
+    // first export of each (1amfwm7gq3x). Its surfaces keep their warm-up
+    // records; the pool only hands out the free ones.
+    if (warmPool_) {
+        const auto* old = reinterpret_cast<const AVHWFramesContext*>(warmPool_->data);
+        if (old->device_ref && fc->device_ref && old->device_ref->data == fc->device_ref->data &&
+            old->format == fc->format && old->sw_format == fc->sw_format &&
+            old->width == fc->width && old->height == fc->height &&
+            old->initial_pool_size == fc->initial_pool_size) {
+            av_buffer_unref(&ref);
+            ctx->hw_frames_ctx = av_buffer_ref(warmPool_);
+            if (ctx->hw_frames_ctx) {
+                ++poolReuses_;
+                return;
+            }
+            // out of memory for one ref: build a new pool below
+            ret = avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, AV_PIX_FMT_VAAPI, &ref);
+            if (ret < 0 || !ref) return;
+            fc = reinterpret_cast<AVHWFramesContext*>(ref->data);
+            if (fc->initial_pool_size) fc->initial_pool_size += 3;
+        }
+    }
+    warmInode_.clear();
+    warmSurfaces_ = 0;
+    warmFailed_ = 0;
+    av_buffer_unref(&warmPool_);
+
     ret = av_hwframe_ctx_init(ref);
     if (ret < 0) {
         av_buffer_unref(&ref);
@@ -1149,6 +1180,8 @@ void AsyncDecodeQueue::buildWarmPool(AVCodecContext* ctx) {
     }
     warmSurfaces_ = static_cast<int>(warmInode_.size());
     warmFailed_ = failed;
+    ++poolBuilds_;
+    warmPool_ = av_buffer_ref(ref);   // kept for the next get_format (null: no reuse, still correct)
     ctx->hw_frames_ctx = ref;
 
     const double ms = std::chrono::duration<double, std::milli>(
