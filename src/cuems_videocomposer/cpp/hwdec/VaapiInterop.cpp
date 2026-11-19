@@ -443,6 +443,23 @@ bool VaapiInterop::importFrame(AVFrame* vaapiFrame,
 }
 
 bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height, bool skipSync) {
+    return createEGLImagesImpl(vaapiFrame, nullptr, width, height, skipSync);
+}
+
+bool VaapiInterop::createEGLImagesFromExport(AVFrame* vaapiFrame, const ExportedSurface& exported,
+                                             int& width, int& height) {
+    if (!exported.isFor(vaapiFrame)) {
+        // The caller checks this before it gets here; never use an export
+        // with another surface's frame (a wrong picture, no error otherwise).
+        LOG_ERROR << "VaapiInterop: export of surface " << exported.surface()
+                  << " handed in with another frame - not imported";
+        return false;
+    }
+    return createEGLImagesImpl(vaapiFrame, &exported, width, height, /*skipSync=*/true);
+}
+
+bool VaapiInterop::createEGLImagesImpl(AVFrame* vaapiFrame, const ExportedSurface* exported,
+                                       int& width, int& height, bool skipSync) {
     // Create EGL images only - do NOT bind textures here
     // The caller should call bindTexturesToImages() from the GL thread
     
@@ -513,28 +530,35 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height,
     
     VADisplay vaDisplay = vaapiDevCtx->display;
     
-    // Export surface to DMA-BUF
+    // The DMA-BUF descriptor: the decode thread's export when there is one
+    // (no VA call here, 1amfwm7gq3x), else export the surface now.
     VADRMPRIMESurfaceDescriptor desc;
     memset(&desc, 0, sizeof(desc));
-    
-    // Sync BEFORE export to ensure decode is complete.
-    // Skip if caller guarantees the surface is already synced (e.g. from async decode queue).
-    if (!skipSync) {
-        VAStatus syncStatus = vaSyncSurface(vaDisplay, surface);
-        if (syncStatus != VA_STATUS_SUCCESS) {
-            LOG_WARNING << "VaapiInterop: vaSyncSurface (pre-export) failed: " << syncStatus;
+    // Whether desc's fds are ours to close (our own export) or the holder's.
+    const bool ownFds = (exported == nullptr);
+
+    if (exported) {
+        desc = exported->descriptor();
+    } else {
+        // Sync BEFORE export to ensure decode is complete.
+        // Skip if caller guarantees the surface is already synced (e.g. from async decode queue).
+        if (!skipSync) {
+            VAStatus syncStatus = vaSyncSurface(vaDisplay, surface);
+            if (syncStatus != VA_STATUS_SUCCESS) {
+                LOG_WARNING << "VaapiInterop: vaSyncSurface (pre-export) failed: " << syncStatus;
+            }
         }
-    }
 
-    VAStatus vaStatus = vaExportSurfaceHandle(
-        vaDisplay, surface,
-        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-        VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
-        &desc);
+        VAStatus vaStatus = vaExportSurfaceHandle(
+            vaDisplay, surface,
+            VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+            VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+            &desc);
 
-    if (vaStatus != VA_STATUS_SUCCESS) {
-        LOG_ERROR << "VaapiInterop: vaExportSurfaceHandle failed: " << vaStatus;
-        return false;
+        if (vaStatus != VA_STATUS_SUCCESS) {
+            LOG_ERROR << "VaapiInterop: vaExportSurfaceHandle failed: " << vaStatus;
+            return false;
+        }
     }
 
     // NOTE: Post-export sync removed - pre-export sync is sufficient
@@ -597,15 +621,20 @@ bool VaapiInterop::createEGLImages(AVFrame* vaapiFrame, int& width, int& height,
         uvFd = dup(desc.objects[uvObjectIdx].fd);
     } else {
         LOG_ERROR << "VaapiInterop: Unsupported layer configuration";
-        for (uint32_t i = 0; i < desc.num_objects; i++) {
-            close(desc.objects[i].fd);
+        if (ownFds) {
+            for (uint32_t i = 0; i < desc.num_objects; i++) {
+                close(desc.objects[i].fd);
+            }
         }
         return false;
     }
     
-    // Close original fds (we duped them)
-    for (uint32_t i = 0; i < desc.num_objects; i++) {
-        close(desc.objects[i].fd);
+    // Close original fds (we duped them) - only our own export's; the
+    // decode thread's export keeps its fds until its holder goes.
+    if (ownFds) {
+        for (uint32_t i = 0; i < desc.num_objects; i++) {
+            close(desc.objects[i].fd);
+        }
     }
     
     // Create EGL images

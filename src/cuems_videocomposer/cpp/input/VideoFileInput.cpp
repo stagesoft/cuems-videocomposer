@@ -2021,7 +2021,20 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
-            if (transferHardwareFrameToGPU(queuedFrame, textureBuffer, true)) {  // skipSync: already synced by async queue
+            // The decode thread's export of this frame, if it made one
+            // (1amfwm7gq3x): the import then makes no VA call here. It must be
+            // this frame's own surface; anything else is not used.
+            const ExportedSurface* exported = asyncDecodeQueue_->borrowedExport().get();
+            if (exported && !exported->isFor(queuedFrame)) {
+                if (!loggedExportMismatch_) {
+                    loggedExportMismatch_ = true;
+                    LOG_WARNING << "Async decode: export of surface " << exported->surface()
+                                << " does not belong to frame " << queuedNumber << " of " << currentFile_
+                                << " - exporting on the render thread instead";
+                }
+                exported = nullptr;
+            }
+            if (transferHardwareFrameToGPU(queuedFrame, textureBuffer, true, exported)) {  // skipSync: already synced by async queue
                 // The frame really transferred: getFrame() falls back to the closest
                 // EARLIER queued frame on a miss, so this can be < frameNumber, and the
                 // visible_at gate must not take it for the requested one (869feynrj X1,
@@ -2070,7 +2083,8 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     return false;
 }
 
-bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync) {
+bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync,
+                                                const ExportedSurface* exported) {
     if (!hwFrame) {
         LOG_WARNING << "transferHardwareFrameToGPU: hwFrame is NULL";
         return false;
@@ -2100,8 +2114,12 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
         int width = 0, height = 0;
 
         // Phase 1: Create EGL images (works on any thread)
-        // Skip vaSyncSurface if frame was already synced by the async decode queue
-        if (vaapiInterop_->createEGLImages(hwFrame, width, height, skipSync)) {
+        // Skip vaSyncSurface if frame was already synced by the async decode queue.
+        // From the decode thread's export when there is one: no VA call here (1amfwm7gq3x).
+        const bool imported = exported
+            ? vaapiInterop_->createEGLImagesFromExport(hwFrame, *exported, width, height)
+            : vaapiInterop_->createEGLImages(hwFrame, width, height, skipSync);
+        if (imported) {
             // Phase 2: Try to bind textures (needs GL context)
             if (vaapiInterop_->bindTexturesToImages(texY, texUV)) {
                 // Set up the texture buffer with the imported textures

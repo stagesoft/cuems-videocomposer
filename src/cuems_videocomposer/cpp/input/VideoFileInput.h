@@ -296,7 +296,10 @@ private:
     bool seekToFrame(int64_t frameNumber);
     bool seekByTimestamp(int64_t frameNumber);
     int64_t parsePTSFromFrame(AVFrame* frame);
-    bool transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync = false);
+    // `exported`: the decode thread's DRM PRIME export of hwFrame, or null to
+    // export it here (1amfwm7gq3x). Must belong to hwFrame (checked by the caller).
+    bool transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync = false,
+                                    const ExportedSurface* exported = nullptr);
     void cleanup();
 
     // Index caching
@@ -346,6 +349,7 @@ private:
     int64_t currentFrame_;
     int64_t lastTransferredFrame_ = -1;  // hardware path: the frame in the caller's texture (869feynrj X1)
     int64_t lastMissedFrame_ = -1;       // hardware path: last request not delivered; its retry never waits (1amfwm7jme2)
+    bool loggedExportMismatch_ = false;  // 1amfwm7gq3x: an export that did not belong to its frame, once per layer
     PrimeResult primeResult_ = PrimeResult::NotTried;   // 1amfwm7hk6j
     int64_t demuxSeeks_ = 0;
 #ifdef CUEMS_VC_TESTING
