@@ -28,6 +28,8 @@
 #include <va/va_drm.h>
 #include <va/va_drmcommon.h>
 
+#include "ExportedSurface.h"
+
 // EGL types - use minimal definitions to avoid GLEW conflicts
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -117,6 +119,16 @@ public:
      * @return true if EGL images were created successfully
      */
     bool createEGLImages(AVFrame* vaapiFrame, int& width, int& height, bool skipSync = false);
+
+    /**
+     * Phase 1 from an export the decode thread already made (1amfwm7gq3x):
+     * the same import as createEGLImages(), but no VA call on this thread.
+     * `exported` must belong to vaapiFrame (ExportedSurface::isFor; checked
+     * here, false if not). Its fds stay owned by `exported`: the import works
+     * on dups and closes only those.
+     */
+    bool createEGLImagesFromExport(AVFrame* vaapiFrame, const ExportedSurface& exported,
+                                   int& width, int& height);
     
     /**
      * Phase 2: Bind GL textures to EGL images (MUST be called from GL thread!)
@@ -268,6 +280,13 @@ private:
     // Enable VAAPI surface readback debugging (very expensive!)
     bool debugSurfaceReadbackEnabled_;
     
+    // The one import body behind createEGLImages() and
+    // createEGLImagesFromExport() (1amfwm7gq3x). With `exported` null it syncs
+    // (unless skipSync) and exports the surface here, and closes that
+    // export's fds; with `exported` it makes no VA call and closes nothing of it.
+    bool createEGLImagesImpl(AVFrame* vaapiFrame, const ExportedSurface* exported,
+                             int& width, int& height, bool skipSync);
+
     // Create EGL image from DMA-BUF descriptor
     EGLImageKHR createEGLImageFromDmaBuf(
         int fd, int width, int height,

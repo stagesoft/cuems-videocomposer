@@ -1032,6 +1032,8 @@ if(BUILD_TESTS)
         src/cuems_videocomposer/cpp/test/TestCanvasSize.cpp
         src/cuems_videocomposer/cpp/test/TestCpuUpload.cpp
         src/cuems_videocomposer/cpp/test/TestSharedPromotion.cpp
+        src/cuems_videocomposer/cpp/test/TestExportedSurface.cpp
+        src/cuems_videocomposer/cpp/test/TestAsyncQueueExport.cpp
     )
     
     # C++ implementation files needed by tests

@@ -31,6 +31,7 @@
 #include "../utils/Logger.h"
 #include <algorithm>
 #include <chrono>
+#include <sys/stat.h>
 
 extern "C" {
 #include <libavutil/imgutils.h>
@@ -96,6 +97,17 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
     // looked" would report the previous attempt's answer forever.
     softDespiteHwClaim_ = false;
     firstDecodedPixFmt_ = AV_PIX_FMT_NONE;
+
+    // The decode-thread export's warm-up record belongs to one decoder
+    // (1amfwm7gq3x): a reopen builds a new pool.
+    warmInode_.clear();
+    warmSurfaces_ = 0;
+    warmFailed_ = 0;
+    poolBuilds_ = 0;
+    poolReuses_ = 0;
+    loggedNoWarmRecord_ = false;
+    loggedExportFailed_ = false;
+    loggedInodeChanged_ = false;
 
     eofReached_ = false;
     virtualOffset_ = 0;
@@ -223,6 +235,14 @@ bool AsyncDecodeQueue::open(const std::string& filename, AVBufferRef* hwDeviceCt
         // not free: it is VRAM reserved per layer against a carve-out that the
         // eviction-storm hang is measured against.
         codecCtx_->extra_hw_frames = extraHwFrames_;
+
+        // 1amfwm7gq3x: with the decode-thread export on, the pool is built
+        // in get_format so every surface can be exported once before any
+        // decode targets it (buildWarmPool).
+        if (decodeThreadExport_) {
+            codecCtx_->opaque = this;
+            codecCtx_->get_format = &AsyncDecodeQueue::getFormatCallback;
+        }
     }
     
     // Open codec
@@ -323,9 +343,12 @@ void AsyncDecodeQueue::close() {
         std::lock_guard<std::mutex> lock(queueMutex_);
         frameQueue_.clear();
     }
+    warmInode_.clear();   // the decode thread, its only other user, is joined
+    av_buffer_unref(&warmPool_);   // our ref; the codec context (freed below) drops its own
     if (borrowedFrame_) {
         av_frame_free(&borrowedFrame_);
     }
+    borrowedExported_.reset();
 
     // Cleanup FFmpeg
     if (swsCtx_) {
@@ -348,19 +371,25 @@ void AsyncDecodeQueue::close() {
     ready_ = false;
 }
 
-AVFrame* AsyncDecodeQueue::borrowFrame(AVFrame* src) {
-    if (!src) return nullptr;
-    // Release previous borrowed frame
+AVFrame* AsyncDecodeQueue::borrowFrame(const QueuedFrame* src) {
+    // The only setter of the borrowed pair (1amfwm7gq3x): the frame and its
+    // export are taken or dropped together, so the caller can never see one
+    // frame with another frame's export. A miss drops both; the previous
+    // frame's pointer was only valid until this call anyway.
+    borrowedExported_.reset();
     if (borrowedFrame_) {
         av_frame_unref(borrowedFrame_);
-    } else {
+    }
+    if (!src || !src->frame) return nullptr;
+    if (!borrowedFrame_) {
         borrowedFrame_ = av_frame_alloc();
         if (!borrowedFrame_) return nullptr;
     }
     // Create a ref-counted copy (increments surface refcount for VAAPI)
-    if (av_frame_ref(borrowedFrame_, src) < 0) {
+    if (av_frame_ref(borrowedFrame_, src->frame) < 0) {
         return nullptr;
     }
+    borrowedExported_ = src->exported;
     return borrowedFrame_;
 }
 
@@ -375,7 +404,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
     int64_t tf = totalFrames_.load();
     for (auto& qf : frameQueue_) {
         if (qf.frameNumber == frameNumber && qf.ready) {
-            AVFrame* hit = borrowFrame(qf.frame);
+            AVFrame* hit = borrowFrame(&qf);
             returnedFrame = hit ? frameNumber : -1;
             return hit;
         }
@@ -386,7 +415,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
         int64_t virtualNum = tf + frameNumber;
         for (auto& qf : frameQueue_) {
             if (qf.frameNumber == virtualNum && qf.ready) {
-                AVFrame* hit = borrowFrame(qf.frame);
+                AVFrame* hit = borrowFrame(&qf);
                 returnedFrame = hit ? frameNumber : -1;
                 return hit;
             }
@@ -407,7 +436,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
             // Check again (exact match)
             for (auto& qf : frameQueue_) {
                 if (qf.frameNumber == frameNumber && qf.ready) {
-                    AVFrame* hit = borrowFrame(qf.frame);
+                    AVFrame* hit = borrowFrame(&qf);
                     returnedFrame = hit ? frameNumber : -1;
                     return hit;
                 }
@@ -417,7 +446,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
                 int64_t virtualNum = tf + frameNumber;
                 for (auto& qf : frameQueue_) {
                     if (qf.frameNumber == virtualNum && qf.ready) {
-                        AVFrame* hit = borrowFrame(qf.frame);
+                        AVFrame* hit = borrowFrame(&qf);
                         returnedFrame = hit ? frameNumber : -1;
                         return hit;
                     }
@@ -427,7 +456,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
     }
 
     // Frame not available - return closest earlier frame if available
-    AVFrame* closest = nullptr;
+    const QueuedFrame* closest = nullptr;
     int64_t closestNumber = -1;
     int64_t closestDiff = INT64_MAX;
 
@@ -436,7 +465,7 @@ AVFrame* AsyncDecodeQueue::getFrame(int64_t frameNumber, int64_t& returnedFrame,
             int64_t diff = frameNumber - qf.frameNumber;
             if (diff < closestDiff) {
                 closestDiff = diff;
-                closest = qf.frame;
+                closest = &qf;
                 closestNumber = qf.frameNumber;
             }
         }
@@ -880,28 +909,9 @@ bool AsyncDecodeQueue::decodeNextFrame() {
                     if (qf.frame) {
                         av_frame_move_ref(qf.frame, decodeFrame_);
                         qf.ready = true;
-
-                        {
-                            std::lock_guard<std::mutex> lock(queueMutex_);
-                            bool inserted = false;
-                            for (auto it = frameQueue_.begin(); it != frameQueue_.end(); ++it) {
-                                if (it->frameNumber == drainFrameNum) {
-                                    if (it->frame) av_frame_free(&(it->frame));
-                                    it->frame = qf.frame;
-                                    it->ready = true;
-                                    qf.frame = nullptr;
-                                    inserted = true;
-                                    break;
-                                } else if (it->frameNumber > drainFrameNum) {
-                                    frameQueue_.insert(it, std::move(qf));
-                                    inserted = true;
-                                    break;
-                                }
-                            }
-                            if (!inserted) {
-                                frameQueue_.push_back(std::move(qf));
-                            }
-                        }
+                        // Outside queueMutex_, as in the normal path below.
+                        qf.exported = exportForQueue(qf.frame, drainFrameNum);
+                        insertSorted(std::move(qf));
 
                         lastDecodedFrame_ = drainFrameNum;
                         drainCount++;
@@ -1031,31 +1041,14 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     // Move frame data (avoids copy for hardware frames)
     av_frame_move_ref(qf.frame, decodeFrame_);
     qf.ready = true;
-    
+
+    // Export before taking queueMutex_: the export is the slow driver call
+    // this change moves off the render thread, and holding the queue lock
+    // across it would make getFrame() wait on it instead (1amfwm7gq3x).
+    qf.exported = exportForQueue(qf.frame, frameNum);
+
     // Add to queue (deduplicated, sorted)
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        
-        bool inserted = false;
-        for (auto it = frameQueue_.begin(); it != frameQueue_.end(); ++it) {
-            if (it->frameNumber == frameNum) {
-                // Duplicate: replace existing frame with newer decode
-                if (it->frame) av_frame_free(&(it->frame));
-                it->frame = qf.frame;
-                it->ready = qf.ready;
-                qf.frame = nullptr;  // Prevent double-free in moved-from QueuedFrame
-                inserted = true;
-                break;
-            } else if (it->frameNumber > frameNum) {
-                frameQueue_.insert(it, std::move(qf));
-                inserted = true;
-                break;
-            }
-        }
-        if (!inserted) {
-            frameQueue_.push_back(std::move(qf));
-        }
-    }
+    insertSorted(std::move(qf));
     
     lastDecodedFrame_ = frameNum;
     
@@ -1063,6 +1056,181 @@ bool AsyncDecodeQueue::decodeNextFrame() {
     queueCond_.notify_all();
     
     return true;
+}
+
+void AsyncDecodeQueue::insertSorted(QueuedFrame&& qf) {
+    // One copy of the sorted, deduplicated insert for the drain path and the
+    // normal path (they used to be two copies, 1amfwm7gq3x).
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    for (auto it = frameQueue_.begin(); it != frameQueue_.end(); ++it) {
+        if (it->frameNumber == qf.frameNumber) {
+            // Duplicate: the newer decode replaces the entry, frame and export
+            // together - the old export belongs to the old frame.
+            *it = std::move(qf);
+            return;
+        }
+        if (it->frameNumber > qf.frameNumber) {
+            frameQueue_.insert(it, std::move(qf));
+            return;
+        }
+    }
+    frameQueue_.push_back(std::move(qf));
+}
+
+std::shared_ptr<const ExportedSurface> AsyncDecodeQueue::exportForQueue(const AVFrame* frame,
+                                                                        int64_t frameNum) {
+    if (!frame) return nullptr;
+    // A frame below the trim window is dropped by the trim right after this
+    // decode (post-seek catch-up from a keyframe, up to a GOP of them): no
+    // export for it. Virtual loop frames (totalFrames_ + n) are always above.
+    if (frameNum < targetFrame_.load() - 2) return nullptr;
+    if (exporter_) return exporter_(frame);   // test seam, any pixel format
+    if (!decodeThreadExport_ || !useHardware_ || frame->format != AV_PIX_FMT_VAAPI) return nullptr;
+    return exportVaapi(frame);
+}
+
+AVPixelFormat AsyncDecodeQueue::getFormatCallback(AVCodecContext* ctx, const AVPixelFormat* fmts) {
+    // The format FFmpeg would pick without a callback (VAAPI when the device
+    // context matches, else the software format). Only the pool changes.
+    const AVPixelFormat chosen = avcodec_default_get_format(ctx, fmts);
+    auto* self = static_cast<AsyncDecodeQueue*>(ctx->opaque);
+    if (chosen == AV_PIX_FMT_VAAPI && self) {
+        self->buildWarmPool(ctx);
+    }
+    return chosen;
+}
+
+void AsyncDecodeQueue::buildWarmPool(AVCodecContext* ctx) {
+    // ff_get_format drops the previous hwaccel and its frames context before
+    // it calls get_format, and ff_decode_get_hw_frames_ctx keeps a frames
+    // context set here (FFmpeg 5.1 decode.c:961, :1097). Any failure below
+    // leaves hw_frames_ctx unset: FFmpeg then builds its own pool exactly as
+    // before, and no surface has a warm-up record, so nothing is exported on
+    // this thread.
+    if (!ctx->hw_device_ctx || ctx->hw_frames_ctx) return;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    AVBufferRef* ref = nullptr;
+    int ret = avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, AV_PIX_FMT_VAAPI, &ref);
+    if (ret < 0 || !ref) {
+        warmInode_.clear();
+        LOG_WARNING << "AsyncDecodeQueue: VAAPI frame parameters unavailable (" << ret
+                    << ") for " << filename_ << " - decoder builds its own pool, no decode-thread export";
+        return;
+    }
+    auto* fc = reinterpret_cast<AVHWFramesContext*>(ref->data);
+    // The 3 base work surfaces ff_decode_get_hw_frames_ctx adds on top
+    // (decode.c:987-991): the same pool FFmpeg would build.
+    if (fc->initial_pool_size) fc->initial_pool_size += 3;
+
+    // Same parameters as the pool already built: hand that one back. The
+    // h264 decoder asks again after every flush (loop EOF, seek); building a
+    // new pool there meant 31 new surfaces under the display's lock and a
+    // first export of each (1amfwm7gq3x). Its surfaces keep their warm-up
+    // records; the pool only hands out the free ones. At a wrap the old
+    // pass's frames still queued, borrowed or held by the interop take at
+    // most MAX_QUEUE_SIZE + 2 surfaces: the same headroom a full queue needs
+    // in mid-pass, which extra_hw_frames (MAX_QUEUE_SIZE + 3) already covers.
+    if (warmPool_) {
+        const auto* old = reinterpret_cast<const AVHWFramesContext*>(warmPool_->data);
+        if (old->device_ref && fc->device_ref && old->device_ref->data == fc->device_ref->data &&
+            old->format == fc->format && old->sw_format == fc->sw_format &&
+            old->width == fc->width && old->height == fc->height &&
+            old->initial_pool_size == fc->initial_pool_size) {
+            av_buffer_unref(&ref);
+            ctx->hw_frames_ctx = av_buffer_ref(warmPool_);
+            if (ctx->hw_frames_ctx) {
+                ++poolReuses_;
+                return;
+            }
+            // out of memory for one ref: build a new pool below
+            ret = avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, AV_PIX_FMT_VAAPI, &ref);
+            if (ret < 0 || !ref) return;
+            fc = reinterpret_cast<AVHWFramesContext*>(ref->data);
+            if (fc->initial_pool_size) fc->initial_pool_size += 3;
+        }
+    }
+    warmInode_.clear();
+    warmSurfaces_ = 0;
+    warmFailed_ = 0;
+    av_buffer_unref(&warmPool_);
+
+    ret = av_hwframe_ctx_init(ref);
+    if (ret < 0) {
+        av_buffer_unref(&ref);
+        LOG_WARNING << "AsyncDecodeQueue: VAAPI pool init failed (" << ret << ") for " << filename_
+                    << " - decoder builds its own pool, no decode-thread export";
+        return;
+    }
+    auto* vfc = static_cast<AVVAAPIFramesContext*>(fc->hwctx);
+    auto* vdc = static_cast<AVVAAPIDeviceContext*>(fc->device_ctx->hwctx);
+
+    int failed = 0;
+    for (int i = 0; vfc->surface_ids && i < vfc->nb_surfaces; ++i) {
+        const VASurfaceID id = vfc->surface_ids[i];
+        // The first export of a surface is where a driver may reallocate it
+        // (Mesa 22.3.6 surface.c:1428-1453, an interlaced buffer made
+        // progressive and weave-copied); here nothing is pending on it. The
+        // buffer it returns is the one every later export must return too.
+        auto e = ExportedSurface::exportFrom(vdc->display, id);
+        struct stat st{};
+        if (!e || e->descriptor().num_objects == 0 ||
+            fstat(e->descriptor().objects[0].fd, &st) != 0) {
+            ++failed;
+            continue;
+        }
+        warmInode_[id] = st.st_ino;
+    }
+    warmSurfaces_ = static_cast<int>(warmInode_.size());
+    warmFailed_ = failed;
+    ++poolBuilds_;
+    warmPool_ = av_buffer_ref(ref);   // kept for the next get_format (null: no reuse, still correct)
+    ctx->hw_frames_ctx = ref;
+
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0).count();
+    LOG_INFO << "AsyncDecodeQueue: VAAPI pool of " << vfc->nb_surfaces << " surfaces for "
+             << filename_ << ", warm-up export: " << warmSurfaces_.load() << " ok, "
+             << failed << " failed, " << static_cast<int>(ms + 0.5) << " ms";
+}
+
+std::shared_ptr<const ExportedSurface> AsyncDecodeQueue::exportVaapi(const AVFrame* frame) {
+    const VASurfaceID id = static_cast<VASurfaceID>(reinterpret_cast<uintptr_t>(frame->data[3]));
+    auto warm = warmInode_.find(id);
+    if (warm == warmInode_.end() || !frame->hw_frames_ctx) {
+        if (!loggedNoWarmRecord_) {
+            loggedNoWarmRecord_ = true;
+            LOG_INFO << "AsyncDecodeQueue: surface " << id << " of " << filename_
+                     << " has no warm-up record - the render thread exports it";
+        }
+        return nullptr;
+    }
+    auto* fc = reinterpret_cast<AVHWFramesContext*>(frame->hw_frames_ctx->data);
+    auto* vdc = static_cast<AVVAAPIDeviceContext*>(fc->device_ctx->hwctx);
+
+    VAStatus status = VA_STATUS_SUCCESS;
+    auto exported = ExportedSurface::exportFrom(vdc->display, id, &status);
+    if (!exported || exported->descriptor().num_objects == 0) {
+        if (!loggedExportFailed_) {
+            loggedExportFailed_ = true;
+            LOG_WARNING << "AsyncDecodeQueue: decode-thread vaExportSurfaceHandle failed (" << status
+                        << ") for " << filename_ << " - the render thread exports instead";
+        }
+        return nullptr;
+    }
+    // The buffer must be the one the warm-up left. A different one means the
+    // driver reallocated it now, right after a decode: not trusted here.
+    struct stat st{};
+    if (fstat(exported->descriptor().objects[0].fd, &st) != 0 || st.st_ino != warm->second) {
+        if (!loggedInodeChanged_) {
+            loggedInodeChanged_ = true;
+            LOG_WARNING << "AsyncDecodeQueue: surface " << id << " of " << filename_
+                        << " changed buffer after its warm-up export - the render thread exports it";
+        }
+        warm->second = st.st_ino;
+        return nullptr;
+    }
+    return exported;
 }
 
 bool AsyncDecodeQueue::seekInternal(int64_t frameNumber) {
