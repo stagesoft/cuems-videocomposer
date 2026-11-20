@@ -591,6 +591,8 @@ bool test_ExportQueue_VaapiWarmUpAndDecodeThreadExport() {
             std::cout << "(skipped: h264 decoded in software here) ";
             q.close();
             av_buffer_unref(&dev);
+            const std::string rmSkip = "rm -rf " + dir;
+            (void)std::system(rmSkip.c_str());
             return true;
         }
         TEST_ASSERT_EQ(off.ownExport + off.foreignExport, 0);

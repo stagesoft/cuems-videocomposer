@@ -1127,7 +1127,10 @@ void AsyncDecodeQueue::buildWarmPool(AVCodecContext* ctx) {
     // h264 decoder asks again after every flush (loop EOF, seek); building a
     // new pool there meant 31 new surfaces under the display's lock and a
     // first export of each (1amfwm7gq3x). Its surfaces keep their warm-up
-    // records; the pool only hands out the free ones.
+    // records; the pool only hands out the free ones. At a wrap the old
+    // pass's frames still queued, borrowed or held by the interop take at
+    // most MAX_QUEUE_SIZE + 2 surfaces: the same headroom a full queue needs
+    // in mid-pass, which extra_hw_frames (MAX_QUEUE_SIZE + 3) already covers.
     if (warmPool_) {
         const auto* old = reinterpret_cast<const AVHWFramesContext*>(warmPool_->data);
         if (old->device_ref && fc->device_ref && old->device_ref->data == fc->device_ref->data &&
