@@ -38,11 +38,13 @@
 #include "../sync/PresentTick.h"
 #include "../sync/SyncSource.h"
 #include "../input/InputSource.h"
+#include "../input/AsyncWaitPolicy.h"
 #include "../remote/JournalContract.h"
 #include "../utils/CapsFile.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -688,14 +690,15 @@ bool test_VisibleAt_HeldFrameOnMiss_DoesNotReveal() {
     const int64_t tail = r.input->delivered;
     TEST_ASSERT(tail >= 50);
     r.input->fail = true;
-    r.step();                                   // the onset poll: "loaded" (currentFrame 0), pixels still the tail
-    TEST_ASSERT_EQ(r.layer->getCurrentFrame(), static_cast<int64_t>(0));
+    r.step();                                   // the onset poll: frame 0 asked, the load held the tail
+    // 1amfwm7jme2: a held load is a miss, not a load: the layer still reports the frame on screen (it used to record
+    // frame 0 as loaded and never ask for it again)
+    TEST_ASSERT_EQ(r.layer->getCurrentFrame(), tail);
     TEST_ASSERT_EQ(r.input->delivered, tail);
     TEST_ASSERT_FALSE(r.layer->playback().contentStarted());
     TEST_ASSERT_FALSE(r.visible());
     TEST_ASSERT_TRUE(r.layer->visibleAtPending());
-    // still held on the next poll (same frame 0 chosen, no new load attempted? the frame number did not change, so the
-    // layer does not reload): the gate keeps waiting until a frame is really delivered
+    // the next poll asks for its chosen frame again (1amfwm7jme2), and the gate reveals the first frame really delivered
     r.input->fail = false;
     size_t i = r.step();
     while (!r.visible() && r.next < static_cast<size_t>(onset) + 6) i = r.step();
@@ -886,5 +889,97 @@ bool test_VisibleAt_CapsToken() {
     const std::vector<std::string> t = capsfile::tokens();
     TEST_ASSERT_TRUE(std::find(t.begin(), t.end(), "loop_period") != t.end());
     TEST_ASSERT_TRUE(std::find(t.begin(), t.end(), "visible_at") != t.end());
+    return true;
+}
+
+// ---- 1amfwm7jme2: a load that held the previous texture is retried, never taken for the frame ----------------------
+
+// A kept layer restarted at frame 0 (869feynrj Phase B, probe E on test3: hardware h264 showed frame 1 on 10/10 warm
+// restarts). Not looping, so the clamp parks it on frame 0 before the start. The texture still holds the previous
+// pass (frame 77). The first poll after the new offset asks for frame 0 while the decode queue has just been cleared:
+// the load holds frame 77 and reports success. The layer must ask for frame 0 again on the next polls, so frame 0 is
+// in the texture before the start and the gate reveals it at the onset, content 0.
+bool test_VisibleAt_WarmRestart_HeldMissBeforeStart_ShowsFrameZero() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    const int64_t S = f.frames[0] + 25;
+    const int64_t onset = oracleOnset(f, S);
+    TEST_ASSERT(onset > 3);
+    Rig r = makeRig(f, S, 100, false);
+    r.input->holdOnMiss = true;
+    r.input->delivered = 77;                    // the previous pass's frame, kept in the texture
+    r.layer->setVisibleAt(true);
+    r.input->fail = true;
+    r.step();                                   // frame 0 asked; the queue was just cleared by the backward jump
+    TEST_ASSERT_EQ(r.input->delivered, static_cast<int64_t>(77));
+    TEST_ASSERT_FALSE(r.visible());
+    r.input->fail = false;                      // frame 0 is decoded a few ms later
+    while (r.next < static_cast<size_t>(onset)) {
+        r.step();
+        TEST_ASSERT_FALSE(r.visible());
+    }
+    TEST_ASSERT_EQ(r.input->delivered, static_cast<int64_t>(0));   // asked again while parked: in place before the start
+    r.step();                                   // the onset poll
+    TEST_ASSERT_TRUE(r.visible());
+    TEST_ASSERT_EQ(r.layer->playback().contentFrame(), static_cast<int64_t>(0));
+    TEST_ASSERT_EQ(r.layer->getCurrentFrame(), static_cast<int64_t>(0));
+    return true;
+}
+
+// The same on a layer that is already visible (a re-trigger of a playing layer): after the held miss the next poll
+// shows the chosen frame, it does not wait for the next frame number.
+bool test_VisibleAt_HeldMiss_VisibleLayer_NextPollShowsChosenFrame() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    const int64_t S = f.frames[0] + 25;
+    const int64_t onset = oracleOnset(f, S);
+    Rig r = makeRig(f, S, 100, false);
+    r.input->holdOnMiss = true;
+    r.input->delivered = 77;
+    r.input->fail = true;
+    r.step();
+    TEST_ASSERT_EQ(r.input->delivered, static_cast<int64_t>(77));
+    r.input->fail = false;
+    r.step();
+    TEST_ASSERT_EQ(r.input->delivered, static_cast<int64_t>(0));
+    TEST_ASSERT_EQ(r.layer->getCurrentFrame(), static_cast<int64_t>(0));
+    (void)onset;
+    return true;
+}
+
+// No false misses: with every load delivered (a wrap-mode layer across several wraps, as the decode queue's virtual
+// frames hand back their real number), each frame change loads once and a frame is never loaded twice in a row.
+bool test_VisibleAt_NoMiss_OneLoadPerFrameChange() {
+    TickScope scope;
+    const Fixture f = loadFixture("cadence", "b_Exact");
+    TEST_ASSERT(f.loaded);
+    const int64_t S = f.frames[0] + 5;
+    Rig r = makeRig(f, S, 20, true);            // 20-frame file: several wraps in the fixture
+    r.input->holdOnMiss = true;
+    int64_t changes = 0, prev = INT64_MIN, wraps = 0;
+    while (r.next < f.pos.size()) {
+        r.step();
+        const int64_t cur = r.layer->getCurrentFrame();
+        if (cur != prev) {
+            if (prev != INT64_MIN && cur < prev) ++wraps;
+            ++changes;
+            prev = cur;
+        }
+    }
+    TEST_ASSERT(wraps >= 2);
+    TEST_ASSERT_EQ(r.input->loads, changes);
+    return true;
+}
+
+// The render-thread wait policy (AsyncWaitPolicy.h): a retry of the frame that just missed never waits.
+bool test_AsyncWait_RetryNeverWaits() {
+    using videocomposer::asyncwait::waitMs;
+    TEST_ASSERT_EQ(waitMs(false, false, 20), 20);    // cold, VideoFileInput
+    TEST_ASSERT_EQ(waitMs(false, true, 200), 200);   // cold, HAPVideoInput: nothing to hold yet
+    TEST_ASSERT_EQ(waitMs(true, false, 20), 5);      // first request with a texture to hold
+    TEST_ASSERT_EQ(waitMs(true, true, 20), 0);       // retry of the missed frame
+    TEST_ASSERT_EQ(waitMs(true, true, 200), 0);
     return true;
 }

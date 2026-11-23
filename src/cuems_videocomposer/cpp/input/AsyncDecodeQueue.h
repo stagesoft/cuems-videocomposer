@@ -24,6 +24,7 @@
 
 #include "../video/FrameBuffer.h"
 #include "../video/GPUTextureFrameBuffer.h"
+#include "../hwdec/ExportedSurface.h"
 #include <string>
 #include <memory>
 #include <thread>
@@ -33,6 +34,8 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <unordered_map>
+#include <sys/types.h>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -231,6 +234,63 @@ public:
     AVFrame* getFrame(int64_t frameNumber, int64_t& returnedFrame, int maxWaitMs = 0);
 
     /**
+     * The DRM PRIME export of the frame the last getFrame() returned, or null
+     * (1amfwm7gq3x). It is null after a miss and for a frame the decode thread
+     * did not export (the caller then exports it itself, as before). Same
+     * thread and same lifetime as getFrame()'s frame: valid until the next
+     * getFrame() or close(). A shared_ptr copy keeps the fds open longer.
+     */
+    const std::shared_ptr<const ExportedSurface>& borrowedExport() const { return borrowedExported_; }
+
+    /**
+     * Exports one decoded frame on the decode thread (1amfwm7gq3x). Called
+     * outside queueMutex_, never for a frame the post-seek catch-up trims at
+     * once. Returns null when the frame is not exported.
+     */
+    using Exporter = std::function<std::shared_ptr<const ExportedSurface>(const AVFrame*)>;
+
+    /**
+     * Export VAAPI frames on the decode thread (1amfwm7gq3x). Off by default;
+     * set by the owner whose frames go to a display through EGL dma-buf
+     * import (VideoFileInput), never by the indexer. Set it before open();
+     * it is kept across reopens.
+     *
+     * When on, the queue builds the decoder's VAAPI surface pool itself in
+     * get_format (same size FFmpeg would build) and exports every surface of
+     * it once there, before any decode targets it, so a driver that must
+     * reallocate a surface on its first export (Mesa radeonsi: interlaced to
+     * progressive) does it with nothing pending. A frame on a surface without
+     * that warm-up record is not exported here; the render thread exports it
+     * as before.
+     */
+    void setDecodeThreadExport(bool on) { decodeThreadExport_ = on; }
+    bool decodeThreadExport() const { return decodeThreadExport_; }
+
+    /** The last get_format warm-up: surfaces exported, and failed exports.
+     *  Zero until one ran. (Whether the driver reallocated a surface cannot be
+     *  read from the export: Mesa reallocates inside it, before it exports the
+     *  handle, so even the first export already returns the kept buffer.) */
+    struct WarmUpStats {
+        int surfaces = 0;
+        int failed = 0;
+        int builds = 0;   // pools built since open(); a reused pool does not count
+        int reuses = 0;   // get_format calls that got the existing pool back
+    };
+    WarmUpStats warmUpStats() const {
+        return {warmSurfaces_.load(), warmFailed_.load(), poolBuilds_.load(), poolReuses_.load()};
+    }
+
+#ifdef CUEMS_VC_TESTING
+    /**
+     * Test seam: every frame the decode thread keeps goes through fn, whatever
+     * its pixel format, so the queue paths can be driven by software decode
+     * with pipe fds standing in for DRM PRIME fds. Set it before open(); it is
+     * read by the decode thread without a lock.
+     */
+    void setExporterForTesting(Exporter fn) { exporter_ = std::move(fn); }
+#endif
+
+    /**
      * Seek to a new position (flushes queue)
      * @param frameNumber Target frame number
      */
@@ -306,12 +366,20 @@ public:
     int64_t getNewestFrame() const;
 
 private:
+#ifdef CUEMS_VC_TESTING
+    friend struct AsyncDecodeQueueTestAccess;
+#endif
+
     // Decoded frame in queue
     struct QueuedFrame {
         int64_t frameNumber;
         AVFrame* frame;  // Owned by this struct
         bool ready;
-        
+        // The frame's DRM PRIME export, or null (1amfwm7gq3x). It belongs to
+        // `frame` and must travel with it: the deque shifts entries on insert
+        // and remove_if, and both go through the move operations below.
+        std::shared_ptr<const ExportedSurface> exported;
+
         QueuedFrame() : frameNumber(-1), frame(nullptr), ready(false) {}
         ~QueuedFrame() {
             if (frame) {
@@ -321,7 +389,8 @@ private:
         
         // Move-only
         QueuedFrame(QueuedFrame&& other) noexcept 
-            : frameNumber(other.frameNumber), frame(other.frame), ready(other.ready) {
+            : frameNumber(other.frameNumber), frame(other.frame), ready(other.ready),
+              exported(std::move(other.exported)) {
             other.frame = nullptr;
         }
         QueuedFrame& operator=(QueuedFrame&& other) noexcept {
@@ -330,6 +399,7 @@ private:
                 frameNumber = other.frameNumber;
                 frame = other.frame;
                 ready = other.ready;
+                exported = std::move(other.exported);
                 other.frame = nullptr;
             }
             return *this;
@@ -345,6 +415,42 @@ private:
     
     // Internal decode (called from thread)
     bool decodeNextFrame();
+
+    // Queue a decoded entry in frame order. An entry with the same number is
+    // replaced, frame and export together. Takes queueMutex_.
+    void insertSorted(QueuedFrame&& qf);
+
+    // The decode thread's export of a frame it is about to queue (1amfwm7gq3x).
+    // Outside queueMutex_. Null when not exported.
+    std::shared_ptr<const ExportedSurface> exportForQueue(const AVFrame* frame, int64_t frameNum);
+
+    // Test-seam exporter (setExporterForTesting); empty in production.
+    Exporter exporter_;
+
+    // The production decode-thread export (1amfwm7gq3x), see setDecodeThreadExport().
+    bool decodeThreadExport_ = false;
+    // get_format: pick the format as FFmpeg would; for VAAPI with the export
+    // on, build the pool here and warm it up.
+    static AVPixelFormat getFormatCallback(AVCodecContext* ctx, const AVPixelFormat* fmts);
+    void buildWarmPool(AVCodecContext* ctx);
+    std::shared_ptr<const ExportedSurface> exportVaapi(const AVFrame* frame);
+    // Surface -> dma-buf inode after its warm-up export. Decode thread only
+    // (get_format runs inside the decoder calls of that thread); cleared by
+    // open() and close().
+    std::unordered_map<VASurfaceID, ino_t> warmInode_;
+    std::atomic<int> warmSurfaces_{0};
+    std::atomic<int> warmFailed_{0};
+    std::atomic<int> poolBuilds_{0};
+    std::atomic<int> poolReuses_{0};
+    // The pool buildWarmPool() last built, kept for the next get_format: the
+    // h264 decoder asks again after every flush (h264_decode_flush clears
+    // context_initialized, FFmpeg 5.1 h264dec.c:488; h264_slice.c:1125-1143),
+    // i.e. at every loop EOF and every seek. Released by close().
+    AVBufferRef* warmPool_ = nullptr;
+    // One line per open() for each way the decode-thread export can fall back.
+    bool loggedNoWarmRecord_ = false;
+    bool loggedExportFailed_ = false;
+    bool loggedInodeChanged_ = false;
     bool seekInternal(int64_t frameNumber);
     
     // FFmpeg objects (owned by decode thread)
@@ -457,10 +563,14 @@ private:
     // while the render thread is still using a frame for GPU transfer.
     // Valid until the next getFrame() call (always from the same thread).
     AVFrame* borrowedFrame_ = nullptr;
+    // The export that belongs to borrowedFrame_ (1amfwm7gq3x). Set and cleared
+    // only by borrowFrame(), together with it.
+    std::shared_ptr<const ExportedSurface> borrowedExported_;
 
-    // Ref the found frame into borrowedFrame_ and return it.
+    // Ref the found entry's frame into borrowedFrame_, take its export into
+    // borrowedExported_, and return the frame. Null (a miss) drops both.
     // Must be called while queueMutex_ is held.
-    AVFrame* borrowFrame(AVFrame* src);
+    AVFrame* borrowFrame(const QueuedFrame* src);
 
     // Synchronization
     std::condition_variable seekCond_;
