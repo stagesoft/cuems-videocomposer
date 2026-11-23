@@ -1,3 +1,26 @@
+cuems-videocomposer (0.1.2-16) unstable; urgency=medium
+
+  * Fixed: near every loop wrap of a hardware-decoded (VAAPI) video, every
+    output held a frame one or more vsyncs too long (1amfwm7gq3x, PR #44).
+    At the end of each pass the decoder rebuilt its surface pool while the
+    render thread waited for the same VA display lock. The decode thread
+    now exports each frame, the pool is built once and kept across loop
+    wraps and seeks, and the render thread makes no VA call. Measured with
+    8 h264 layers looping: AMD (FP530) wraps with a missed vsync 60/60 ->
+    0/60; Intel N97 60/60 -> 12-25/60, one vsync each (what is left is
+    GPU contention at the wrap, ticket 1amfwm7jzdq). Same pictures (CRC),
+    no file descriptor or memory growth, NDI output unchanged.
+  * Fixed: a hardware-decoded layer kept loaded and restarted at frame 0
+    showed frame 1 (1amfwm7jme2, PR #42). A frame the decoder had not
+    delivered yet was recorded as loaded; it is now asked again at the
+    next vsync, without waiting.
+  * Verified: 387/387 unit tests on an FP530 for this source (rc_1
+    fd3e45b); rig rows on test3, the test rig's N97 node and test3 with
+    NDI (cuems-RELATIONS baselines/1amfwm7gq3x). Not for show machines
+    until the human test battery. Same version on every box of a cluster.
+
+ -- Ion Reguera <ion@stagelab.coop>  Mon, 23 Nov 2026 11:32:13 +0100
+
 cuems-videocomposer (0.1.2-15) unstable; urgency=medium
 
   * Fixed: the videocomposer died when the decoding layer of a video cue
