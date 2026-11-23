@@ -20,6 +20,7 @@
  */
 
 #include "VideoFileInput.h"
+#include "AsyncWaitPolicy.h"
 #include "../../ffcompat.h"
 #include "../utils/CLegacyBridge.h"
 #include "../utils/Logger.h"
@@ -291,6 +292,7 @@ bool VideoFileInput::open(const std::string& source) {
     ready_ = true;
     currentFrame_ = -1;
     lastTransferredFrame_ = -1;
+    lastMissedFrame_ = -1;
     demuxSeeks_ = 0;
     primeResult_ = PrimeResult::NotTried;
     
@@ -314,6 +316,12 @@ bool VideoFileInput::open(const std::string& source) {
         std::string tier4Reason;   // non-empty -> the load has failed outright
 
         asyncDecodeQueue_ = std::make_unique<AsyncDecodeQueue>();
+#ifdef HAVE_VAAPI_INTEROP
+        // These frames go to the display through EGL dma-buf import: export
+        // them on the decode thread, never on the render thread (1amfwm7gq3x).
+        // Kept across recovery reopens of the same queue.
+        asyncDecodeQueue_->setDecodeThreadExport(true);
+#endif
         if (asyncDecodeQueue_->open(currentFile_, hwDeviceCtx_,
                                     AsyncDecodeQueue::EXTRA_HW_FRAMES_FULL,
                                     AsyncDecodeQueue::MAX_QUEUE_SIZE)) {
@@ -429,6 +437,7 @@ void VideoFileInput::close() {
     ready_ = false;
     currentFrame_ = -1;
     lastTransferredFrame_ = -1;
+    lastMissedFrame_ = -1;
     frameInfo_ = {};
     
     // NOTE: Don't reset C globals here. In multi-layer scenarios,
@@ -2000,20 +2009,40 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
         // avoid falling through to the synchronous decoder; there is nothing to
         // fall through to now, so wait a fraction of a frame and simply retry on
         // the next vsync - the queue keeps cold-starting in the background
-        // either way.
-        const int waitMs = textureBuffer.isValid() ? 5 : 20;
+        // either way. A retry of the frame that just missed only looks (0 ms):
+        // LayerPlayback asks for it again on every vsync until it is delivered
+        // (1amfwm7jme2), and waiting each time would stall every output.
+        const bool retry = frameNumber == lastMissedFrame_;
+        const int waitMs = asyncwait::waitMs(textureBuffer.isValid(), retry, 20);
         int64_t queuedNumber = -1;
         AVFrame* queuedFrame = asyncDecodeQueue_->getFrame(frameNumber, queuedNumber, waitMs);
+        lastMissedFrame_ = frameNumber;   // cleared below when this very frame lands
 
         if (queuedFrame) {
             // Got frame from queue - transfer to GPU texture
             // Note: vaSyncSurface happens here, but the actual decode already completed in background
-            if (transferHardwareFrameToGPU(queuedFrame, textureBuffer, true)) {  // skipSync: already synced by async queue
+            // The decode thread's export of this frame, if it made one
+            // (1amfwm7gq3x): the import then makes no VA call here. It must be
+            // this frame's own surface; anything else is not used.
+            const ExportedSurface* exported = asyncDecodeQueue_->borrowedExport().get();
+            if (exported && !exported->isFor(queuedFrame)) {
+                if (!loggedExportMismatch_) {
+                    loggedExportMismatch_ = true;
+                    LOG_WARNING << "Async decode: export of surface " << exported->surface()
+                                << " does not belong to frame " << queuedNumber << " of " << currentFile_
+                                << " - exporting on the render thread instead";
+                }
+                exported = nullptr;
+            }
+            if (transferHardwareFrameToGPU(queuedFrame, textureBuffer, true, exported)) {  // skipSync: already synced by async queue
                 // The frame really transferred: getFrame() falls back to the closest
                 // EARLIER queued frame on a miss, so this can be < frameNumber, and the
                 // visible_at gate must not take it for the requested one (869feynrj X1,
                 // 1amfwm7hk6j).
                 lastTransferredFrame_ = queuedNumber;
+                if (queuedNumber == frameNumber) {
+                    lastMissedFrame_ = -1;
+                }
                 return true;
             }
             LOG_WARNING << "Async decode: GPU transfer failed for frame " << frameNumber;
@@ -2054,7 +2083,8 @@ bool VideoFileInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuff
     return false;
 }
 
-bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync) {
+bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFrameBuffer& textureBuffer, bool skipSync,
+                                                const ExportedSurface* exported) {
     if (!hwFrame) {
         LOG_WARNING << "transferHardwareFrameToGPU: hwFrame is NULL";
         return false;
@@ -2084,8 +2114,12 @@ bool VideoFileInput::transferHardwareFrameToGPU(AVFrame* hwFrame, GPUTextureFram
         int width = 0, height = 0;
 
         // Phase 1: Create EGL images (works on any thread)
-        // Skip vaSyncSurface if frame was already synced by the async decode queue
-        if (vaapiInterop_->createEGLImages(hwFrame, width, height, skipSync)) {
+        // Skip vaSyncSurface if frame was already synced by the async decode queue.
+        // From the decode thread's export when there is one: no VA call here (1amfwm7gq3x).
+        const bool imported = exported
+            ? vaapiInterop_->createEGLImagesFromExport(hwFrame, *exported, width, height)
+            : vaapiInterop_->createEGLImages(hwFrame, width, height, skipSync);
+        if (imported) {
             // Phase 2: Try to bind textures (needs GL context)
             if (vaapiInterop_->bindTexturesToImages(texY, texUV)) {
                 // Set up the texture buffer with the imported textures
@@ -2357,6 +2391,7 @@ void VideoFileInput::cleanup() {
     scanComplete_ = false;
     currentFrame_ = -1;
     lastTransferredFrame_ = -1;
+    lastMissedFrame_ = -1;
     useHardwareDecoding_ = false;
     hwDecoderType_ = HardwareDecoder::Type::NONE;
 }

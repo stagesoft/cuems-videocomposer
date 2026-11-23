@@ -20,6 +20,7 @@
  */
 
 #include "HAPVideoInput.h"
+#include "AsyncWaitPolicy.h"
 #include "../../ffcompat.h"
 #include "../utils/CLegacyBridge.h"
 #include "../utils/Logger.h"
@@ -250,6 +251,7 @@ void HAPVideoInput::close() {
     ready_ = false;
     currentFile_.clear();
     currentFrame_ = -1;
+    lastMissedFrame_ = -1;
 }
 
 bool HAPVideoInput::isReady() const {
@@ -565,11 +567,15 @@ bool HAPVideoInput::readFrameToTexture(int64_t frameNumber, GPUTextureFrameBuffe
     // the GPU upload here on the render thread.
     if (useAsyncHapDecode_ && asyncHapDecoder_) {
         asyncHapDecoder_->setTargetFrame(frameNumber);
-        int waitMs = textureBuffer.isValid() ? 5 : 200;
+        // A retry of the frame that just missed only looks (1amfwm7jme2: LayerPlayback asks again on every vsync
+        // until the frame is delivered; a wait each time would stall every output).
+        const int waitMs = asyncwait::waitMs(textureBuffer.isValid(), frameNumber == lastMissedFrame_, 200);
         const HapDecodedFrame* qf = asyncHapDecoder_->getFrame(frameNumber, waitMs);
+        lastMissedFrame_ = frameNumber;   // cleared below when this very frame lands
         if (qf) {
             if (uploadHapFrameToTexture(*qf, textureBuffer)) {
                 currentFrame_ = frameNumber;
+                lastMissedFrame_ = -1;
                 return true;
             }
             LOG_WARNING << "HAPVideoInput: [HAP-DECODE] GPU upload failed frame=" << frameNumber;
@@ -987,6 +993,7 @@ void HAPVideoInput::cleanup() {
     lastDecodedFrameNo_ = -1;
     scanComplete_ = false;
     currentFrame_ = -1;
+    lastMissedFrame_ = -1;
     
 #ifdef ENABLE_HAP_DIRECT
     fallbackWarningShown_ = false;
